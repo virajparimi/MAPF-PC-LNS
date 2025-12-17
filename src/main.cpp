@@ -4,6 +4,8 @@
 #include "plog/Formatters/TxtFormatter.h"
 #include "plog/Initializers/ConsoleInitializer.h"
 
+#include <chrono>
+#include <limits>
 #include <boost/program_options.hpp>
 #include "common.hpp"
 #include "costchecker.hpp"
@@ -37,7 +39,8 @@ int main(int argc, char** argv) {
                      "Maximum number of iterations");
   desc.add_options()("severity,d", po::value<int>()->default_value(0),
                      "Debugging level");
-  desc.add_options()("initialSolution,s", po::value<string>(),
+  desc.add_options()("initialSolution,s",
+                     po::value<string>()->default_value("greedy"),
                      "Strategy for the initial solution");
   desc.add_options()(
       "destroyHeuristic,h", po::value<string>()->default_value("conflict"),
@@ -45,31 +48,50 @@ int main(int argc, char** argv) {
   desc.add_options()("acceptanceCriteria,c",
                      po::value<string>()->default_value("SA"),
                      "Acceptance criteria for new solutions");
-  desc.add_options()("genReport,g", po::value<bool>()->default_value(false),
+  desc.add_options()("genReport,g", po::bool_switch()->default_value(false),
                      "Whether to generate the report file that can be fed to "
                      "CBS-PC for verification");
+  desc.add_options()("seed",
+                     po::value<unsigned int>()->default_value(0),
+                     "Random seed (0 = time-based)");
   desc.add_options()("regretType,r",
                      po::value<string>()->default_value("absolute"),
                      "Type of regret metric to use i.e relative or absolute");
 
   po::variables_map vm;
-  po::store(po::parse_command_line(argc, argv, desc), vm);
+  try {
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+  } catch (const std::exception& e) {
+    PLOGE << e.what() << "\n" << desc << endl;
+    return 1;
+  }
 
   if (vm.count("help") != 0u) {
     plog::get()->setMaxSeverity(plog::debug);
     PLOGD << desc << endl;
-    return 1;
+    return 0;
   }
 
-  po::notify(vm);
-  plog::get()->setMaxSeverity(
-      static_cast<plog::Severity>(vm["severity"].as<int>()));
+  try {
+    po::notify(vm);
+  } catch (const std::exception& e) {
+    PLOGE << e.what() << "\n" << desc << endl;
+    return 1;
+  }
+  int severity = vm["severity"].as<int>();
+  if (severity < (int)plog::none) {
+    severity = (int)plog::none;
+  } else if (severity > (int)plog::verbose) {
+    severity = (int)plog::verbose;
+  }
+  plog::get()->setMaxSeverity(static_cast<plog::Severity>(severity));
 
   string initialSolutionStrategy = vm["initialSolution"].as<string>();
   if (initialSolutionStrategy != "greedy" &&
+      initialSolutionStrategy != "greedy_precedence_only" &&
       initialSolutionStrategy.find("sota") == string::npos) {
     PLOGE << "Incorrect initial solution strategy provided. Please choose from "
-             "'greedy', 'sota_cbs' or 'sota_pbs' options"
+             "'greedy', 'greedy_precedence_only', 'sota_cbs' or 'sota_pbs' options"
           << endl;
     return 1;
   }
@@ -100,11 +122,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Need to store the seed for debugging
-  auto srandSeed = (int)time(nullptr);
-  std::cout << "srandSeed = " << srandSeed << std::endl;
-  // srandSeed = 1701295952;
-  srand(srandSeed);
+  // Need to store the seed for debugging.
+  unsigned int seed = vm["seed"].as<unsigned int>();
+  if (seed == 0) {
+    seed = (unsigned int)std::chrono::high_resolution_clock::now()
+               .time_since_epoch()
+               .count();
+  }
+  std::cout << "seed = " << seed << std::endl;
+  srand(seed);
 
   Instance instance(vm["map"].as<string>(), vm["agents"].as<string>(),
                     vm["agentNum"].as<int>(), vm["taskNum"].as<int>());
@@ -117,11 +143,11 @@ int main(int argc, char** argv) {
   }
   for (int i = 0; i < instance.getTasksNum(); i++) {
     pair<int, int> location =
-        instance.getCoordinate(instance.getTaskLocations()[i]);
+        instance.getCoordinate(instance.getTaskLocations(i));
     PLOGD << "Task " << i << " starts at :(" << location.first << ", "
           << location.second << ")\n";
   }
-  for (pair<int, vector<int>> dependencies : instance.getTaskDependencies()) {
+  for (const auto& dependencies : instance.getTaskDependencies()) {
     PLOGD << "Task  " << dependencies.first
           << " has the following dependent tasks\n";
     for (int task : dependencies.second) {
@@ -132,7 +158,7 @@ int main(int argc, char** argv) {
   LNSParams parameters(vm["neighborSize"].as<int>(),
                        vm["cutoffTime"].as<double>(), 100, 0.99975, 1.00025, 5,
                        9, 3, 0.75, 0.25, initialSolutionStrategy,
-                       destroyHeuristic, acceptanceCriteria, regretType);
+                       destroyHeuristic, acceptanceCriteria, regretType, seed);
   LNS lnsInstance = LNS(vm["maxIterations"].as<int>(), instance, parameters);
   bool success = lnsInstance.run();
 
@@ -176,23 +202,29 @@ int main(int argc, char** argv) {
       counter++;
     }
   } else {
-    firstFeasibleSolutionTime = INT_MAX;
+    firstFeasibleSolutionTime = std::numeric_limits<double>::infinity();
   }
 
   // Compute the results from ALNS
   if (destroyHeuristic == "alns") {
     ALNS adaptiveLNS = lnsInstance.getAdaptiveLNS();
-    vector<int> destroyHeuristicFrequency((int)sizeof(DestroyHeuristic), 0);
+    constexpr int kNumDestroyHeuristics =
+        (int)DestroyHeuristic::shawRemoval + 1;
+    vector<int> destroyHeuristicFrequency(kNumDestroyHeuristics, 0);
     std::cout << "Size of destroy heuristic history -> "
               << adaptiveLNS.destroyHeuristicHistory.size() << std::endl;
     for (int destroyHeuristicUsed : adaptiveLNS.destroyHeuristicHistory) {
-      destroyHeuristicFrequency[destroyHeuristicUsed] += 1;
+      if (destroyHeuristicUsed >= 0 &&
+          destroyHeuristicUsed < kNumDestroyHeuristics) {
+        destroyHeuristicFrequency[destroyHeuristicUsed] += 1;
+      }
     }
     std::cout << "Adaptive LNS performance: \n\t";
-    for (int i = 0; i < (int)sizeof(DestroyHeuristic); i++) {
-      double averageUsed = (double)destroyHeuristicFrequency[i] /
-                           (int)adaptiveLNS.destroyHeuristicHistory.size();
-      switch (i) {
+    if (!adaptiveLNS.destroyHeuristicHistory.empty()) {
+      for (int i = 0; i < kNumDestroyHeuristics; i++) {
+        double averageUsed = (double)destroyHeuristicFrequency[i] /
+                             (int)adaptiveLNS.destroyHeuristicHistory.size();
+        switch ((DestroyHeuristic)i) {
         case DestroyHeuristic::randomRemoval:
           std::cout << "Random Removal: " << averageUsed << "\n\t";
           break;
@@ -207,6 +239,7 @@ int main(int argc, char** argv) {
           break;
         default:
           break;
+        }
       }
     }
   }
@@ -237,4 +270,5 @@ int main(int argc, char** argv) {
             << "\n\tSolution Cost = " << anytimeSolution.sumOfCosts
             << "\n\tNumber of failures = " << lnsInstance.numOfFailures
             << "\n\tSuccess = " << success << endl;
+  return 0;
 }

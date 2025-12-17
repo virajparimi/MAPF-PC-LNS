@@ -1,21 +1,30 @@
 #include "utils.hpp"
+#include <climits>
+#include <cmath>
 
 void greedyTaskAssignment(const Instance* instance, Solution* solution) {
+  assert(instance != nullptr);
+  assert(solution != nullptr);
+
+  const int numAgents = instance->getAgentNum();
+  const int numTasks = instance->getTasksNum();
+  const auto taskDependencies = instance->getTaskDependencies();
+
   ppqg q;
-  vector<int> agentLastTimesteps(instance->getAgentNum(), 0);
+  vector<int> agentLastTimesteps(numAgents, 0);
   vector<int> agentLastLocations = instance->getStartLocations();
-  vector<int> taskCompleteTimesteps(instance->getTasksNum(), -1);
+  vector<int> taskCompleteTimesteps(numTasks, -1);
 
   // We first compute the heuristic value for all the tasks irrespective of the agents
   unique_ptr<SingleAgentSolver> searchEngine =
       make_unique<MultiLabelSpaceTimeAStar>((*instance), 0);
 
-  for (int agent = 0; agent < instance->getAgentNum(); agent++) {
+  for (int agent = 0; agent < numAgents; agent++) {
     q.emplace(0, agent);  // (key, value) - (timestep, agent)
   }
 
   int taskCounter = 0;
-  while (taskCounter < instance->getTasksNum()) {
+  while (taskCounter < numTasks) {
     int timestep, agent;
     tie(timestep, agent) = q.top();
 
@@ -25,7 +34,7 @@ void greedyTaskAssignment(const Instance* instance, Solution* solution) {
     q.pop();
 
     int bestTaskToService = -1, bestTaskToServiceTimestep = INT_MAX;
-    for (int task = 0; task < instance->getTasksNum(); task++) {
+    for (int task = 0; task < numTasks; task++) {
       if (taskCompleteTimesteps[task] != -1) {  // Task has been assigned before
         continue;
       }
@@ -33,13 +42,14 @@ void greedyTaskAssignment(const Instance* instance, Solution* solution) {
       bool taskReady = true;
       // The time this agent can service this task and estimated cost of completing that
       // task from the agent's location
-      int taskTimestep = agentLastTimesteps[agent] +
-                         searchEngine->heuristic[task][lastLocationOfAgent];
+      int taskTimestep =
+          agentLastTimesteps[agent] +
+          (*searchEngine->heuristic[task])[lastLocationOfAgent];
 
       // Check for temporal dependencies
-      map<int, vector<int>> taskDependencies = instance->getTaskDependencies();
-      if (taskDependencies.find(task) != taskDependencies.end()) {
-        for (int dependentTask : taskDependencies[task]) {
+      const auto depsIt = taskDependencies.find(task);
+      if (depsIt != taskDependencies.end()) {
+        for (int dependentTask : depsIt->second) {
           if (taskCompleteTimesteps[dependentTask] < 0) {
             // The dependent tasks need to be completed before this task can be serviced
             taskReady = false;
@@ -56,19 +66,23 @@ void greedyTaskAssignment(const Instance* instance, Solution* solution) {
       }
     }
 
-    // Assign the best task found to the agent
-    if (bestTaskToService != -1) {
-      PLOGD << "Assign task " << bestTaskToService << " to agent " << agent
-            << " with distance "
-            << searchEngine->heuristic[bestTaskToService][lastLocationOfAgent]
-            << endl;
-      solution->assignTaskToAgent(agent, bestTaskToService);
-      agentLastTimesteps[agent] = bestTaskToServiceTimestep;
-      taskCompleteTimesteps[bestTaskToService] = bestTaskToServiceTimestep;
-      agentLastLocations[agent] =
-          instance->getTaskLocations()[bestTaskToService];
-      taskCounter++;
+    if (bestTaskToService == -1) {
+      PLOGE << "greedyTaskAssignment: no feasible task found (cycle or invalid "
+               "dependencies?)\n";
+      assert(false);
+      return;
     }
+
+    // Assign the best task found to the agent
+    PLOGD << "Assign task " << bestTaskToService << " to agent " << agent
+          << " with distance "
+          << (*searchEngine->heuristic[bestTaskToService])[lastLocationOfAgent]
+          << endl;
+    solution->assignTaskToAgent(agent, bestTaskToService);
+    agentLastTimesteps[agent] = bestTaskToServiceTimestep;
+    taskCompleteTimesteps[bestTaskToService] = bestTaskToServiceTimestep;
+    agentLastLocations[agent] = instance->getTaskLocations(bestTaskToService);
+    taskCounter++;
 
     q.emplace(agentLastTimesteps[agent], agent);
   }
@@ -77,18 +91,33 @@ void greedyTaskAssignment(const Instance* instance, Solution* solution) {
 bool topologicalSort(const Instance* instance,
                      vector<pair<int, int>>* precedenceConstraints,
                      vector<int>& planningOrder) {
+  assert(precedenceConstraints != nullptr);
+  return topologicalSort(instance, *precedenceConstraints, planningOrder);
+}
+
+bool topologicalSort(const Instance* instance,
+                     const vector<pair<int, int>>& precedenceConstraints,
+                     vector<int>& planningOrder) {
+  assert(instance != nullptr);
+  const int numTasks = instance->getTasksNum();
+
   planningOrder.clear();
-  vector<bool> closed(instance->getTasksNum(), false);
-  vector<bool> expanded(instance->getTasksNum(), false);
+  planningOrder.reserve(numTasks);
+  vector<bool> closed(numTasks, false);
+  vector<bool> expanded(numTasks, false);
 
   vector<vector<int>> successors;
-  successors.resize(instance->getTasksNum());
-  for (pair<int, int> precedenceConstraint : (*precedenceConstraints)) {
+  successors.resize(numTasks);
+  for (const auto& precedenceConstraint : precedenceConstraints) {
+    assert(precedenceConstraint.first >= 0 &&
+           precedenceConstraint.first < numTasks);
+    assert(precedenceConstraint.second >= 0 &&
+           precedenceConstraint.second < numTasks);
     successors[precedenceConstraint.first].push_back(
         precedenceConstraint.second);
   }
 
-  for (int task = 0; task < instance->getTasksNum(); task++) {
+  for (int task = 0; task < numTasks; task++) {
     if (closed[task]) {
       continue;
     }
@@ -125,18 +154,18 @@ bool topologicalSort(const Instance* instance,
 
   reverse(planningOrder.begin(), planningOrder.end());
 
-  unordered_set<int> tasksOrder;
+  vector<bool> tasksOrder(numTasks, false);
   for (int task : planningOrder) {
     for (int dependentTask : successors[task]) {
-      if (tasksOrder.find(dependentTask) != tasksOrder.end()) {
+      if (tasksOrder[dependentTask]) {
         PLOGE << "The topological sort violated a precedence constraint\n";
         return false;
       }
     }
-    tasksOrder.insert(task);
+    tasksOrder[task] = true;
   }
 
-  assert((int)planningOrder.size() == instance->getTasksNum());
+  assert((int)planningOrder.size() == numTasks);
   return true;
 }
 
@@ -155,7 +184,7 @@ bool isSamePath(const Path& p1, const Path& p2) {
 set<Conflicts> extractNConflicts(int size, const set<Conflicts>& conflicts) {
   int i = 0;
   set<Conflicts> result;
-  for (Conflicts conflict : conflicts) {
+  for (const auto& conflict : conflicts) {
     if (i >= size) {
       break;
     }
@@ -170,8 +199,9 @@ double MovingMetrics::computeMovingMetrics(int numberOfConflicts,
 
   // Compute the utility of this solution
   // Compute the new sample
-  int numConflictsSquare = pow(numberOfConflicts, 2),
-      numCostSquare = pow(sumOfCosts, 2);
+  const double numConflictsSquare =
+      (double)numberOfConflicts * (double)numberOfConflicts;
+  const double numCostSquare = (double)sumOfCosts * (double)sumOfCosts;
   // Extract the oldest sample
   double oldestNumConflicts = conflictNum[oldestValue],
          oldestNumConflictsSquare = conflictSquareNum[oldestValue],
@@ -195,22 +225,31 @@ double MovingMetrics::computeMovingMetrics(int numberOfConflicts,
   sumOfNumCostsSquare += numCostSquare - oldestNumCostSquare;
 
   // Compute the moving average and variance of the number of conflicts and sum of costs variables
-  double movingNumConflictAverage = sumOfNumConflicts / size,
-         movingNumConflictVar =
-             (size * sumOfNumConflictsSquare - (pow(sumOfNumConflicts, 2))) /
-             (size * (size - 1));
-  double movingNumCostAverage = sumOfNumCosts / size,
-         movingNumCostVar =
-             (size * sumOfNumCostsSquare - (pow(sumOfNumCosts, 2))) /
-             (size * (size - 1));
+  assert(size > 0);
+  const double windowSize = (double)size;
+  const double movingNumConflictAverage = sumOfNumConflicts / windowSize;
+  const double movingNumCostAverage = sumOfNumCosts / windowSize;
+
+  double movingNumConflictVar = 0.0;
+  double movingNumCostVar = 0.0;
+  if (size > 1) {
+    movingNumConflictVar =
+        (windowSize * sumOfNumConflictsSquare - (sumOfNumConflicts * sumOfNumConflicts)) /
+        (windowSize * (windowSize - 1.0));
+    movingNumCostVar =
+        (windowSize * sumOfNumCostsSquare - (sumOfNumCosts * sumOfNumCosts)) /
+        (windowSize * (windowSize - 1.0));
+    movingNumConflictVar = max(0.0, movingNumConflictVar);
+    movingNumCostVar = max(0.0, movingNumCostVar);
+  }
 
   PLOGD << "Moving average of conflicts = " << movingNumConflictAverage
         << ", Moving average of costs = " << movingNumCostAverage << "\n";
 
   double utility =
       lnsConflictWeight * ((numberOfConflicts - movingNumConflictAverage) /
-                           sqrt(movingNumConflictVar + 1)) +
+                           std::sqrt(movingNumConflictVar + 1)) +
       lnsCostWeight *
-          ((sumOfCosts - movingNumCostAverage) / sqrt(movingNumCostVar + 1));
+          ((sumOfCosts - movingNumCostAverage) / std::sqrt(movingNumCostVar + 1));
   return utility;
 }

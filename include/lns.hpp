@@ -3,6 +3,7 @@
 #include <plog/Log.h>
 #include <limits>
 #include <numeric>
+#include <random>
 #include <utility>
 #include "common.hpp"
 #include "constrainttable.hpp"
@@ -409,6 +410,7 @@ struct LNSParams {
       lnsCostWeight;
   string initialSolutionStrategy, destroyHeuristic, acceptanceCriteria,
       regretType;
+  unsigned int seed = 0;
 
   LNSParams(int neighborhoodSize, double timeLimit, double temperature,
             double coolingCoefficient, double heatingCoefficient,
@@ -416,7 +418,7 @@ struct LNSParams {
             double shawTemporalWeight, double lnsConflictWeight,
             double lnsCostWeight, string initialSolutionStrategy,
             string destroyHeuristic, string acceptanceCriteria,
-            string regretType)
+            string regretType, unsigned int seed)
       : neighborhoodSize(neighborhoodSize),
         timeLimit(timeLimit),
         temperature(temperature),
@@ -430,7 +432,8 @@ struct LNSParams {
         initialSolutionStrategy(std::move(initialSolutionStrategy)),
         destroyHeuristic(std::move(destroyHeuristic)),
         acceptanceCriteria(std::move(acceptanceCriteria)),
-        regretType(std::move(regretType)) {}
+        regretType(std::move(regretType)),
+        seed(seed) {}
 };
 
 class LNS {
@@ -442,6 +445,8 @@ class LNS {
   int neighborSize_;
   Neighbor lnsNeighborhood_;
   const Instance& instance_;
+  unsigned int seed_ = 0;
+  std::mt19937 rng_;
   vector<AgentTaskPath> initialPaths_;
   FeasibleSolution incumbentSolution_;
   Solution solution_, previousSolution_;
@@ -467,6 +472,8 @@ class LNS {
   bool run();
 
   bool buildGreedySolution();
+  // Precedence-feasible initial solution that ignores inter-agent collisions.
+  bool buildGreedySolutionPrecedenceOnly();
   bool buildGreedySolutionWithMAPFPC(const string& variant);
 
   void prepareNextIteration();

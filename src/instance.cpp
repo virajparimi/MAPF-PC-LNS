@@ -1,5 +1,4 @@
 #include "instance.hpp"
-#include <boost/token_functions.hpp>
 #include <boost/tokenizer.hpp>
 #include <fstream>
 #include <sstream>
@@ -64,26 +63,28 @@ bool Instance::loadKivaMap() {
   getline(file, line);  // Maximum time
 
   // Initialize the agent start locations
-  int agentNum = 0, endPointNum = 0;
+  int agentNum = 0;
   startLocations_.resize(numOfAgents_);
 
   mapSize = numOfCols * numOfRows;
   map_.resize(mapSize);
   for (int i = 1; i < numOfRows - 1; i++) {
     getline(file, line);
+    assert((int)line.size() >= numOfCols - 2);
     for (int j = 1; j < numOfCols - 1; j++) {
-      map_[linearizeCoordinate(i, j)] = (line[j - 1] == '@');
-      if (line[j] == 'r') {
+      const char cell = line[j - 1];
+      map_[linearizeCoordinate(i, j)] = (cell == '@');
+      if (cell == 'r') {
         // This is a robot spawn location
+        assert(agentNum < numOfAgents_);
         startLocations_[agentNum] = linearizeCoordinate(i, j);
         assert(!isObstacle(startLocations_[agentNum]));
         agentNum++;
       }
-      if (line[j] == 'e') {
+      if (cell == 'e') {
         // This is a task spawn location
         endPoints_.push_back(linearizeCoordinate(i, j));
-        assert(!isObstacle(endPoints_[endPointNum]));
-        endPointNum++;
+        assert(!isObstacle(endPoints_.back()));
       }
     }
   }
@@ -113,10 +114,13 @@ bool Instance::loadKivaTasks() {
 
   string line;
   int taskNum;
-  stringstream stringLine;
-  getline(file, line);
-  stringLine << line;
-  stringLine >> taskNum;
+  if (!getline(file, line)) {
+    return false;
+  }
+  {
+    std::istringstream stringLine(line);
+    stringLine >> taskNum;
+  }
 
   assert(taskNum * 2 == numOfTasks_);
   // Initialize the task locations
@@ -124,12 +128,19 @@ bool Instance::loadKivaTasks() {
   vector<pair<int, int>> temporalDependencies;
 
   for (int i = 0; i < numOfTasks_; i += 2) {
+    assert(!endPoints_.empty());
     int releaseTime, startTask, goalTask, timeOfStartTask, timeOfGoalTask;
-    getline(file, line);
-    stringLine.clear();
-    stringLine << line;
-    stringLine >> releaseTime >> startTask >> goalTask >> timeOfStartTask >>
-        timeOfGoalTask;
+    if (!getline(file, line)) {
+      return false;
+    }
+    std::istringstream stringLine(line);
+    if (!(stringLine >> releaseTime >> startTask >> goalTask >>
+          timeOfStartTask >> timeOfGoalTask)) {
+      return false;
+    }
+    (void)releaseTime;
+    (void)timeOfStartTask;
+    (void)timeOfGoalTask;
 
     startTask %= (int)endPoints_.size();
     goalTask %= (int)endPoints_.size();
@@ -176,7 +187,9 @@ bool Instance::loadMap() {
   string line;
   tokenizer<char_separator<char>>::iterator begin;
 
-  getline(file, line);
+  if (!getline(file, line) || line.empty()) {
+    return false;
+  }
 
   if (line[0] == 't') {
     // Original MAPF benchmarks
@@ -206,6 +219,7 @@ bool Instance::loadMap() {
   map_.resize(mapSize, false);
   for (int i = 0; i < numOfRows; i++) {
     getline(file, line);
+    assert((int)line.size() >= numOfCols);
     for (int j = 0; j < numOfCols; j++) {
       map_[linearizeCoordinate(i, j)] = (line[j] != '.');
     }
@@ -227,7 +241,9 @@ bool Instance::loadAgentsAndTasks() {
   char_separator<char> sep(",");
   tokenizer<char_separator<char>>::iterator begin;
 
-  getline(file, line);
+  if (!getline(file, line)) {
+    return false;
+  }
   if (numOfAgents_ != atoi(line.c_str())) {
     PLOGE << "The number of robots passed in command line and the agent file "
              "do not match.\n";
@@ -248,7 +264,9 @@ bool Instance::loadAgentsAndTasks() {
   startLocations_.resize(numOfAgents_);
 
   for (int i = 0; i < numOfAgents_; i++) {
-    getline(file, line);
+    if (!getline(file, line)) {
+      return false;
+    }
     tokenizer<char_separator<char>> tokenizer(line, sep);
     begin = tokenizer.begin();
     int col = atoi((*begin).c_str());
@@ -258,12 +276,23 @@ bool Instance::loadAgentsAndTasks() {
     assert(!isObstacle(startLocations_[i]));
   }
 
-  // Skipping the extra white lines
-  while (!file.eof() && line[0] != 't') {
-    getline(file, line);
+  auto skipUntilSection = [&file](string& l) {
+    while (getline(file, l)) {
+      if (!l.empty() && l[0] == 't') {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Skipping the extra white lines / header lines
+  if (!skipUntilSection(line)) {
+    return false;
   }
 
-  getline(file, line);
+  if (!getline(file, line)) {
+    return false;
+  }
   if (numOfTasks_ != atoi(line.c_str())) {
     PLOGE << "The number of tasks passed in the command line and the agent "
              "file do not match.\n";
@@ -274,7 +303,9 @@ bool Instance::loadAgentsAndTasks() {
   taskLocations_.resize(numOfTasks_);
 
   for (int i = 0; i < numOfTasks_; i++) {
-    getline(file, line);
+    if (!getline(file, line)) {
+      return false;
+    }
     tokenizer<char_separator<char>> tokenizer(line, sep);
     begin = tokenizer.begin();
     int col = atoi((*begin).c_str());
@@ -284,17 +315,21 @@ bool Instance::loadAgentsAndTasks() {
     assert(!isObstacle(taskLocations_[i]));
   }
 
-  // Skipping the extra white lines
-  while (!file.eof() && line[0] != 't') {
-    getline(file, line);
+  // Skipping the extra white lines / header lines
+  if (!skipUntilSection(line)) {
+    return false;
   }
 
-  getline(file, line);
+  if (!getline(file, line)) {
+    return false;
+  }
   int numDependencies = atoi(line.c_str());
   vector<pair<int, int>> temporalDependencies;
 
   for (int i = 0; i < numDependencies; i++) {
-    getline(file, line);
+    if (!getline(file, line)) {
+      return false;
+    }
     tokenizer<char_separator<char>> tokenizer(line, sep);
     begin = tokenizer.begin();
     int predecessor = atoi((*begin).c_str());

@@ -38,6 +38,8 @@ class Instance {
            int numOfAgents = 0, int numOfTasks = 0);
 
   inline int getTaskLocations(int task) const { return taskLocations_[task]; }
+  // Prefer ref-returning accessors in performance-sensitive code.
+  inline const vector<int>& getTaskLocationsRef() const { return taskLocations_; }
   vector<int> getTaskLocations(vector<int> tasks) const {
     vector<int> taskLocs(tasks.size(), 0);
     for (int i = 0; i < (int)tasks.size(); i++) {
@@ -46,7 +48,12 @@ class Instance {
     return taskLocs;
   }
   vector<vector<int>> getHeuristics() { return heuristics_; }
+  inline const vector<vector<int>>& getHeuristicsRef() const { return heuristics_; }
   vector<int> getHeuristics(int globalTask) {
+    assert(globalTask < numOfTasks_);
+    return heuristics_[globalTask];
+  }
+  inline const vector<int>& getHeuristicsRef(int globalTask) const {
     assert(globalTask < numOfTasks_);
     return heuristics_[globalTask];
   }
@@ -70,6 +77,7 @@ class Instance {
   inline int getAgentNum() const { return numOfAgents_; }
   inline int getTasksNum() const { return numOfTasks_; }
   inline vector<int> getTaskLocations() const { return taskLocations_; }
+  inline const vector<int>& getStartLocationsRef() const { return startLocations_; }
   inline vector<int> getStartLocations() const { return startLocations_; }
   inline map<int, vector<int>> getTaskDependencies() const {
     return taskDependencies_;

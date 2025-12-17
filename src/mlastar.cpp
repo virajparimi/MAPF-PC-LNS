@@ -74,11 +74,11 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
     holdingTime = constraintTable.getHoldingTime();
   }
 
-  // getHeuristic(stage, location)
+  // Use the precomputed grid heuristic (exact shortest-path distances) rather
+  // than Manhattan distance to improve pruning while remaining admissible.
   auto* start = new MultiLabelAStarNode(
       nullptr, location, 0,
-      max(computeHeuristic(location, goalLocations[stage]),
-          holdingTime - startTime),
+      max((*heuristic[stage])[location], holdingTime - startTime),
       startTime, 0, stage);
 
   // Ensure that the constraint table is built before we call this
@@ -129,23 +129,25 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
       }
 
       // Setting the stage
-      unsigned int stage = current->stage;
+      const unsigned int currentStage = current->stage;
 
       int successorGVal = current->gVal + 1;
       // getHeuristic(stage, successor)
-      int successorHVal = max(computeHeuristic(successor, goalLocations[stage]),
+      int successorHVal = max((*heuristic[currentStage])[successor],
                               holdingTime - nextTimestep);
       int successorInternalConflicts = current->numOfConflicts;
       auto* next = new MultiLabelAStarNode(current, successor, successorGVal,
                                            successorHVal, nextTimestep,
-                                           successorInternalConflicts, stage);
+                                           successorInternalConflicts,
+                                           currentStage);
       next->secondaryKeys.push_back(-successorGVal);
-      next->distanceToNext = heuristic[stage][successor];
+      next->distanceToNext = (*heuristic[currentStage])[successor];
 
       if (next->stage == goalLocations.size() - 1 &&
           successor == goalLocations.back() &&
           current->location == goalLocations.back()) {
         next->waitAtGoal = true;
+        next->refreshTieBreaker();
       }
 
       // Try to retrieve it from the hash table
@@ -210,7 +212,7 @@ void MultiLabelSpaceTimeAStar::printSearchTree() {
   }
   std::sort(allNodesSorted.begin(), allNodesSorted.end(),
             [](const MultiLabelAStarNode& lhs, const MultiLabelAStarNode& rhs) {
-              return lhs.timestep <= rhs.timestep;
+              return lhs.timestep < rhs.timestep;
             });
   for (const auto& node : allNodesSorted) {
     std::cout << "Location: " << node.location << ", Position: ("

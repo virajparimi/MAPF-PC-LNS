@@ -1,6 +1,7 @@
 #pragma once
 
 #include <plog/Log.h>
+#include <cstdint>
 #include "common.hpp"
 #include "constrainttable.hpp"
 #include "instance.hpp"
@@ -16,12 +17,35 @@ class LLNode {
   int location{}, gVal{}, hVal = 0, timestep = 0, numOfConflicts = 0;
   bool inOpenlist = false, waitAtGoal = false;
   unsigned int stage = 0, distanceToNext = 0;
+  uint64_t tieBreaker = 0;
+
+  static inline uint64_t mix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+  }
+
+  void refreshTieBreaker() {
+    // Deterministic pseudo-random tie-breaker derived from the node's identity.
+    // This avoids using randomness inside heap comparators (which breaks strict
+    // weak ordering), while still providing a "random-looking" ordering.
+    uint64_t x = 0;
+    x ^= (uint64_t)(uint32_t)location;
+    x ^= (uint64_t)(uint32_t)timestep << 32;
+    x ^= (uint64_t)stage * 0x632BE59BD9B4E019ULL;
+    x ^= waitAtGoal ? 0xD1B54A32D192ED03ULL : 0;
+    tieBreaker = mix64(x);
+  }
 
   struct OpenCompareNode {
     bool operator()(const LLNode* lhs, const LLNode* rhs) const {
       if (lhs->gVal + lhs->hVal == rhs->gVal + rhs->hVal) {
         if (lhs->hVal == rhs->hVal) {
-          return rand() % 2 == 0;
+          if (lhs->tieBreaker == rhs->tieBreaker) {
+            return false;
+          }
+          return lhs->tieBreaker >= rhs->tieBreaker;
         }
         return lhs->hVal >= rhs->hVal;
       }
@@ -41,7 +65,10 @@ class LLNode {
       if (lhs->numOfConflicts == rhs->numOfConflicts) {
         if (lhs->gVal + lhs->hVal == rhs->gVal + rhs->hVal) {
           if (lhs->hVal == rhs->hVal) {
-            return rand() % 2 == 0;
+            if (lhs->tieBreaker == rhs->tieBreaker) {
+              return false;
+            }
+            return lhs->tieBreaker >= rhs->tieBreaker;
           }
           return lhs->hVal >= rhs->hVal;
         }
@@ -51,7 +78,7 @@ class LLNode {
     }
   };
 
-  LLNode() = default;
+  LLNode() { refreshTieBreaker(); }
   LLNode(LLNode* parent, int location, int gVal, int hVal, int timestep,
          int numOfConflicts, unsigned int stage)
       : parent(parent),
@@ -60,7 +87,9 @@ class LLNode {
         hVal(hVal),
         timestep(timestep),
         numOfConflicts(numOfConflicts),
-        stage(stage) {}
+        stage(stage) {
+    refreshTieBreaker();
+  }
   LLNode(const LLNode& old) { copy(old); }
 
   inline double getFVal() const { return gVal + hVal; }
@@ -73,6 +102,9 @@ class LLNode {
     timestep = old.timestep;
     numOfConflicts = old.numOfConflicts;
     waitAtGoal = old.waitAtGoal;
+    stage = old.stage;
+    distanceToNext = old.distanceToNext;
+    tieBreaker = old.tieBreaker;
   }
 };
 
@@ -86,11 +118,13 @@ class SingleAgentSolver {
   vector<int> goalLocations;
   vector<int> heuristicLandmarks;
 
-  vector<vector<int>> heuristic;
+  // For each stage, points to the precomputed heuristic vector for that global task.
+  // Owned by Instance; valid for the lifetime of `instance`.
+  vector<const vector<int>*> heuristic;
 
   void computeHeuristics();
   int getHeuristic(int stage, int location) const {
-    return heuristic[stage][location] + heuristicLandmarks[stage];
+    return (*heuristic[stage])[location] + heuristicLandmarks[stage];
   }
   int computeHeuristic(int from, int to) const {
     return instance.getManhattanDistance(from, to);
@@ -100,11 +134,11 @@ class SingleAgentSolver {
   }
 
   int getGlobalTaskFromLocation(int taskLocation) const {
-    vector<int> taskLocations = instance.getTaskLocations();
+    const vector<int>& taskLocations = instance.taskLocations_;
     auto it =
         std::find(taskLocations.begin(), taskLocations.end(), taskLocation);
     assert(it != taskLocations.end());
-    return it - taskLocations.begin();
+    return (int)(it - taskLocations.begin());
   }
 
   virtual string getName() const = 0;

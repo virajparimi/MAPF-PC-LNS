@@ -1,68 +1,102 @@
 #include "costchecker.hpp"
+#include <chrono>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <ctime>
 #include <iomanip>
+#include "lns.hpp"
 
-using namespace std;
+namespace {
+std::tm localtimeSafe(std::time_t timeValue) {
+  std::tm tmValue{};
+#if defined(_WIN32)
+  localtime_s(&tmValue, &timeValue);
+#else
+  localtime_r(&timeValue, &tmValue);
+#endif
+  return tmValue;
+}
+}  // namespace
 
 void SaveToTxt::printStart() {
-  cout << "Loading task assignment, locations and precedence constraint data"
-       << endl;
+  std::cout
+      << "Loading task assignment, locations and precedence constraint data"
+      << std::endl;
 }
 
 void SaveToTxt::fileSave() {
-  cout << "File is saved!" << endl;
-  cout << "Name of file: " << this->outputFile << endl;
+  if (outputFile.empty()) {
+    std::cout << "No report was generated." << std::endl;
+    return;
+  }
+  std::cout << "File is saved!" << std::endl;
+  std::cout << "Name of file: " << outputFile << std::endl;
 }
 
 void SaveToTxt::runData(const Instance* inst, const Solution* sol) {
-  // Open file
-  auto now = std::chrono::system_clock::now();
+  assert(inst != nullptr);
+  assert(sol != nullptr);
 
-  auto inTimeT = std::chrono::system_clock::to_time_t(now);
+  // Open file
+  const auto now = std::chrono::system_clock::now();
+  const std::time_t inTimeT = std::chrono::system_clock::to_time_t(now);
+  const std::tm tmValue = localtimeSafe(inTimeT);
+
   std::stringstream datetime;
-  datetime << put_time(std::localtime(&inTimeT), "%Y-%m-%d-%X");
-  // DateTime
-  string fileName = "report_" + datetime.str() + ".txt";
+  // Avoid ':' in filenames (makes shell escaping unnecessary).
+  datetime << std::put_time(&tmValue, "%Y-%m-%d_%H-%M-%S");
+
+  const std::string fileName = "report_" + datetime.str() + ".txt";
   std::ofstream myFile(fileName);
-  this->outputFile = fileName;
+  outputFile.clear();
 
   if (myFile.is_open()) {
+    outputFile = fileName;
     // Get number of agents
-    int agentNum = inst->getAgentNum();
-    myFile << agentNum << " # number of agents" << endl;
-    myFile << "# Format:  num_of_goals sx sy g1x g1y g2x g2y ..." << endl;
+    const int agentNum = inst->getAgentNum();
+    myFile << agentNum << " # number of agents" << std::endl;
+    myFile << "# Format:  num_of_goals sx sy g1x g1y g2x g2y ..."
+           << std::endl;
 
     // Get global task ids for each agent
     for (int a = 0; a < agentNum; a++) {
-      vector<int> globalTasks = sol->getAgentGlobalTasks(a);
-      int numTasks = globalTasks.size();
-      pair<int, int> startLocAgent =
+      const vector<int>& globalTasks = sol->agents[a].taskAssignments;
+      const int numTasks = (int)globalTasks.size();
+      const pair<int, int> startLocAgent =
           inst->getCoordinate(inst->getStartLocations()[a]);
       myFile << numTasks << "\t" << startLocAgent.second << "\t"
              << startLocAgent.first << "\t";
       for (int i = 0; i < numTasks; i++) {
-        pair<int, int> taskLoc = inst->getCoordinate(
-            sol->agents[a].pathPlanner->goalLocations.at(i));
+        const int globalTask = globalTasks[i];
+        const int taskLocation = inst->getTaskLocations(globalTask);
+        const pair<int, int> taskLoc = inst->getCoordinate(taskLocation);
         myFile << taskLoc.second << "\t" << taskLoc.first << "\t";
       }
-      myFile << "" << endl;
+      myFile << std::endl;
     }
 
     // Write the precedence constraints
-    myFile << "temporal cons:" << endl;
+    myFile << "temporal cons:" << std::endl;
 
-    vector<pair<int, int>> globalPc = inst->getInputPrecedenceConstraints();
+    const vector<pair<int, int>> globalPc =
+        inst->getInputPrecedenceConstraints();
 
-    for (auto pc : globalPc) {
-      int predecessor = pc.first, successor = pc.second;
-      int predAgent = sol->taskAgentMap.at(predecessor),
-          predLocalIndex = sol->getLocalTaskIndex(predAgent, predecessor);
-      int succAgent = sol->taskAgentMap.at(successor),
-          succLocalIndex = sol->getLocalTaskIndex(succAgent, successor);
+    for (const auto& pc : globalPc) {
+      const int predecessor = pc.first;
+      const int successor = pc.second;
+
+      const int predAgent = sol->taskAgentMap.at(predecessor);
+      const int succAgent = sol->taskAgentMap.at(successor);
+      assert(predAgent != UNASSIGNED && succAgent != UNASSIGNED);
+
+      const int predLocalIndex = sol->getLocalTaskIndex(predAgent, predecessor);
+      const int succLocalIndex = sol->getLocalTaskIndex(succAgent, successor);
 
       myFile << predAgent << "\t" << predLocalIndex << "\t" << succAgent << "\t"
-             << succLocalIndex << endl;
+             << succLocalIndex << std::endl;
     }
   } else {
-    cout << "Failed to create file for some reason";
+    std::cerr << "Failed to create report file: " << fileName << std::endl;
   }
 }

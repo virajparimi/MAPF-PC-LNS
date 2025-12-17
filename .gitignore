@@ -1,4 +1,5 @@
 *.code-workspace
-build/
+build*/
+cmake-build-*/
 .cache/
 .vscode/

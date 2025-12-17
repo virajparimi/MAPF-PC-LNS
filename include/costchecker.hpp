@@ -1,33 +1,8 @@
 #pragma once
-#include "common.hpp"
-#include "lns.hpp"
-
-#include <plog/Log.h>
-
-#include <fstream>
-#include <iostream>
-#include <queue>
-#include <set>
-#include <sstream>  // stringstream
-#include <stack>
 #include <string>
-#include <utility>
-#include <vector>
 
-using std::cin;
-using std::cout;
-using std::endl;
-using std::make_pair;
-using std::ofstream;
-using std::pair;
-using std::queue;
-using std::set;
-using std::stack;
-using std::string;
-using std::stringstream;
-using std::vector;
-
-#include <boost/tokenizer.hpp>
+class Instance;
+class Solution;
 
 class SaveToTxt {
   /*
@@ -50,13 +25,12 @@ class SaveToTxt {
 
         Please copy the text file to the appropriate location in the MAPF-PC codebase.
 
-        The corresponding MAPF-PC command 
-        ./bin/cbs -m sample_input/empty-16-16.map -a sample_input/report_2023-10-25-22\:10\:11.txt -s 2 -k 10
-    */
+        The corresponding MAPF-PC command (new report names avoid ':' so escaping isn't needed):
+        ./bin/cbs -m sample_input/empty-16-16.map -a sample_input/report_2023-10-25_22-10-11.txt -s 2 -k 10
+ */
  public:
-  string outputFile;
+  std::string outputFile;
   void fileSave();
-  void makeFile();
   void printStart();
   void runData(const Instance* inst, const Solution* sol);
 };

@@ -1,7 +1,15 @@
 #include "lns.hpp"
-#include <boost/concept_check.hpp>
 #include <boost/process.hpp>
-#include <boost/process/pipe.hpp>
+#if defined(__has_include)
+#if __has_include(<boost/process/null.hpp>)
+#include <boost/process/null.hpp>
+#define MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL 1
+#else
+#define MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL 0
+#endif
+#else
+#define MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL 0
+#endif
 #include <cmath>
 #include <filesystem>
 #include <numeric>
@@ -15,6 +23,8 @@ LNS::LNS(int numOfIterations, const Instance& instance,
          const LNSParams& parameters)
     : numOfIterations_(numOfIterations),
       instance_(instance),
+      seed_(parameters.seed),
+      rng_(parameters.seed),
       solution_(instance),
       previousSolution_(instance) {
   plannerStartTime_ = Time::now();
@@ -36,8 +46,25 @@ LNS::LNS(int numOfIterations, const Instance& instance,
 
 bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
 
+  // Reset solution state in case this is called more than once.
+  Solution freshSolution(instance_);
+  solution_ = freshSolution;
+
   initialPaths_.resize(instance_.getTasksNum(), AgentTaskPath());
   bool readingTaskAssignments = false, readingTaskPaths = false;
+
+  auto parseInt = [](const std::string& s) -> std::optional<int> {
+    const size_t begin = s.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+      return std::nullopt;
+    }
+    const size_t end = s.find_last_not_of(" \t\r\n");
+    try {
+      return std::stoi(s.substr(begin, end - begin + 1));
+    } catch (...) {
+      return std::nullopt;
+    }
+  };
 
   string solver;
   if (variant == "sota_cbs") {
@@ -49,17 +76,31 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
     return false;
   }
 
-  // The path to the command when you use the vscode launch file
-  string command = "./MAPF-PC/build/bin/task_assignment -m " +
-                   instance_.getMapName() + " -a " +
-                   instance_.getAgentTaskFName() + " -k " +
-                   std::to_string(instance_.getAgentNum()) + " -t " +
-                   std::to_string(120) + " --solver " + solver;
-
   // Run a child process to spawn the MAPC-PC codebase with the current map and agent informations
   namespace bp = boost::process;
   bp::ipstream inputStream;
-  bp::child child(command, bp::std_out > inputStream);
+  std::string taskAssignmentExe;
+  if (std::filesystem::exists("./MAPF-PC/build_local/bin/task_assignment")) {
+    taskAssignmentExe = "./MAPF-PC/build_local/bin/task_assignment";
+  } else {
+    taskAssignmentExe = "./MAPF-PC/build/bin/task_assignment";
+  }
+  const std::vector<std::string> args = {
+      "-m", instance_.getMapName(),
+      "-a", instance_.getAgentTaskFName(),
+      "-k", std::to_string(instance_.getAgentNum()),
+      "-t", "120",
+      "-d", std::to_string(seed_),
+      "--solver", solver,
+  };
+#if MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL
+  bp::child child(taskAssignmentExe, bp::args(args), bp::std_out > inputStream,
+                  bp::std_err > bp::null);
+#else
+  // Some Boost.Process installations don't ship <boost/process/null.hpp>.
+  // In that case, don't suppress stderr.
+  bp::child child(taskAssignmentExe, bp::args(args), bp::std_out > inputStream);
+#endif
 
   // The output sequence of the MAPF-PC codebase is as follows:
   // 1. Output TASK ASSIGNMENTS
@@ -68,10 +109,12 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
   // 3. Output TASK PATHS
   // Output Agent # and then followed by the task locations (non-linearized) with @ after the first location with begin time right after and -> between each location
 
-  PLOGD << "Exit code of MAPF-PC " << child.exit_code() << endl;
   int agent = -1;
   string line;
-  while (std::getline(inputStream, line) && !line.empty()) {
+  while (std::getline(inputStream, line)) {
+    if (line.empty()) {
+      continue;
+    }
 
     // If the agent variable exceeds the total number of agents we are working with then we have read all the task assignments or all the task paths
     if (agent >= instance_.getAgentNum()) {
@@ -83,11 +126,16 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
     }
 
     // Check if the following set of lines will be for task assignments or task paths
-    if (strcmp(line.c_str(), "TASK ASSIGNMENTS") == 0) {
+    if (line == "TASK ASSIGNMENTS") {
       readingTaskAssignments = true;
-    } else if (strcmp(line.c_str(), "TASK PATHS") == 0) {
+      readingTaskPaths = false;
       agent = -1;
+      continue;
+    } else if (line == "TASK PATHS") {
+      readingTaskAssignments = false;
       readingTaskPaths = true;
+      agent = -1;
+      continue;
     }
 
     // Use the Agent # to increment the agent variable
@@ -102,8 +150,19 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
       size_t pos = 0;
       while ((pos = line.find(',')) != string::npos) {
         token = line.substr(0, pos);
-        solution_.assignTaskToAgent(agent, stoi(token));
+        const auto task = parseInt(token);
+        if (!task.has_value()) {
+          PLOGE << "Failed to parse task assignment token: '" << token << "'\n";
+          child.terminate();
+          child.wait();
+          return false;
+        }
+        solution_.assignTaskToAgent(agent, *task);
         line.erase(0, pos + 1);
+      }
+      // Handle the last token if the line doesn't end with a comma.
+      if (const auto task = parseInt(line); task.has_value()) {
+        solution_.assignTaskToAgent(agent, *task);
       }
       solution_.agents[agent].taskPaths.resize(
           solution_.agents[agent].taskAssignments.size(), AgentTaskPath());
@@ -112,76 +171,102 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
     // Eg: Agent 1
     //     6 @ 0 -> 22 -> 23 @ 2 -> 24 @ 3 -> 25 -> 26 ->
     else if (readingTaskPaths && agent > -1) {
-      string token;
-      AgentTaskPath taskPath;
-      size_t pos = 0;
-      int taskIndex = -1;
-      while ((pos = line.find("->")) != string::npos) {
-        token = line.substr(0, pos);
+      bool ok = true;
+      auto consumeToken = [&](const std::string& rawToken, AgentTaskPath& taskPath,
+                              int& taskIndex) {
+        if (rawToken.empty()) {
+          return;
+        }
+        string token = rawToken;
         if (token.find('@') != string::npos) {
-          // This location is the first location for this task as it contains the "@" character after which we will have this task's begin time
-          // Split the token to get the location and the begin time and use that
-
-          // If the taskPath variable is not empty then add that taskPath to the solution object as that pertains to the previous task
           if (!taskPath.empty()) {
+            // Mark the last location of the previous task as goal.
+            taskPath.path.back().isGoal = true;
             solution_.agents[agent].taskPaths[taskIndex] = taskPath;
             initialPaths_[solution_.agents[agent].taskAssignments[taskIndex]] =
                 taskPath;
             taskPath = AgentTaskPath();
           }
           taskIndex++;
-          size_t localPos = 0;
-          string localToken;
-          localPos = token.find('@');
-          PathEntry pEntry = {false, stoi(token.substr(0, localPos))};
 
-          // If there was a previous task path then the start location of this task would be what was the last location of that previous task
-          if (taskIndex > 0) {
-            PathEntry previousPEntry = {false, solution_.agents[agent]
-                                                   .taskPaths[taskIndex - 1]
-                                                   .back()
-                                                   .location};
-            taskPath.path.push_back(previousPEntry);
+          const size_t atPos = token.find('@');
+          const auto loc = parseInt(token.substr(0, atPos));
+          if (!loc.has_value()) {
+            PLOGE << "Failed to parse path location token: '" << token << "'\n";
+            ok = false;
+            return;
           }
+          PathEntry pEntry = {false, *loc};
 
-          taskPath.path.push_back(pEntry);
-          token.erase(0, localPos + 1);
           if (taskIndex > 0) {
-            // Leftover token should now be the begin time information
-            taskPath.beginTime = stoi(token) - 1;
+            const int previousLocation = solution_.agents[agent]
+                                             .taskPaths[taskIndex - 1]
+                                             .back()
+                                             .location;
+            taskPath.path.push_back(PathEntry{false, previousLocation});
+          }
+          taskPath.path.push_back(pEntry);
+
+          token.erase(0, atPos + 1);
+          if (taskIndex > 0) {
+            const auto beginTime = parseInt(token);
+            if (!beginTime.has_value()) {
+              PLOGE << "Failed to parse task begin time token: '" << token
+                    << "'\n";
+              ok = false;
+              return;
+            }
+            taskPath.beginTime = *beginTime - 1;
           } else {
             taskPath.beginTime = 0;
           }
-          // If there was a previus task then mark the last location of that task as goal
-          if (taskIndex > 0) {
-            solution_.agents[agent]
-                .taskPaths[taskIndex - 1]
-                .path[solution_.agents[agent]
-                          .taskPaths[taskIndex - 1]
-                          .path.size() -
-                      1]
-                .isGoal = true;
-          }
         } else {
-          PathEntry pEntry = {false, stoi(token)};
-          taskPath.path.push_back(pEntry);
+          const auto loc = parseInt(token);
+          if (!loc.has_value()) {
+            PLOGE << "Failed to parse path location token: '" << token << "'\n";
+            ok = false;
+            return;
+          }
+          taskPath.path.push_back(PathEntry{false, *loc});
         }
+      };
+
+      AgentTaskPath taskPath;
+      size_t pos = 0;
+      int taskIndex = -1;
+      while ((pos = line.find("->")) != string::npos) {
+        consumeToken(line.substr(0, pos), taskPath, taskIndex);
         line.erase(0, pos + 2);
       }
-      // Add the last task path
-      if (!taskPath.empty()) {
+
+      // Process any trailing token after the last "->".
+      consumeToken(line, taskPath, taskIndex);
+
+      // Add the last task path.
+      if (!taskPath.empty() && taskIndex >= 0) {
+        taskPath.path.back().isGoal = true;
         solution_.agents[agent].taskPaths[taskIndex] = taskPath;
         initialPaths_[solution_.agents[agent].taskAssignments[taskIndex]] =
             taskPath;
-        taskPath = AgentTaskPath();
+      }
+      if (!ok) {
+        child.terminate();
+        child.wait();
+        return false;
       }
     }
+  }
+
+  child.wait();
+  if (child.exit_code() != 0) {
+    PLOGE << "MAPF-PC task_assignment exited with code " << child.exit_code()
+          << "\n";
+    return false;
   }
 
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     vector<int> taskLocations =
         instance_.getTaskLocations(solution_.getAgentGlobalTasks(agent));
-    solution_.agents[agent].pathPlanner->setGoalLocations(taskLocations);
     solution_.agents[agent].pathPlanner->setGoalLocations(taskLocations);
     solution_.agents[agent].pathPlanner->computeHeuristics();
     for (int task = 1; task < (int)solution_.getAgentGlobalTasks(agent).size();
@@ -208,6 +293,11 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
 
 bool LNS::buildGreedySolution() {
 
+  // Reset any previous task->agent mapping.
+  for (auto& kv : solution_.taskAgentMap) {
+    kv.second = UNASSIGNED;
+  }
+
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     solution_.agents[agent].taskPaths.clear();
     solution_.agents[agent].path = AgentTaskPath();
@@ -226,12 +316,8 @@ bool LNS::buildGreedySolution() {
     solution_.agents[agent].pathPlanner->computeHeuristics();
   }
 
-  vector<pair<int, int>> precedenceConstraints;
-  for (pair<int, int> precConstraint :
-       instance_.getInputPrecedenceConstraints()) {
-    precedenceConstraints.emplace_back(precConstraint.first,
-                                       precConstraint.second);
-  }
+  vector<pair<int, int>> precedenceConstraints =
+      instance_.getInputPrecedenceConstraints();
 
   // Compute the precedence constraints based on current task assignments
   // Intra-agent precedence constraints
@@ -298,6 +384,113 @@ bool LNS::buildGreedySolution() {
   return true;
 }
 
+bool LNS::buildGreedySolutionPrecedenceOnly() {
+
+  // Reset any previous task->agent mapping.
+  for (auto& kv : solution_.taskAgentMap) {
+    kv.second = UNASSIGNED;
+  }
+
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    solution_.agents[agent].taskPaths.clear();
+    solution_.agents[agent].path = AgentTaskPath();
+    solution_.agents[agent].taskAssignments.clear();
+    solution_.agents[agent].intraPrecedenceConstraints.clear();
+  }
+
+  // Assign tasks (greedy), but do not build collision constraints.
+  greedyTaskAssignment(&instance_, &solution_);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    vector<int> taskLocations =
+        instance_.getTaskLocations(solution_.getAgentGlobalTasks(agent));
+    solution_.agents[agent].pathPlanner->setGoalLocations(taskLocations);
+    solution_.agents[agent].taskPaths.resize(
+        solution_.getAgentGlobalTasks(agent).size(), AgentTaskPath());
+    solution_.agents[agent].pathPlanner->computeHeuristics();
+  }
+
+  // Global precedence constraints = input + intra-agent ordering.
+  vector<pair<int, int>> precedenceConstraints =
+      instance_.getInputPrecedenceConstraints();
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    for (int task = 1; task < (int)solution_.getAgentGlobalTasks(agent).size();
+         task++) {
+      solution_.agents[agent].insertPrecedenceConstraint(
+          solution_.agents[agent].taskAssignments[task - 1],
+          solution_.agents[agent].taskAssignments[task]);
+      precedenceConstraints.emplace_back(
+          solution_.agents[agent].taskAssignments[task - 1],
+          solution_.agents[agent].taskAssignments[task]);
+    }
+  }
+
+  // Compute a topological planning order.
+  vector<int> planningOrder;
+  bool success =
+      topologicalSort(&instance_, &precedenceConstraints, planningOrder);
+  if (!success) {
+    PLOGE << "Topological sorting failed\n";
+    return false;
+  }
+
+  // Build predecessor adjacency to enforce precedence via earliest goal times.
+  vector<vector<int>> predecessors(instance_.getTasksNum());
+  for (const auto& e : precedenceConstraints) {
+    predecessors[e.second].push_back(e.first);
+  }
+
+  // Plan each task segment with only precedence timing constraints (no paths
+  // from other agents in the constraint table).
+  initialPaths_.assign(instance_.getTasksNum(), AgentTaskPath());
+  for (int task : planningOrder) {
+    int agent = solution_.getAgentWithTask(task);
+    int taskPosition = solution_.getLocalTaskIndex(agent, task);
+
+    int startTime = 0;
+    if (taskPosition != 0) {
+      int previousTask = solution_.agents[agent].taskAssignments[taskPosition - 1];
+      assert(!initialPaths_[previousTask].empty());
+      startTime = initialPaths_[previousTask].endTime();
+    }
+
+    int earliestGoalTime = 0;
+    for (int pred : predecessors[task]) {
+      assert(!initialPaths_[pred].empty());
+      earliestGoalTime = max(earliestGoalTime, initialPaths_[pred].endTime() + 1);
+    }
+
+    ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
+    constraintTable.goalLocation = instance_.getTaskLocations(task);
+    constraintTable.lengthMin = max(constraintTable.lengthMin, earliestGoalTime);
+    constraintTable.latestTimestep =
+        max(constraintTable.latestTimestep, constraintTable.lengthMin);
+
+    initialPaths_[task] = solution_.agents[agent].pathPlanner->findPathSegment(
+        constraintTable, startTime, taskPosition, 0);
+    if (initialPaths_[task].empty()) {
+      PLOGE << "No path exists for agent " << agent << " and task " << task
+            << "\n";
+      return false;
+    }
+    solution_.agents[agent].taskPaths[taskPosition] = initialPaths_[task];
+  }
+
+  // Join the individual task paths to form the agent's path.
+  vector<int> agentsToCompute(instance_.getAgentNum());
+  std::iota(agentsToCompute.begin(), agentsToCompute.end(), 0);
+  solution_.joinPaths(agentsToCompute);
+
+  // Gather the information.
+  int initialSumOfCosts = 0;
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (!solution_.agents[agent].taskAssignments.empty()) {
+      initialSumOfCosts += solution_.agents[agent].path.endTime();
+    }
+  }
+  solution_.sumOfCosts = initialSumOfCosts;
+  return true;
+}
+
 bool LNS::extractFeasibleSolution() {
 
   // Only update the feasible solution if the new solution has better cost!
@@ -329,31 +522,25 @@ void LNS::randomRemoval() {
   lnsNeighborhood_.regretMaxHeap.clear();
   lnsNeighborhood_.commitedTasks.clear();
   lnsNeighborhood_.removedTasksPathSize.clear();
+  lnsNeighborhood_.removedTasks.clear();
 
-  // Randomly choose a task and remove it from the solution and add it to the neighborhood until neighborhood size reaches some threshold
-  std::random_device device;
-  auto dev = device();
-  std::cout << "Dev = " << dev << std::endl;
-  std::mt19937 engine(dev);
-  // std::mt19937 engine(1239556316);
-  std::uniform_int_distribution<int> distribution(0,
-                                                  instance_.getTasksNum() - 1);
-  while ((int)lnsNeighborhood_.removedTasks.size() < neighborSize_) {
-    int randomTask = distribution(engine);
-    // Check that this random task was not already in the removedTasks queue
-    if (find_if(begin(lnsNeighborhood_.removedTasks),
-                end(lnsNeighborhood_.removedTasks),
-                [randomTask](Conflicts conflict) {
-                  return randomTask == conflict.task;
-                }) != end(lnsNeighborhood_.removedTasks)) {
-      continue;
-    }
-    int randomTaskAgent = solution_.taskAgentMap[randomTask];
+  // Sample tasks uniformly without replacement (partial Fisher-Yates),
+  // avoiding repeated draws/duplicate checks.
+  const int taskCount = instance_.getTasksNum();
+  const int numToRemove = (neighborSize_ < taskCount) ? neighborSize_ : taskCount;
+  vector<int> taskIds(taskCount);
+  std::iota(taskIds.begin(), taskIds.end(), 0);
+  for (int i = 0; i < numToRemove; i++) {
+    std::uniform_int_distribution<int> distribution(i, taskCount - 1);
+    const int j = distribution(rng_);
+    std::swap(taskIds[i], taskIds[j]);
+    const int randomTask = taskIds[i];
+    const int randomTaskAgent = solution_.taskAgentMap[randomTask];
     assert(randomTaskAgent != UNASSIGNED);
-    int randomTaskPosition =
+    const int randomTaskPosition =
         solution_.getLocalTaskIndex(randomTaskAgent, randomTask);
-    Conflicts conflict(randomTask, randomTaskAgent, randomTaskPosition);
-    lnsNeighborhood_.removedTasks.insert(conflict);
+    lnsNeighborhood_.removedTasks.insert(
+        Conflicts(randomTask, randomTaskAgent, randomTaskPosition));
   }
 }
 
@@ -375,8 +562,22 @@ void LNS::conflictRemoval(std::optional<set<Conflicts>> potentialNeighborhood) {
       extractNConflicts(neighborSize_, potentialNeighborhood.value());
 
   if ((int)lnsNeighborhood_.removedTasks.size() < neighborSize_) {
-    // In this case we have less conflicts than the neighborhood size of the LNS so we need to augment this list with more tasks possibly using random removal
-    randomRemoval();
+    // In this case we have less conflicts than the neighborhood size of the LNS
+    // so we need to augment this list with more tasks using random removal.
+    std::uniform_int_distribution<int> distribution(0,
+                                                    instance_.getTasksNum() - 1);
+    while ((int)lnsNeighborhood_.removedTasks.size() < neighborSize_) {
+      const int randomTask = distribution(rng_);
+      if (lnsNeighborhood_.removedTasks.count(Conflicts(randomTask, 0, 0)) != 0) {
+        continue;
+      }
+      const int randomTaskAgent = solution_.taskAgentMap[randomTask];
+      assert(randomTaskAgent != UNASSIGNED);
+      const int randomTaskPosition =
+          solution_.getLocalTaskIndex(randomTaskAgent, randomTask);
+      lnsNeighborhood_.removedTasks.insert(
+          Conflicts(randomTask, randomTaskAgent, randomTaskPosition));
+    }
   }
   // The else case should not happen since the 'extractNConflict' will never return more than neighborhood size set
 }
@@ -390,6 +591,7 @@ void LNS::worstRemoval() {
   lnsNeighborhood_.regretMaxHeap.clear();
   lnsNeighborhood_.commitedTasks.clear();
   lnsNeighborhood_.removedTasksPathSize.clear();
+  lnsNeighborhood_.removedTasks.clear();
 
   // Maintain a priority queue of (key, value) where key is the path length of a task and the value is the task. We need to do a reverse way to avoid making our own comparator
   ppq worstTasksOrder;
@@ -434,15 +636,14 @@ void LNS::shawRemoval(int prioritySize) {
   lnsNeighborhood_.regretMaxHeap.clear();
   lnsNeighborhood_.commitedTasks.clear();
   lnsNeighborhood_.removedTasksPathSize.clear();
+  lnsNeighborhood_.removedTasks.clear();
 
   // Randomly choose a task and remove it from the solution and add it to the neighborhood
-  std::random_device device;
-  std::mt19937 engine(device());
   std::uniform_int_distribution<int> distribution(0,
                                                   instance_.getTasksNum() - 1);
 
   // Sample a random task and remove it!
-  int randomTask = distribution(engine);
+  int randomTask = distribution(rng_);
   int randomTaskAgent = solution_.taskAgentMap[randomTask];
   assert(randomTaskAgent != UNASSIGNED);
   int randomTaskPosition =
@@ -451,6 +652,54 @@ void LNS::shawRemoval(int prioritySize) {
   lnsNeighborhood_.removedTasks.insert(randomConflict);
   PLOGD << "Shaw Removal Step -> Random Task " << randomTask << " is removed!"
         << endl;
+
+  // Precedence-aware relatedness:
+  // prefer tasks that are close in the precedence graph (either ancestor or
+  // descendant) to remove a coherent "precedence neighborhood".
+  const int taskCount = instance_.getTasksNum();
+  const int cappedPrioritySize = min(prioritySize, taskCount);
+  const int cappedNeighborSize = min(neighborSize_, taskCount);
+  const int precedenceDepthCap = 4;  // tasks within 4 precedence edges
+  const double precedenceWeight = shawDistanceWeight_ * 10.0;
+  const int precedenceUnrelatedPenalty = precedenceDepthCap + 1;
+
+  const vector<vector<int>> successors = instance_.getSuccessors();
+  const vector<vector<int>> predecessors = instance_.getAncestors();
+  const int INF = taskCount + 1000000;
+  auto bfsDistancesFrom = [&](const vector<vector<int>>& adj) -> vector<int> {
+    vector<int> dist(taskCount, INF);
+    std::queue<int> q;
+    dist[randomTask] = 0;
+    q.push(randomTask);
+    while (!q.empty()) {
+      const int u = q.front();
+      q.pop();
+      const int du = dist[u];
+      for (const int v : adj[u]) {
+        if (dist[v] == INF) {
+          dist[v] = du + 1;
+          q.push(v);
+        }
+      }
+    }
+    return dist;
+  };
+
+  const vector<int> distDown = bfsDistancesFrom(successors);
+  const vector<int> distUp = bfsDistancesFrom(predecessors);
+  vector<int> precedencePenalty(taskCount, precedenceUnrelatedPenalty);
+  vector<int> precedenceNearby;
+  precedenceNearby.reserve(taskCount);
+  for (int t = 0; t < taskCount; t++) {
+    const int d = min(distDown[t], distUp[t]);
+    if (d != INF) {
+      precedencePenalty[t] = min(d, precedenceUnrelatedPenalty);
+    }
+    if (t != randomTask && precedencePenalty[t] <= precedenceDepthCap) {
+      precedenceNearby.push_back(t);
+    }
+  }
+  std::shuffle(precedenceNearby.begin(), precedenceNearby.end(), rng_);
 
   // Get information about random task
   int randomTaskLocation = instance_.getTaskLocations(randomTask);
@@ -462,58 +711,76 @@ void LNS::shawRemoval(int prioritySize) {
   // Initialize a queue to hold the related tasks and rank by relatedness
   pqRelatedTasks relatedQ;  // TODO: can change to ascending or descending here
   set<RelatedTasks, RelatedTasks::RelatedTasksComparator> expandedTasks;
+  vector<bool> alreadyExpanded(taskCount, false);
 
   // Adding the random task first
   RelatedTasks randomRelatedTask(randomTask, randomTaskAgent,
                                  randomTaskPosition, randomTaskST, randomTaskET,
                                  -1, -1);
   expandedTasks.insert(randomRelatedTask);
+  alreadyExpanded[randomTask] = true;
 
-  // Select tasks at random for some limit and find their relatedness to the random task above
-  while ((int)expandedTasks.size() < prioritySize) {
-    int relatedTask = distribution(engine);
-    // Check that this selected task was not already in the expanded set
-    if (find_if(begin(expandedTasks), end(expandedTasks),
-                [relatedTask](RelatedTasks expandedT) {
-                  return relatedTask == expandedT.task;
-                }) != end(expandedTasks)) {
-      continue;
-    }
-
+  auto pushRelatedCandidate = [&](int relatedTask) {
     // Get information about related task
-    int relatedTaskAgent = solution_.taskAgentMap[relatedTask];
+    const int relatedTaskAgent = solution_.taskAgentMap[relatedTask];
     assert(relatedTaskAgent != UNASSIGNED);
-    int relatedTaskPosition =
+    const int relatedTaskPosition =
         solution_.getLocalTaskIndex(relatedTaskAgent, relatedTask);
 
     // Compute the manhattan distance
-    int relatedTaskLocation = instance_.getTaskLocations(relatedTask);
-    int relatedManhattanDistance =
+    const int relatedTaskLocation = instance_.getTaskLocations(relatedTask);
+    const int relatedManhattanDistance =
         instance_.getManhattanDistance(randomTaskLocation, relatedTaskLocation);
 
     // Get the temporal values
-    int relatedTaskST = solution_.agents[relatedTaskAgent]
-                            .taskPaths[relatedTaskPosition]
-                            .beginTime;
-    int relatedTaskET = solution_.agents[relatedTaskAgent]
-                            .taskPaths[relatedTaskPosition]
-                            .endTime();
+    const int relatedTaskST = solution_.agents[relatedTaskAgent]
+                                  .taskPaths[relatedTaskPosition]
+                                  .beginTime;
+    const int relatedTaskET = solution_.agents[relatedTaskAgent]
+                                  .taskPaths[relatedTaskPosition]
+                                  .endTime();
 
-    // Compute the relatedness
-    int relatedness = shawDistanceWeight_ * relatedManhattanDistance +
-                      shawTemporalWeight_ * (abs(randomTaskST - relatedTaskST) +
-                                             abs(randomTaskET - relatedTaskET));
+    // Compute the relatedness (smaller => more related).
+    const int temporalDiff =
+        abs(randomTaskST - relatedTaskST) + abs(randomTaskET - relatedTaskET);
+    const int prec = precedencePenalty[relatedTask];
+    const int relatedness =
+        (int)(shawDistanceWeight_ * relatedManhattanDistance +
+              shawTemporalWeight_ * temporalDiff + precedenceWeight * prec);
 
     // Store information
-    RelatedTasks relatedToRandomTask(
-        relatedTask, relatedTaskAgent, relatedTaskPosition, relatedTaskST,
-        relatedTaskET, relatedManhattanDistance, relatedness);
+    RelatedTasks relatedToRandomTask(relatedTask, relatedTaskAgent,
+                                     relatedTaskPosition, relatedTaskST,
+                                     relatedTaskET, relatedManhattanDistance,
+                                     relatedness);
     expandedTasks.insert(relatedToRandomTask);
     relatedQ.emplace(relatedness, relatedToRandomTask);
+    alreadyExpanded[relatedTask] = true;
+  };
+
+  // Prefer candidates close to the seed task in the precedence graph.
+  for (const int relatedTask : precedenceNearby) {
+    if ((int)expandedTasks.size() >= cappedPrioritySize) {
+      break;
+    }
+    if (alreadyExpanded[relatedTask]) {
+      continue;
+    }
+    pushRelatedCandidate(relatedTask);
   }
 
-  // Now get the related tasks in decreasing order of relatedness
-  while ((int)lnsNeighborhood_.removedTasks.size() < neighborSize_) {
+  // Fill remaining candidates uniformly at random.
+  while ((int)expandedTasks.size() < cappedPrioritySize) {
+    const int relatedTask = distribution(rng_);
+    if (alreadyExpanded[relatedTask]) {
+      continue;
+    }
+    pushRelatedCandidate(relatedTask);
+  }
+
+  // Now remove the most-related tasks.
+  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
+         !relatedQ.empty()) {
     RelatedTasks relatedTask = relatedQ.top().second;
     PLOGD << "Shaw Removal Step -> Related Task " << relatedTask.task
           << " is removed!" << endl;
@@ -522,6 +789,19 @@ void LNS::shawRemoval(int prioritySize) {
     Conflicts relatedConflict(relatedTask.task, relatedTask.agent,
                               relatedTask.taskPosition);
     lnsNeighborhood_.removedTasks.insert(relatedConflict);
+  }
+
+  // If the candidate queue was exhausted (e.g., very small instances), augment
+  // with random tasks to reach the requested neighborhood size.
+  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    const int t = distribution(rng_);
+    if (lnsNeighborhood_.removedTasks.count(Conflicts(t, 0, 0)) != 0) {
+      continue;
+    }
+    const int agent = solution_.taskAgentMap[t];
+    assert(agent != UNASSIGNED);
+    const int pos = solution_.getLocalTaskIndex(agent, t);
+    lnsNeighborhood_.removedTasks.insert(Conflicts(t, agent, pos));
   }
 }
 
@@ -574,12 +854,10 @@ void LNS::alnsRemoval(std::optional<set<Conflicts>> potentialNeighborhood) {
     adaptiveLNS_.alnsCounter = 0;
   }
   // Sample the destroy heuristic and extract the neighborhood
-  std::random_device device;
-  std::mt19937 engine(device());
   std::discrete_distribution<> distribution(adaptiveLNS_.weights.begin(),
                                             adaptiveLNS_.weights.end());
 
-  int sampledDestroyHeuristic = distribution(engine);
+  int sampledDestroyHeuristic = distribution(rng_);
   switch (sampledDestroyHeuristic) {
     case DestroyHeuristic::randomRemoval:  // RANDOM
       randomRemoval();
@@ -607,7 +885,8 @@ bool LNS::simulatedAnnealing() {
   bool accepted = false;
   double acceptanceProb =
       exp((previousSolution_.utility - solution_.utility) / temperature_);
-  if ((double)rand() / (RAND_MAX) < acceptanceProb) {
+  std::uniform_real_distribution<double> unit01(0.0, 1.0);
+  if (unit01(rng_) < acceptanceProb) {
     // Use simulated annealing to potentially accept worse solutions!
     accepted = true;
   } else {
@@ -672,6 +951,9 @@ bool LNS::run() {
   if (initialSolutionStrategy == "greedy") {
     // Run the greedy task assignment and subsequent path finding algorithm
     success = buildGreedySolution();
+  } else if (initialSolutionStrategy == "greedy_precedence_only") {
+    // Precedence-feasible, collision-infeasible warm start.
+    success = buildGreedySolutionPrecedenceOnly();
   } else if (initialSolutionStrategy.find("sota") != string::npos) {
     // Run the greedy task assignment and use CBS-PC for finding the paths of agents
     success = buildGreedySolutionWithMAPFPC(initialSolutionStrategy);
@@ -701,7 +983,7 @@ bool LNS::run() {
     extractFeasibleSolution();
   }
 
-  iterationStats.emplace_back(initialSolutionRuntime_, "greedy",
+  iterationStats.emplace_back(initialSolutionRuntime_, initialSolutionStrategy,
                               instance_.getAgentNum(), instance_.getTasksNum(),
                               solution_.sumOfCosts, feasibleSolutionUpdated,
                               bestSolutionYet);
@@ -901,7 +1183,12 @@ void LNS::prepareNextIteration() {
   // }
 
   // We need to include all the successors of the original conflicted tasks to ensure that we dont try to find their paths later down the line because otherwise we will face errors since the ancestors of those successor tasks wont have paths.
-  for (Conflicts conflictTask : lnsNeighborhood_.removedTasks) {
+  // Iterate over a snapshot: we only want successors of the original tasks,
+  // and we don't want to repeatedly expand successors of successors as we
+  // insert into `removedTasks`.
+  const vector<Conflicts> originalRemovedTasks(lnsNeighborhood_.removedTasks.begin(),
+                                              lnsNeighborhood_.removedTasks.end());
+  for (const Conflicts& conflictTask : originalRemovedTasks) {
     set<int> successorsOfConflictTask =
         reachableSet(conflictTask.task, successors);
     for (int successorOfConflictTask : successorsOfConflictTask) {
