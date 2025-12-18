@@ -57,6 +57,15 @@ int main(int argc, char** argv) {
   desc.add_options()("regretType,r",
                      po::value<string>()->default_value("absolute"),
                      "Type of regret metric to use i.e relative or absolute");
+  desc.add_options()(
+      "incrementalRegret",
+      po::bool_switch()->default_value(false),
+      "Use incremental regret recomputation during LNS repair");
+  desc.add_options()(
+      "incrementalRegretMode",
+      po::value<string>()->default_value("descendants+agent"),
+      "Dirty-set strategy for incremental regret: 'descendants' or "
+      "'descendants+agent'");
 
   po::variables_map vm;
   try {
@@ -122,6 +131,16 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  const bool incrementalRegret = vm["incrementalRegret"].as<bool>();
+  const string incrementalRegretMode = vm["incrementalRegretMode"].as<string>();
+  if (incrementalRegret &&
+      incrementalRegretMode != "descendants" &&
+      incrementalRegretMode != "descendants+agent") {
+    PLOGE << "The incremental regret mode provided is not supported! Please "
+             "choose from 'descendants' and 'descendants+agent'\n";
+    return 1;
+  }
+
   // Need to store the seed for debugging.
   unsigned int seed = vm["seed"].as<unsigned int>();
   if (seed == 0) {
@@ -158,7 +177,8 @@ int main(int argc, char** argv) {
   LNSParams parameters(vm["neighborSize"].as<int>(),
                        vm["cutoffTime"].as<double>(), 100, 0.99975, 1.00025, 5,
                        9, 3, 0.75, 0.25, initialSolutionStrategy,
-                       destroyHeuristic, acceptanceCriteria, regretType, seed);
+                       destroyHeuristic, acceptanceCriteria, regretType,
+                       incrementalRegret, incrementalRegretMode, seed);
   LNS lnsInstance = LNS(vm["maxIterations"].as<int>(), instance, parameters);
   bool success = lnsInstance.run();
 
@@ -270,5 +290,62 @@ int main(int argc, char** argv) {
             << "\n\tSolution Cost = " << anytimeSolution.sumOfCosts
             << "\n\tNumber of failures = " << lnsInstance.numOfFailures
             << "\n\tSuccess = " << success << endl;
+
+  const auto regretStats = lnsInstance.getRegretEvalStats();
+  const double feasibleRate =
+      regretStats.candidateInsertionsTried > 0
+          ? (double)regretStats.candidateInsertionsFeasible /
+                (double)regretStats.candidateInsertionsTried
+          : 0.0;
+  const double avgRemovedTasks =
+      regretStats.neighborhoods > 0
+          ? (double)regretStats.removedTasksSum /
+                (double)regretStats.neighborhoods
+          : 0.0;
+  std::cout << "\n\nRegret Evaluation Stats: "
+            << "\n\tRecompute Calls = " << regretStats.recomputeCalls
+            << "\n\tTasks Evaluated = " << regretStats.tasksEvaluated
+            << "\n\tTask-Agent Evaluations = " << regretStats.agentEvaluations
+            << "\n\tCandidate Insertions Tried = "
+            << regretStats.candidateInsertionsTried
+            << "\n\tCandidate Insertions Feasible = "
+            << regretStats.candidateInsertionsFeasible
+            << "\n\tFeasible Rate = " << feasibleRate
+            << "\n\tRepair Neighborhoods = " << regretStats.neighborhoods
+            << "\n\tAvg Removed Tasks/Neighborhood = " << avgRemovedTasks
+            << "\n\tMax Removed Tasks/Neighborhood = "
+            << regretStats.removedTasksMax << endl;
+
+  if (incrementalRegret) {
+    const auto statsOpt = lnsInstance.getIncrementalRegretStats();
+    if (statsOpt.has_value()) {
+      const auto& stats = statsOpt.value();
+      const double avgDirty =
+          stats.commits > 0 ? (double)stats.dirtySum / (double)stats.commits
+                            : 0.0;
+      const double avgChanged =
+          stats.commits > 0 ? (double)stats.changedSum / (double)stats.commits
+                            : 0.0;
+      const double avgRecomputedTasksPerCommit =
+          stats.commits > 0
+              ? (double)stats.recomputedTasks / (double)stats.commits
+              : 0.0;
+
+      std::cout << "\n\nIncremental Regret Stats: "
+                << "\n\tMode = " << lnsInstance.getIncrementalRegretMode()
+                << "\n\tCommits = " << stats.commits
+                << "\n\tRecompute Calls = " << stats.recomputeCalls
+                << "\n\tRecomputed Tasks = " << stats.recomputedTasks
+                << "\n\tRecomputed Tasks/Commit = "
+                << avgRecomputedTasksPerCommit
+                << "\n\tStale Heap Pops = " << stats.stalePops
+                << "\n\tHeap Rebuilds = " << stats.heapRebuilds
+                << "\n\tFull Refreshes = " << stats.fullRefreshes
+                << "\n\tAvg Dirty Tasks/Commit = " << avgDirty
+                << "\n\tMax Dirty Tasks = " << stats.dirtyMax
+                << "\n\tAvg Changed EndTimes/Commit = " << avgChanged
+                << "\n\tMax Changed EndTimes = " << stats.changedMax << endl;
+    }
+  }
   return 0;
 }

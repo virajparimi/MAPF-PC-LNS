@@ -1,8 +1,10 @@
 #pragma once
 
 #include <plog/Log.h>
+#include <cstdint>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <utility>
 #include "common.hpp"
@@ -174,16 +176,19 @@ struct Regret {
   int task, agent, taskPosition;
   int pathLength, agentTasksLen, maxOptionsLeft;
   double value;
+  uint32_t stamp = 0;
 
   Regret(int task, int agent, int taskPosition, int pathLength,
-         int agentTasksLen, int maxOptionsLeft, double value)
+         int agentTasksLen, int maxOptionsLeft, double value,
+         uint32_t stamp = 0)
       : task(task),
         agent(agent),
         taskPosition(taskPosition),
         pathLength(pathLength),
         agentTasksLen(agentTasksLen),
         maxOptionsLeft(maxOptionsLeft),
-        value(value) {}
+        value(value),
+        stamp(stamp) {}
 
   struct CompareRegrets {
     bool operator()(const Regret& lhs, const Regret& rhs) const {
@@ -410,6 +415,9 @@ struct LNSParams {
       lnsCostWeight;
   string initialSolutionStrategy, destroyHeuristic, acceptanceCriteria,
       regretType;
+  bool incrementalRegret = false;
+  // Supported: "descendants", "descendants+agent".
+  string incrementalRegretMode = "descendants+agent";
   unsigned int seed = 0;
 
   LNSParams(int neighborhoodSize, double timeLimit, double temperature,
@@ -418,7 +426,8 @@ struct LNSParams {
             double shawTemporalWeight, double lnsConflictWeight,
             double lnsCostWeight, string initialSolutionStrategy,
             string destroyHeuristic, string acceptanceCriteria,
-            string regretType, unsigned int seed)
+            string regretType, bool incrementalRegret,
+            string incrementalRegretMode, unsigned int seed)
       : neighborhoodSize(neighborhoodSize),
         timeLimit(timeLimit),
         temperature(temperature),
@@ -433,12 +442,56 @@ struct LNSParams {
         destroyHeuristic(std::move(destroyHeuristic)),
         acceptanceCriteria(std::move(acceptanceCriteria)),
         regretType(std::move(regretType)),
+        incrementalRegret(incrementalRegret),
+        incrementalRegretMode(std::move(incrementalRegretMode)),
         seed(seed) {}
 };
 
 class LNS {
+ public:
+  struct RegretEvalStats {
+    int64_t recomputeCalls = 0;
+    int64_t tasksEvaluated = 0;
+    int64_t agentEvaluations = 0;
+    int64_t candidateInsertionsTried = 0;
+    int64_t candidateInsertionsFeasible = 0;
+    int64_t neighborhoods = 0;
+    int64_t removedTasksSum = 0;
+    int64_t removedTasksMax = 0;
+
+    void reset() { *this = RegretEvalStats(); }
+  };
+
+  struct IncrementalRegretStats {
+    int64_t commits = 0;
+    int64_t heapRebuilds = 0;
+    int64_t fullRefreshes = 0;
+    int64_t stalePops = 0;
+    int64_t recomputeCalls = 0;
+    int64_t recomputedTasks = 0;
+    int64_t dirtySum = 0;
+    int64_t dirtyMax = 0;
+    int64_t changedSum = 0;
+    int64_t changedMax = 0;
+
+    void reset() { *this = IncrementalRegretStats(); }
+  };
+
  private:
   int numOfIterations_;
+  bool incrementalRegret_ = false;
+  enum class IncrementalRegretMode { descendants, descendants_and_agent };
+  IncrementalRegretMode incrementalRegretMode_ =
+      IncrementalRegretMode::descendants_and_agent;
+  vector<uint32_t> regretStamp_;
+  vector<pair<int, int>> regretBestOption_;
+  vector<pair<int, int>> regretSecondBestOption_;
+
+  RegretEvalStats regretEvalStatsCurrent_;
+  RegretEvalStats regretEvalStatsTotal_;
+
+  IncrementalRegretStats incrementalRegretStatsCurrent_;
+  IncrementalRegretStats incrementalRegretStatsTotal_;
 
  protected:
   ALNS adaptiveLNS_;
@@ -505,6 +558,16 @@ class LNS {
       vector<pair<int, int>>* precedenceConstraints,
       pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes);
 
+  bool recomputeRegretsForTasks(const vector<int>& tasks);
+  std::optional<Regret> popNextValidRegret();
+  vector<int> collectRemainingRemovedTasks() const;
+  vector<int> computeCurrentTaskEndTimes() const;
+  vector<int> computeCurrentLastTaskPerAgent() const;
+  vector<int> computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
+                                          const vector<int>& endTimesAfter,
+                                          const vector<int>& lastTaskBefore,
+                                          const vector<int>& lastTaskAfter);
+
   void commitBestRegretTask(Regret bestRegret);
   void commitAncestorTaskOf(int globalTask,
                             std::optional<pair<bool, int>> committingNextTask);
@@ -518,6 +581,18 @@ class LNS {
 
   Solution getSolution() { return solution_; }
   ALNS getAdaptiveLNS() { return adaptiveLNS_; }
+  std::optional<IncrementalRegretStats> getIncrementalRegretStats() const {
+    if (!incrementalRegret_) {
+      return std::nullopt;
+    }
+    return incrementalRegretStatsTotal_;
+  }
+  RegretEvalStats getRegretEvalStats() const { return regretEvalStatsTotal_; }
+  string getIncrementalRegretMode() const {
+    return incrementalRegretMode_ == IncrementalRegretMode::descendants
+               ? "descendants"
+               : "descendants+agent";
+  }
 
   bool extractFeasibleSolution();
   FeasibleSolution getFeasibleSolution() { return incumbentSolution_; }

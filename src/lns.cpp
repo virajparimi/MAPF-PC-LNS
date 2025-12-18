@@ -42,6 +42,15 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   destroyHeuristic = parameters.destroyHeuristic;
   acceptanceCriteria = parameters.acceptanceCriteria;
   regretType = parameters.regretType;
+  incrementalRegret_ = parameters.incrementalRegret;
+  if (parameters.incrementalRegretMode == "descendants") {
+    incrementalRegretMode_ = IncrementalRegretMode::descendants;
+  } else {
+    incrementalRegretMode_ = IncrementalRegretMode::descendants_and_agent;
+  }
+  regretStamp_.assign(instance_.getTasksNum(), 0);
+  regretBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
+  regretSecondBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
 }
 
 bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
@@ -1040,24 +1049,112 @@ bool LNS::run() {
     }
     lnsNeighborhood_.immutableRemovedTasks = lnsNeighborhood_.removedTasks;
 
-    // Compute regret for each of the tasks that are in the conflicting set
-    // Pick the best one and repeat the whole process again
-    while (!lnsNeighborhood_.removedTasks.empty()) {
-      bool enoughSpace = computeRegret();
-      if (!enoughSpace) {
-        // We could not compute enough regrets for each task so we need to try and reset the solution and try potentially with a different neighborhood!
-        break;
+    // Repair: commit removed tasks back using regret.
+    //
+    // Default behavior recomputes regrets from scratch every commit.
+    // Optional incremental mode recomputes regrets only for a dirty subset.
+    lnsNeighborhood_.regretMaxHeap.clear();
+    bool repairFailed = false;
+    regretEvalStatsCurrent_.reset();
+    {
+      const int removedCount = (int)lnsNeighborhood_.removedTasks.size();
+      regretEvalStatsCurrent_.neighborhoods++;
+      regretEvalStatsTotal_.neighborhoods++;
+      regretEvalStatsCurrent_.removedTasksSum += removedCount;
+      regretEvalStatsTotal_.removedTasksSum += removedCount;
+      regretEvalStatsCurrent_.removedTasksMax =
+          max(regretEvalStatsCurrent_.removedTasksMax, (int64_t)removedCount);
+      regretEvalStatsTotal_.removedTasksMax =
+          max(regretEvalStatsTotal_.removedTasksMax, (int64_t)removedCount);
+    }
+    if (!incrementalRegret_) {
+      // Compute regret for each of the tasks that are in the conflicting set
+      // Pick the best one and repeat the whole process again
+      while (!lnsNeighborhood_.removedTasks.empty()) {
+        bool enoughSpace = computeRegret();
+        if (!enoughSpace) {
+          // We could not compute enough regrets for each task so we need to try
+          // and reset the solution and try potentially with a different
+          // neighborhood!
+          repairFailed = true;
+          break;
+        }
+        assert(!lnsNeighborhood_.regretMaxHeap.empty());
+        Regret bestRegret = lnsNeighborhood_.regretMaxHeap.top();
+        // Use the best regret task and insert it in its correct location
+        commitBestRegretTask(bestRegret);
       }
-      assert(!lnsNeighborhood_.regretMaxHeap.empty());
-      Regret bestRegret = lnsNeighborhood_.regretMaxHeap.top();
-      // Use the best regret task and insert it in its correct location
-      commitBestRegretTask(bestRegret);
+    } else {
+      // Initial regret computation for the neighborhood.
+      incrementalRegretStatsCurrent_.reset();
+      if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
+        repairFailed = true;
+      }
+
+      int64_t stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
+      int64_t stalePopsSinceRefresh = 0;
+      int64_t commitsSinceRefresh = 0;
+
+      while (!repairFailed && !lnsNeighborhood_.removedTasks.empty()) {
+        // If we are spending too much effort discarding stale heap entries,
+        // do a full refresh of all remaining regrets.
+        //
+        // This helps when dirty rules miss some dependencies (regret drift),
+        // and also prevents the heap from filling up with stale entries.
+        if (stalePopsSinceRefresh >= 100 &&
+            stalePopsSinceRefresh > 2 * commitsSinceRefresh + 50) {
+          lnsNeighborhood_.regretMaxHeap.clear();
+          incrementalRegretStatsCurrent_.fullRefreshes++;
+          incrementalRegretStatsTotal_.fullRefreshes++;
+          if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
+            repairFailed = true;
+            break;
+          }
+          stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
+          stalePopsSinceRefresh = 0;
+          commitsSinceRefresh = 0;
+        }
+
+        const auto bestRegret = popNextValidRegret();
+        const int64_t staleDelta =
+            incrementalRegretStatsCurrent_.stalePops - stalePopsAtLastCheck;
+        stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
+        stalePopsSinceRefresh += staleDelta;
+
+        if (!bestRegret.has_value()) {
+          // Heap may have been exhausted by stale entries; rebuild for whatever
+          // is left.
+          incrementalRegretStatsCurrent_.heapRebuilds++;
+          incrementalRegretStatsTotal_.heapRebuilds++;
+          if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
+            repairFailed = true;
+          }
+          continue;
+        }
+
+        const vector<int> endTimesBefore = computeCurrentTaskEndTimes();
+        const vector<int> lastTaskBefore = computeCurrentLastTaskPerAgent();
+        commitBestRegretTask(*bestRegret);
+        incrementalRegretStatsCurrent_.commits++;
+        incrementalRegretStatsTotal_.commits++;
+        commitsSinceRefresh++;
+        const vector<int> endTimesAfter = computeCurrentTaskEndTimes();
+        const vector<int> lastTaskAfter = computeCurrentLastTaskPerAgent();
+
+        const vector<int> dirtyTasks = computeDirtyTasksAfterCommit(
+            endTimesBefore, endTimesAfter, lastTaskBefore, lastTaskAfter);
+        if (!recomputeRegretsForTasks(dirtyTasks)) {
+          repairFailed = true;
+        }
+      }
+
+      // Stats are collected and printed in a dedicated summary section.
     }
 
     IterationQuality quality = IterationQuality::none;
 
     // If we could not successfully compute the regrets and commit to all the tasks in the neighborhood then we need to reset this neighborhood!
-    if (!lnsNeighborhood_.removedTasks.empty()) {
+    if (repairFailed || !lnsNeighborhood_.removedTasks.empty()) {
       // Reject whatever we done till now
       solution_ = previousSolution_;
       feasibleSolutionUpdated = false;
@@ -1301,6 +1398,8 @@ void LNS::prepareNextIteration() {
 }
 
 bool LNS::computeRegret() {
+  regretEvalStatsCurrent_.recomputeCalls++;
+  regretEvalStatsTotal_.recomputeCalls++;
   lnsNeighborhood_.regretMaxHeap.clear();
   for (Conflicts conflictTask : lnsNeighborhood_.removedTasks) {
     bool enoughSpace = computeRegretForTask(conflictTask.task);
@@ -1311,7 +1410,175 @@ bool LNS::computeRegret() {
   return true;
 }
 
+vector<int> LNS::collectRemainingRemovedTasks() const {
+  vector<int> tasks;
+  tasks.reserve(lnsNeighborhood_.removedTasks.size());
+  for (const Conflicts& conflict : lnsNeighborhood_.removedTasks) {
+    tasks.push_back(conflict.task);
+  }
+  return tasks;
+}
+
+vector<int> LNS::computeCurrentTaskEndTimes() const {
+  vector<int> endTimes(instance_.getTasksNum(), -1);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    for (int pos = 0; pos < (int)solution_.agents[agent].taskAssignments.size();
+         pos++) {
+      const int task = solution_.agents[agent].taskAssignments[pos];
+      if (pos >= (int)solution_.agents[agent].taskPaths.size()) {
+        continue;
+      }
+      if (solution_.agents[agent].taskPaths[pos].empty()) {
+        continue;
+      }
+      endTimes[task] = solution_.agents[agent].taskPaths[pos].endTime();
+    }
+  }
+  return endTimes;
+}
+
+vector<int> LNS::computeCurrentLastTaskPerAgent() const {
+  vector<int> lastTasks(instance_.getAgentNum(), UNASSIGNED);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (!solution_.agents[agent].taskAssignments.empty()) {
+      lastTasks[agent] = solution_.agents[agent].taskAssignments.back();
+    }
+  }
+  return lastTasks;
+}
+
+bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
+  regretEvalStatsCurrent_.recomputeCalls++;
+  regretEvalStatsTotal_.recomputeCalls++;
+  incrementalRegretStatsCurrent_.recomputeCalls++;
+  incrementalRegretStatsTotal_.recomputeCalls++;
+  for (int task : tasks) {
+    if (lnsNeighborhood_.commitedTasks.count(task) == 0 ||
+        lnsNeighborhood_.commitedTasks[task]) {
+      continue;
+    }
+    regretStamp_[task]++;
+    incrementalRegretStatsCurrent_.recomputedTasks++;
+    incrementalRegretStatsTotal_.recomputedTasks++;
+    const bool enoughSpace = computeRegretForTask(task);
+    if (!enoughSpace) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::optional<Regret> LNS::popNextValidRegret() {
+  while (!lnsNeighborhood_.regretMaxHeap.empty()) {
+    Regret r = lnsNeighborhood_.regretMaxHeap.top();
+    lnsNeighborhood_.regretMaxHeap.pop();
+
+    if (lnsNeighborhood_.commitedTasks.count(r.task) == 0 ||
+        lnsNeighborhood_.commitedTasks[r.task]) {
+      incrementalRegretStatsCurrent_.stalePops++;
+      incrementalRegretStatsTotal_.stalePops++;
+      continue;
+    }
+    if (!incrementalRegret_ || r.stamp == regretStamp_[r.task]) {
+      return r;
+    }
+    incrementalRegretStatsCurrent_.stalePops++;
+    incrementalRegretStatsTotal_.stalePops++;
+  }
+  return std::nullopt;
+}
+
+vector<int> LNS::computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
+                                             const vector<int>& endTimesAfter,
+                                             const vector<int>& lastTaskBefore,
+                                             const vector<int>& lastTaskAfter) {
+  vector<int> changedTasks;
+  changedTasks.reserve(instance_.getTasksNum());
+  for (int task = 0; task < instance_.getTasksNum(); task++) {
+    if (endTimesAfter[task] < 0) {
+      continue;
+    }
+    if (endTimesAfter[task] != endTimesBefore[task]) {
+      changedTasks.push_back(task);
+    }
+  }
+  incrementalRegretStatsCurrent_.changedSum += (int64_t)changedTasks.size();
+  incrementalRegretStatsTotal_.changedSum += (int64_t)changedTasks.size();
+  incrementalRegretStatsCurrent_.changedMax =
+      max(incrementalRegretStatsCurrent_.changedMax,
+          (int64_t)changedTasks.size());
+  incrementalRegretStatsTotal_.changedMax =
+      max(incrementalRegretStatsTotal_.changedMax, (int64_t)changedTasks.size());
+
+  vector<bool> affectedAgents(instance_.getAgentNum(), false);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (lastTaskBefore[agent] != lastTaskAfter[agent]) {
+      affectedAgents[agent] = true;
+    }
+  }
+  for (int task : changedTasks) {
+    const int agent = solution_.taskAgentMap[task];
+    if (agent != UNASSIGNED && agent >= 0 && agent < instance_.getAgentNum()) {
+      affectedAgents[agent] = true;
+    }
+  }
+
+  vector<bool> isDirty(instance_.getTasksNum(), false);
+
+  const vector<vector<int>> successors = instance_.getSuccessors();
+  std::vector<int> stack;
+  stack.reserve(changedTasks.size());
+  for (int t : changedTasks) {
+    stack.push_back(t);
+  }
+  while (!stack.empty()) {
+    const int current = stack.back();
+    stack.pop_back();
+    if (current < 0 || current >= instance_.getTasksNum()) {
+      continue;
+    }
+    if (isDirty[current]) {
+      continue;
+    }
+    isDirty[current] = true;
+    for (int succ : successors[current]) {
+      if (!isDirty[succ]) {
+        stack.push_back(succ);
+      }
+    }
+  }
+
+  if (incrementalRegretMode_ == IncrementalRegretMode::descendants_and_agent) {
+    for (const Conflicts& conflict : lnsNeighborhood_.removedTasks) {
+      const int task = conflict.task;
+      const int bestAgent = regretBestOption_[task].first;
+      const int secondAgent = regretSecondBestOption_[task].first;
+      if ((bestAgent != UNASSIGNED && affectedAgents[bestAgent]) ||
+          (secondAgent != UNASSIGNED && affectedAgents[secondAgent])) {
+        isDirty[task] = true;
+      }
+    }
+  }
+
+  vector<int> dirtyTasks;
+  dirtyTasks.reserve(lnsNeighborhood_.removedTasks.size());
+  for (const Conflicts& conflict : lnsNeighborhood_.removedTasks) {
+    if (isDirty[conflict.task]) {
+      dirtyTasks.push_back(conflict.task);
+    }
+  }
+  incrementalRegretStatsCurrent_.dirtySum += (int64_t)dirtyTasks.size();
+  incrementalRegretStatsTotal_.dirtySum += (int64_t)dirtyTasks.size();
+  incrementalRegretStatsCurrent_.dirtyMax =
+      max(incrementalRegretStatsCurrent_.dirtyMax, (int64_t)dirtyTasks.size());
+  incrementalRegretStatsTotal_.dirtyMax =
+      max(incrementalRegretStatsTotal_.dirtyMax, (int64_t)dirtyTasks.size());
+  return dirtyTasks;
+}
+
 bool LNS::computeRegretForTask(int task) {
+  regretEvalStatsCurrent_.tasksEvaluated++;
+  regretEvalStatsTotal_.tasksEvaluated++;
   pairing_heap<Utility, compare<Utility::CompareUtilities>> serviceTimes;
 
   // The task has to start after the earliest time step but needs to finish before the latest time step. However we cannot give any guarantee on the latest timestep so we only work with the earliest timestep
@@ -1489,6 +1756,10 @@ bool LNS::computeRegretForTask(int task) {
   serviceTimes.pop();
   Utility secondBestUtility = serviceTimes.top();
 
+  regretBestOption_[task] = {bestUtility.agent, bestUtility.taskPosition};
+  regretSecondBestOption_[task] = {secondBestUtility.agent,
+                                   secondBestUtility.taskPosition};
+
   double value = 0;
   if (regretType == "absolute") {
     value = secondBestUtility.value - bestUtility.value;
@@ -1497,7 +1768,7 @@ bool LNS::computeRegretForTask(int task) {
   }
   Regret regret(task, bestUtility.agent, bestUtility.taskPosition,
                 bestUtility.pathLength, bestUtility.agentTasksLen,
-                (int)serviceTimes.size(), value);
+                (int)serviceTimes.size(), value, regretStamp_[task]);
   lnsNeighborhood_.regretMaxHeap.push(regret);
   return true;
 }
@@ -1507,6 +1778,9 @@ void LNS::computeRegretForTaskWithAgent(
     vector<vector<AgentTaskPath>>* agentTaskPaths,
     vector<pair<int, int>>* precedenceConstraints,
     pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes) {
+
+  regretEvalStatsCurrent_.agentEvaluations++;
+  regretEvalStatsTotal_.agentEvaluations++;
 
   // Compute the first position along the agent's task assignments where we can insert this task
   int firstValidPosition = 0;
@@ -1524,6 +1798,9 @@ void LNS::computeRegretForTaskWithAgent(
 
   for (int j = firstValidPosition;
        j <= (int)(*agentTaskAssignments)[regretPacket.agent].size(); j++) {
+
+    regretEvalStatsCurrent_.candidateInsertionsTried++;
+    regretEvalStatsTotal_.candidateInsertionsTried++;
 
     if (find_if(begin(lnsNeighborhood_.removedTasks),
                 end(lnsNeighborhood_.removedTasks),
@@ -1545,6 +1822,8 @@ void LNS::computeRegretForTaskWithAgent(
         regretPacket, &temporaryAgentTaskPaths, &temporaryAgentTaskAssignments,
         &temporaryPrecedenceConstraints);
     if (std::holds_alternative<Utility>(insertCulmination)) {
+      regretEvalStatsCurrent_.candidateInsertionsFeasible++;
+      regretEvalStatsTotal_.candidateInsertionsFeasible++;
       serviceTimes->push(std::get<Utility>(insertCulmination));
     }
   }
@@ -1836,7 +2115,7 @@ std::variant<bool, Utility> LNS::insertTask(
   value -= (lnsNeighborhood_.removedTasksPathSize.at(regretPacket.task) +
             pathSizeChange);
 
-  Utility utility(regretPacket.agent, regretPacket.taskPosition, pathLength,
+  Utility utility(regretPacket.agent, regretPacket.taskPosition, (int)pathLength,
                   (int)agentTaskAssignmentsRef[regretPacket.agent].size(),
                   value);
   return utility;
