@@ -42,6 +42,52 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   destroyHeuristic = parameters.destroyHeuristic;
   acceptanceCriteria = parameters.acceptanceCriteria;
   regretType = parameters.regretType;
+  if (parameters.lowLevelPlanner == "sipps") {
+    lowLevelPlannerType_ = LowLevelPlannerType::sipps;
+  } else {
+    lowLevelPlannerType_ = LowLevelPlannerType::mlastar;
+  }
+  plannerParityCheck_ = parameters.plannerParityCheck;
+  plannerParityMaxLogs_ = parameters.plannerParityMaxLogs;
+  marketHeuristics_ = parameters.marketHeuristics;
+  marketBucketDt_ = max(1, parameters.marketBucketDt);
+  marketVertexBucketCapacity_ = max(1, parameters.marketVertexBucketCapacity);
+  marketEdgeBucketCapacity_ = max(1, parameters.marketEdgeBucketCapacity);
+  marketUpdateOnAcceptedOnly_ = parameters.marketUpdateOnAcceptedOnly;
+  marketUpdatePeriodAccepted_ = max(1, parameters.marketUpdatePeriodAccepted);
+  marketEta_ = max(0.0, parameters.marketEta);
+  marketRho_ = parameters.marketRho;
+  marketPriceCap_ = max(0.0, parameters.marketPriceCap);
+  marketGamma_ = max(0.0, parameters.marketGamma);
+  marketAcceptanceGuards_ = parameters.marketAcceptanceGuards;
+  marketTauP_ = max(0.0, parameters.marketTauP);
+  marketTauW_ = max(0.0, parameters.marketTauW);
+  marketDestroyWeightPrice_ = parameters.marketDestroyWeightPrice;
+  marketDestroyWeightWait_ = parameters.marketDestroyWeightWait;
+  marketDestroyWeightRoot_ = parameters.marketDestroyWeightRoot;
+  marketSeedTopFrac_ = min(1.0, max(0.0, parameters.marketSeedTopFrac));
+  marketRandomDestroyQuota_ =
+      min(1.0, max(0.0, parameters.marketRandomDestroyQuota));
+  marketCooldownIters_ = max(0, parameters.marketCooldownIters);
+  marketDUp_ = max(0, parameters.marketDUp);
+  marketDDown_ = max(0, parameters.marketDDown);
+  marketClosureCap_ = parameters.marketClosureCap;
+  marketRepairTieBreak_ = parameters.marketRepairTieBreak;
+  marketRepairBlend_ = parameters.marketRepairBlend;
+  marketTieBreakEpsSoc_ = max(0.0, parameters.marketTieBreakEpsSoc);
+  marketLambdaPrice_ = max(0.0, parameters.marketLambdaPrice);
+  marketLambdaWait_ = max(0.0, parameters.marketLambdaWait);
+  if (marketClosureCap_ <= 0) {
+    marketClosureCap_ = neighborSize_;
+  }
+  marketTaskCooldownUntilIter_.assign(instance_.getTasksNum(), 0);
+
+  // Ensure both working solutions use the selected low-level planner.
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    solution_.agents[agent].pathPlanner = createSharedPlanner(agent);
+    previousSolution_.agents[agent].pathPlanner = createSharedPlanner(agent);
+  }
+
   incrementalRegret_ = parameters.incrementalRegret;
   if (parameters.incrementalRegretMode == "descendants") {
     incrementalRegretMode_ = IncrementalRegretMode::descendants;
@@ -51,6 +97,771 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   regretStamp_.assign(instance_.getTasksNum(), 0);
   regretBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
   regretSecondBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
+}
+
+std::shared_ptr<SingleAgentSolver> LNS::createSharedPlanner(int agent) const {
+  switch (lowLevelPlannerType_) {
+    case LowLevelPlannerType::sipps:
+      return std::make_shared<MultiLabelSIPPS>(
+          instance_, agent, plannerParityCheck_, plannerParityMaxLogs_);
+    case LowLevelPlannerType::mlastar:
+    default:
+      return std::make_shared<MultiLabelSpaceTimeAStar>(instance_, agent);
+  }
+}
+
+std::unique_ptr<SingleAgentSolver> LNS::createLocalPlanner(int agent) const {
+  switch (lowLevelPlannerType_) {
+    case LowLevelPlannerType::sipps:
+      return std::make_unique<MultiLabelSIPPS>(
+          instance_, agent, plannerParityCheck_, plannerParityMaxLogs_);
+    case LowLevelPlannerType::mlastar:
+    default:
+      return std::make_unique<MultiLabelSpaceTimeAStar>(instance_, agent);
+  }
+}
+
+int LNS::marketTimeBucket(int timestep) const {
+  if (marketBucketDt_ <= 1) {
+    return timestep;
+  }
+  return timestep / marketBucketDt_;
+}
+
+uint64_t LNS::makeMarketVertexKey(int location, int bucket) const {
+  uint64_t x = 0;
+  x ^= (uint64_t)(uint32_t)location;
+  x ^= ((uint64_t)(uint32_t)bucket) << 32;
+  x ^= 0x9E3779B97F4A7C15ULL;
+  return LLNode::mix64(x);
+}
+
+uint64_t LNS::makeMarketEdgeKey(int from, int to, int bucket) const {
+  uint64_t x = 0;
+  x ^= (uint64_t)(uint32_t)from;
+  x ^= ((uint64_t)(uint32_t)to) << 21;
+  x ^= ((uint64_t)(uint32_t)bucket) << 42;
+  x ^= 0xD1B54A32D192ED03ULL;
+  return LLNode::mix64(x);
+}
+
+void LNS::computeTaskScheduleMetrics(vector<TaskScheduleMetrics>& perTask,
+                                     vector<double>* blockedWaitSum) const {
+  const int taskCount = instance_.getTasksNum();
+  perTask.assign(taskCount, TaskScheduleMetrics());
+  if (blockedWaitSum != nullptr) {
+    blockedWaitSum->assign(taskCount, 0.0);
+  }
+  const vector<vector<int>> predecessors = instance_.getAncestors();
+
+  for (int task = 0; task < taskCount; task++) {
+    const auto itAgent = solution_.taskAgentMap.find(task);
+    if (itAgent == solution_.taskAgentMap.end()) {
+      continue;
+    }
+    const int agent = itAgent->second;
+    if (agent == UNASSIGNED) {
+      continue;
+    }
+    const vector<int>& assignments = solution_.agents[agent].taskAssignments;
+    const auto itPos = std::find(assignments.begin(), assignments.end(), task);
+    if (itPos == assignments.end()) {
+      continue;
+    }
+    const int pos = (int)(itPos - assignments.begin());
+    if (pos < 0 || pos >= (int)solution_.agents[agent].taskPaths.size()) {
+      continue;
+    }
+    const AgentTaskPath& taskPath = solution_.agents[agent].taskPaths[pos];
+    if (taskPath.empty()) {
+      continue;
+    }
+
+    TaskScheduleMetrics metric;
+    metric.valid = true;
+    metric.end = taskPath.endTime();
+    const int taskLocation = instance_.getTaskLocations(task);
+    int arrive = taskPath.endTime();
+    for (int i = 0; i < (int)taskPath.size(); i++) {
+      if (taskPath[i].location == taskLocation) {
+        arrive = taskPath.beginTime + i;
+        break;
+      }
+    }
+    metric.arrive = arrive;
+    metric.release = 0;
+    metric.blocker = UNASSIGNED;
+
+    if (task >= 0 && task < (int)predecessors.size()) {
+      for (int pred : predecessors[task]) {
+        const auto itPredAgent = solution_.taskAgentMap.find(pred);
+        if (itPredAgent == solution_.taskAgentMap.end()) {
+          continue;
+        }
+        const int predAgent = itPredAgent->second;
+        if (predAgent == UNASSIGNED) {
+          continue;
+        }
+        const vector<int>& predAssignments =
+            solution_.agents[predAgent].taskAssignments;
+        const auto itPredPos =
+            std::find(predAssignments.begin(), predAssignments.end(), pred);
+        if (itPredPos == predAssignments.end()) {
+          continue;
+        }
+        const int predPos = (int)(itPredPos - predAssignments.begin());
+        if (predPos < 0 ||
+            predPos >= (int)solution_.agents[predAgent].taskPaths.size()) {
+          continue;
+        }
+        const AgentTaskPath& predPath = solution_.agents[predAgent].taskPaths[predPos];
+        if (predPath.empty()) {
+          continue;
+        }
+        const int predEnd = predPath.endTime();
+        if (predEnd > metric.release) {
+          metric.release = predEnd;
+          metric.blocker = pred;
+        }
+      }
+    }
+    metric.start = max(metric.arrive, metric.release);
+    metric.waitPrec = max(0, metric.start - metric.arrive);
+    perTask[task] = metric;
+    if (blockedWaitSum != nullptr && metric.blocker != UNASSIGNED) {
+      (*blockedWaitSum)[metric.blocker] += metric.waitPrec;
+    }
+  }
+}
+
+double LNS::computeTaskMarketExposure(int task, bool normalized) const {
+  if (task < 0 || task >= instance_.getTasksNum()) {
+    return 0.0;
+  }
+  const auto itAgent = solution_.taskAgentMap.find(task);
+  if (itAgent == solution_.taskAgentMap.end()) {
+    return 0.0;
+  }
+  const int agent = itAgent->second;
+  if (agent == UNASSIGNED) {
+    return 0.0;
+  }
+  const vector<int>& assignments = solution_.agents[agent].taskAssignments;
+  const auto itPos = std::find(assignments.begin(), assignments.end(), task);
+  if (itPos == assignments.end()) {
+    return 0.0;
+  }
+  const int pos = (int)(itPos - assignments.begin());
+  if (pos < 0 || pos >= (int)solution_.agents[agent].taskPaths.size()) {
+    return 0.0;
+  }
+  const AgentTaskPath& taskPath = solution_.agents[agent].taskPaths[pos];
+  if (taskPath.empty()) {
+    return 0.0;
+  }
+
+  double totalExposure = 0.0;
+  int resourceCount = 0;
+  for (int i = 0; i < (int)taskPath.size(); i++) {
+    const int timestep = taskPath.beginTime + i;
+    const int bucket = marketTimeBucket(timestep);
+    const int location = taskPath[i].location;
+    const uint64_t vKey = makeMarketVertexKey(location, bucket);
+    const auto vIt = marketVertexPrices_.find(vKey);
+    if (vIt != marketVertexPrices_.end()) {
+      totalExposure += vIt->second;
+    }
+    resourceCount++;
+
+    if (i > 0) {
+      const int prevLocation = taskPath[i - 1].location;
+      const uint64_t eKey = makeMarketEdgeKey(prevLocation, location, bucket);
+      const auto eIt = marketEdgePrices_.find(eKey);
+      if (eIt != marketEdgePrices_.end()) {
+        totalExposure += eIt->second;
+      }
+      resourceCount++;
+    }
+  }
+  if (!normalized) {
+    return totalExposure;
+  }
+  return totalExposure / max(1, resourceCount);
+}
+
+double LNS::computeMarketExposureFromPath(const AgentTaskPath& taskPath,
+                                          bool normalized) const {
+  if (taskPath.empty()) {
+    return 0.0;
+  }
+
+  double totalExposure = 0.0;
+  int resourceCount = 0;
+  for (int i = 0; i < (int)taskPath.size(); i++) {
+    const int timestep = taskPath.beginTime + i;
+    const int bucket = marketTimeBucket(timestep);
+    const int location = taskPath[i].location;
+    const uint64_t vKey = makeMarketVertexKey(location, bucket);
+    const auto vIt = marketVertexPrices_.find(vKey);
+    if (vIt != marketVertexPrices_.end()) {
+      totalExposure += vIt->second;
+    }
+    resourceCount++;
+
+    if (i > 0) {
+      const int prevLocation = taskPath[i - 1].location;
+      const uint64_t eKey = makeMarketEdgeKey(prevLocation, location, bucket);
+      const auto eIt = marketEdgePrices_.find(eKey);
+      if (eIt != marketEdgePrices_.end()) {
+        totalExposure += eIt->second;
+      }
+      resourceCount++;
+    }
+  }
+  if (!normalized) {
+    return totalExposure;
+  }
+  return totalExposure / max(1, resourceCount);
+}
+
+int LNS::computeTaskPrecedenceWaitFromState(
+    int task, int taskLocation, const vector<vector<int>>& agentTaskAssignments,
+    const vector<vector<AgentTaskPath>>& agentTaskPaths,
+    const vector<pair<int, int>>& precedenceConstraints) const {
+  if (task < 0 || task >= instance_.getTasksNum()) {
+    return 0;
+  }
+
+  int taskAgent = UNASSIGNED;
+  int taskPos = -1;
+  for (int agent = 0; agent < (int)agentTaskAssignments.size(); agent++) {
+    const auto it = std::find(agentTaskAssignments[agent].begin(),
+                              agentTaskAssignments[agent].end(), task);
+    if (it != agentTaskAssignments[agent].end()) {
+      taskAgent = agent;
+      taskPos = (int)(it - agentTaskAssignments[agent].begin());
+      break;
+    }
+  }
+  if (taskAgent == UNASSIGNED || taskPos < 0 ||
+      taskPos >= (int)agentTaskPaths[taskAgent].size()) {
+    return 0;
+  }
+
+  const AgentTaskPath& taskPath = agentTaskPaths[taskAgent][taskPos];
+  if (taskPath.empty()) {
+    return 0;
+  }
+
+  int arrive = taskPath.endTime();
+  for (int i = 0; i < (int)taskPath.size(); i++) {
+    if (taskPath[i].location == taskLocation) {
+      arrive = taskPath.beginTime + i;
+      break;
+    }
+  }
+
+  int release = 0;
+  for (const auto& prec : precedenceConstraints) {
+    if (prec.second != task) {
+      continue;
+    }
+    const int pred = prec.first;
+    bool predFound = false;
+    int predEnd = 0;
+    for (int agent = 0; agent < (int)agentTaskAssignments.size(); agent++) {
+      const auto itPred = std::find(agentTaskAssignments[agent].begin(),
+                                    agentTaskAssignments[agent].end(), pred);
+      if (itPred == agentTaskAssignments[agent].end()) {
+        continue;
+      }
+      const int predPos = (int)(itPred - agentTaskAssignments[agent].begin());
+      if (predPos >= 0 && predPos < (int)agentTaskPaths[agent].size() &&
+          !agentTaskPaths[agent][predPos].empty()) {
+        predEnd = agentTaskPaths[agent][predPos].endTime();
+        predFound = true;
+      }
+      break;
+    }
+    if (predFound) {
+      release = max(release, predEnd);
+    }
+  }
+
+  return max(0, release - arrive);
+}
+
+int LNS::computeTaskPrecedenceWaitInCurrentSolution(int task) const {
+  if (task < 0 || task >= instance_.getTasksNum()) {
+    return 0;
+  }
+  const auto itTaskAgent = solution_.taskAgentMap.find(task);
+  if (itTaskAgent == solution_.taskAgentMap.end() ||
+      itTaskAgent->second == UNASSIGNED) {
+    return 0;
+  }
+
+  const int agent = itTaskAgent->second;
+  const vector<int>& assignments = solution_.agents[agent].taskAssignments;
+  const auto itPos = std::find(assignments.begin(), assignments.end(), task);
+  if (itPos == assignments.end()) {
+    return 0;
+  }
+  const int taskPos = (int)(itPos - assignments.begin());
+  if (taskPos < 0 || taskPos >= (int)solution_.agents[agent].taskPaths.size()) {
+    return 0;
+  }
+  const AgentTaskPath& taskPath = solution_.agents[agent].taskPaths[taskPos];
+  if (taskPath.empty()) {
+    return 0;
+  }
+
+  const int taskLocation = instance_.getTaskLocations(task);
+  int arrive = taskPath.endTime();
+  for (int i = 0; i < (int)taskPath.size(); i++) {
+    if (taskPath[i].location == taskLocation) {
+      arrive = taskPath.beginTime + i;
+      break;
+    }
+  }
+
+  int release = 0;
+  for (const auto& prec : instance_.getInputPrecedenceConstraints()) {
+    if (prec.second != task) {
+      continue;
+    }
+    const int pred = prec.first;
+    const auto itPredAgent = solution_.taskAgentMap.find(pred);
+    if (itPredAgent == solution_.taskAgentMap.end() ||
+        itPredAgent->second == UNASSIGNED) {
+      continue;
+    }
+    const int predAgent = itPredAgent->second;
+    const vector<int>& predAssignments =
+        solution_.agents[predAgent].taskAssignments;
+    const auto itPredPos =
+        std::find(predAssignments.begin(), predAssignments.end(), pred);
+    if (itPredPos == predAssignments.end()) {
+      continue;
+    }
+    const int predPos = (int)(itPredPos - predAssignments.begin());
+    if (predPos < 0 ||
+        predPos >= (int)solution_.agents[predAgent].taskPaths.size()) {
+      continue;
+    }
+    const AgentTaskPath& predPath = solution_.agents[predAgent].taskPaths[predPos];
+    if (predPath.empty()) {
+      continue;
+    }
+    release = max(release, predPath.endTime());
+  }
+
+  return max(0, release - arrive);
+}
+
+double LNS::computeSolutionMarketPressure() const {
+  double pressure = 0.0;
+  for (int task = 0; task < instance_.getTasksNum(); task++) {
+    const auto itAgent = solution_.taskAgentMap.find(task);
+    if (itAgent == solution_.taskAgentMap.end() || itAgent->second == UNASSIGNED) {
+      continue;
+    }
+    pressure += computeTaskMarketExposure(task, true);
+  }
+  return pressure;
+}
+
+double LNS::computeSolutionPrecedenceWait() const {
+  vector<TaskScheduleMetrics> perTask;
+  computeTaskScheduleMetrics(perTask, nullptr);
+  double totalWait = 0.0;
+  for (const TaskScheduleMetrics& metric : perTask) {
+    if (!metric.valid) {
+      continue;
+    }
+    totalWait += metric.waitPrec;
+  }
+  return totalWait;
+}
+
+bool LNS::passMarketAcceptanceGuards(double candidatePressure,
+                                     double candidateWait) const {
+  if (!marketAcceptanceGuards_) {
+    return true;
+  }
+  if (incumbentSolution_.agentPaths.empty()) {
+    return true;
+  }
+  if (!std::isfinite(marketBestPressure_) || !std::isfinite(marketBestWait_)) {
+    return true;
+  }
+  const bool pressureOK = candidatePressure <= marketBestPressure_ + marketTauP_;
+  const bool waitOK = candidateWait <= marketBestWait_ + marketTauW_;
+  return pressureOK && waitOK;
+}
+
+void LNS::updateMarketStateFromCurrentSolution() {
+  if (!marketHeuristics_) {
+    return;
+  }
+
+  unordered_map<uint64_t, int> vertexDemand;
+  unordered_map<uint64_t, int> edgeDemand;
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const AgentTaskPath& path = solution_.agents[agent].path;
+    if (path.empty()) {
+      continue;
+    }
+    for (int i = 0; i < (int)path.size(); i++) {
+      const int timestep = path.beginTime + i;
+      const int bucket = marketTimeBucket(timestep);
+      const int location = path[i].location;
+      vertexDemand[makeMarketVertexKey(location, bucket)]++;
+      if (i > 0) {
+        const int prevLocation = path[i - 1].location;
+        edgeDemand[makeMarketEdgeKey(prevLocation, location, bucket)]++;
+      }
+    }
+  }
+
+  const double eta =
+      marketEta_ / std::sqrt(1.0 + (double)marketStats_.updates);
+
+  int64_t contendedResources = 0;
+  double contendedPriceSum = 0.0;
+  double maxPrice = 0.0;
+
+  auto updateCategory = [&](const unordered_map<uint64_t, int>& demand,
+                            unordered_map<uint64_t, double>& prices,
+                            unordered_map<uint64_t, double>& excessHat,
+                            int bucketCapacity) {
+    vector<uint64_t> keys;
+    keys.reserve(demand.size() + prices.size() + excessHat.size());
+    for (const auto& kv : demand) {
+      keys.push_back(kv.first);
+    }
+    for (const auto& kv : prices) {
+      keys.push_back(kv.first);
+    }
+    for (const auto& kv : excessHat) {
+      keys.push_back(kv.first);
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+    unordered_map<uint64_t, double> nextPrices;
+    unordered_map<uint64_t, double> nextExcessHat;
+    nextPrices.reserve(prices.size() + demand.size());
+    nextExcessHat.reserve(excessHat.size() + demand.size());
+
+    for (uint64_t key : keys) {
+      const auto itDemand = demand.find(key);
+      const int d = (itDemand == demand.end()) ? 0 : itDemand->second;
+      const int excess = max(0, d - max(1, bucketCapacity));
+      const auto itOldPrice = prices.find(key);
+      const auto itOldHat = excessHat.find(key);
+      const double oldPrice = (itOldPrice == prices.end()) ? 0.0 : itOldPrice->second;
+      const double oldHat = (itOldHat == excessHat.end()) ? 0.0 : itOldHat->second;
+      const double newHat = marketRho_ * oldHat + (1.0 - marketRho_) * excess;
+
+      double newPrice = oldPrice;
+      if (excess > 0) {
+        const double basePrice = max(oldPrice, 1.0);
+        newPrice = min(marketPriceCap_, basePrice * std::exp(eta * newHat));
+      } else {
+        newPrice = oldPrice * max(0.0, 1.0 - marketGamma_);
+      }
+
+      if (newPrice > 1e-9 || newHat > 1e-9) {
+        nextPrices[key] = newPrice;
+        nextExcessHat[key] = newHat;
+      }
+      if (excess > 0) {
+        contendedResources++;
+        contendedPriceSum += newPrice;
+        maxPrice = max(maxPrice, newPrice);
+      }
+    }
+
+    prices.swap(nextPrices);
+    excessHat.swap(nextExcessHat);
+  };
+
+  updateCategory(vertexDemand, marketVertexPrices_, marketVertexExcessHat_,
+                 marketVertexBucketCapacity_);
+  updateCategory(edgeDemand, marketEdgePrices_, marketEdgeExcessHat_,
+                 marketEdgeBucketCapacity_);
+
+  vector<double> allPrices;
+  allPrices.reserve(marketVertexPrices_.size() + marketEdgePrices_.size());
+  double totalPriceMass = 0.0;
+  for (const auto& kv : marketVertexPrices_) {
+    if (kv.second > 0.0) {
+      allPrices.push_back(kv.second);
+      totalPriceMass += kv.second;
+    }
+  }
+  for (const auto& kv : marketEdgePrices_) {
+    if (kv.second > 0.0) {
+      allPrices.push_back(kv.second);
+      totalPriceMass += kv.second;
+    }
+  }
+  double topPriceMassFrac = 0.0;
+  if (!allPrices.empty() && totalPriceMass > 1e-12) {
+    std::sort(allPrices.begin(), allPrices.end(), std::greater<double>());
+    const int topK = max(1, (int)std::ceil((double)allPrices.size() * 0.01));
+    double topMass = 0.0;
+    for (int i = 0; i < topK && i < (int)allPrices.size(); i++) {
+      topMass += allPrices[i];
+    }
+    topPriceMassFrac = topMass / totalPriceMass;
+  }
+
+  vector<TaskScheduleMetrics> perTask;
+  computeTaskScheduleMetrics(perTask, nullptr);
+  double totalWait = 0.0;
+  double maxWait = 0.0;
+  for (const TaskScheduleMetrics& metric : perTask) {
+    if (!metric.valid) {
+      continue;
+    }
+    totalWait += metric.waitPrec;
+    maxWait = max(maxWait, (double)metric.waitPrec);
+  }
+
+  marketStats_.updates++;
+  marketStats_.contendedResources = contendedResources;
+  marketStats_.meanPriceContended =
+      contendedResources > 0 ? contendedPriceSum / (double)contendedResources
+                             : 0.0;
+  marketStats_.maxPrice = maxPrice;
+  marketStats_.topPriceMassFrac = topPriceMassFrac;
+  marketStats_.totalPrecedenceWait = totalWait;
+  marketStats_.maxPrecedenceWait = maxWait;
+}
+
+void LNS::maybeUpdateMarketState(bool accepted) {
+  if (!marketHeuristics_) {
+    return;
+  }
+  if (marketUpdateOnAcceptedOnly_) {
+    if (!accepted) {
+      return;
+    }
+    marketAcceptedCounter_++;
+    if (marketAcceptedCounter_ % marketUpdatePeriodAccepted_ != 0) {
+      return;
+    }
+  } else {
+    marketUpdateCounter_++;
+    if (marketUpdateCounter_ % marketUpdatePeriodAccepted_ != 0) {
+      return;
+    }
+  }
+  updateMarketStateFromCurrentSolution();
+}
+
+void LNS::marketTatonnementRemoval(
+    std::optional<set<Conflicts>> potentialNeighborhood) {
+  PLOGD << "Using market tatonnement removal\n";
+
+  lnsNeighborhood_.patchedTasks.clear();
+  lnsNeighborhood_.regretMaxHeap.clear();
+  lnsNeighborhood_.commitedTasks.clear();
+  lnsNeighborhood_.removedTasksPathSize.clear();
+  lnsNeighborhood_.removedTasks.clear();
+
+  const int taskCount = instance_.getTasksNum();
+  if (taskCount <= 0) {
+    return;
+  }
+  const int cappedNeighborSize = min(neighborSize_, taskCount);
+  if (cappedNeighborSize <= 0) {
+    return;
+  }
+
+  vector<TaskScheduleMetrics> perTask;
+  vector<double> blockedWaitSum;
+  computeTaskScheduleMetrics(perTask, &blockedWaitSum);
+  const vector<vector<int>> predecessors = instance_.getAncestors();
+  const vector<vector<int>> successors = instance_.getSuccessors();
+
+  vector<pair<int, double>> rankedTasks;
+  rankedTasks.reserve(taskCount);
+  const int currentIter = (int)iterationStats.size();
+  for (int task = 0; task < taskCount; task++) {
+    const auto itAgent = solution_.taskAgentMap.find(task);
+    if (itAgent == solution_.taskAgentMap.end() || itAgent->second == UNASSIGNED) {
+      continue;
+    }
+    const double exposure = computeTaskMarketExposure(task, true);
+    const double wait = perTask[task].valid ? (double)perTask[task].waitPrec : 0.0;
+    const int blocker = perTask[task].blocker;
+    const double root = (blocker >= 0 && blocker < taskCount)
+                            ? blockedWaitSum[blocker]
+                            : 0.0;
+    double burden = marketDestroyWeightPrice_ * exposure +
+                    marketDestroyWeightWait_ * wait +
+                    marketDestroyWeightRoot_ * root;
+    if (task < (int)marketTaskCooldownUntilIter_.size() &&
+        marketTaskCooldownUntilIter_[task] > currentIter) {
+      burden *= 0.25;
+    }
+    rankedTasks.emplace_back(task, burden);
+  }
+
+  if (rankedTasks.empty()) {
+    randomRemoval();
+    return;
+  }
+
+  std::sort(rankedTasks.begin(), rankedTasks.end(),
+            [](const pair<int, double>& lhs, const pair<int, double>& rhs) {
+              if (lhs.second != rhs.second) {
+                return lhs.second > rhs.second;
+              }
+              return lhs.first < rhs.first;
+            });
+
+  vector<char> selected(taskCount, 0);
+  auto addTask = [&](int task) -> bool {
+    if (task < 0 || task >= taskCount || selected[task]) {
+      return false;
+    }
+    const auto itAgent = solution_.taskAgentMap.find(task);
+    if (itAgent == solution_.taskAgentMap.end()) {
+      return false;
+    }
+    const int agent = itAgent->second;
+    if (agent == UNASSIGNED) {
+      return false;
+    }
+    const vector<int>& assignments = solution_.agents[agent].taskAssignments;
+    const auto itPos = std::find(assignments.begin(), assignments.end(), task);
+    if (itPos == assignments.end()) {
+      return false;
+    }
+    const int pos = (int)(itPos - assignments.begin());
+    selected[task] = 1;
+    lnsNeighborhood_.removedTasks.insert(Conflicts(task, agent, pos));
+    return true;
+  };
+
+  if (potentialNeighborhood.has_value() && !potentialNeighborhood->empty() &&
+      incumbentSolution_.agentPaths.empty()) {
+    const int quota = max(1, cappedNeighborSize / 2);
+    const set<Conflicts> conflictSeeds =
+        extractNConflicts(quota, potentialNeighborhood.value());
+    for (const Conflicts& conflict : conflictSeeds) {
+      if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+        break;
+      }
+      addTask(conflict.task);
+    }
+  }
+
+  const int randomSlots = min(
+      cappedNeighborSize,
+      max(0, (int)std::round((double)cappedNeighborSize * marketRandomDestroyQuota_)));
+  const int targetNonRandom = max(0, cappedNeighborSize - randomSlots);
+
+  int seedPoolSize = (int)std::ceil((double)rankedTasks.size() * marketSeedTopFrac_);
+  seedPoolSize = max(1, min(seedPoolSize, (int)rankedTasks.size()));
+  vector<int> seedPoolTasks;
+  vector<double> seedPoolWeights;
+  seedPoolTasks.reserve(seedPoolSize);
+  seedPoolWeights.reserve(seedPoolSize);
+  for (int i = 0; i < seedPoolSize; i++) {
+    seedPoolTasks.push_back(rankedTasks[i].first);
+    seedPoolWeights.push_back(max(1e-6, rankedTasks[i].second + 1e-6));
+  }
+
+  auto expandAncestors = [&](int rootTask, int maxDepth, int* closureCount) {
+    if (rootTask < 0 || rootTask >= taskCount || maxDepth <= 0) {
+      return;
+    }
+    std::queue<pair<int, int>> q;
+    q.push({rootTask, 0});
+    while (!q.empty() && (int)lnsNeighborhood_.removedTasks.size() < targetNonRandom) {
+      const auto [task, depth] = q.front();
+      q.pop();
+      if (depth >= maxDepth || task < 0 || task >= taskCount) {
+        continue;
+      }
+      for (int pred : predecessors[task]) {
+        if ((int)lnsNeighborhood_.removedTasks.size() >= targetNonRandom ||
+            *closureCount >= marketClosureCap_) {
+          return;
+        }
+        if (addTask(pred)) {
+          (*closureCount)++;
+          q.push({pred, depth + 1});
+        }
+      }
+    }
+  };
+
+  auto expandSuccessors = [&](int rootTask, int maxDepth, int* closureCount) {
+    if (rootTask < 0 || rootTask >= taskCount || maxDepth <= 0) {
+      return;
+    }
+    std::queue<pair<int, int>> q;
+    q.push({rootTask, 0});
+    while (!q.empty() && (int)lnsNeighborhood_.removedTasks.size() < targetNonRandom) {
+      const auto [task, depth] = q.front();
+      q.pop();
+      if (depth >= maxDepth || task < 0 || task >= taskCount) {
+        continue;
+      }
+      for (int succ : successors[task]) {
+        if ((int)lnsNeighborhood_.removedTasks.size() >= targetNonRandom ||
+            *closureCount >= marketClosureCap_) {
+          return;
+        }
+        if (addTask(succ)) {
+          (*closureCount)++;
+          q.push({succ, depth + 1});
+        }
+      }
+    }
+  };
+
+  while ((int)lnsNeighborhood_.removedTasks.size() < targetNonRandom &&
+         !seedPoolTasks.empty()) {
+    std::discrete_distribution<int> seedDist(seedPoolWeights.begin(),
+                                             seedPoolWeights.end());
+    const int sampledIdx = seedDist(rng_);
+    const int seedTask = seedPoolTasks[sampledIdx];
+    const int blocker =
+        (seedTask >= 0 && seedTask < taskCount) ? perTask[seedTask].blocker
+                                                : UNASSIGNED;
+    const bool addedSeed = addTask(seedTask);
+    if (addedSeed) {
+      int closureCount = 0;
+      if (blocker != UNASSIGNED && addTask(blocker)) {
+        closureCount++;
+      }
+      expandAncestors(blocker, marketDUp_, &closureCount);
+      expandSuccessors(blocker, marketDDown_, &closureCount);
+      expandSuccessors(seedTask, marketDDown_, &closureCount);
+    }
+    seedPoolTasks.erase(seedPoolTasks.begin() + sampledIdx);
+    seedPoolWeights.erase(seedPoolWeights.begin() + sampledIdx);
+  }
+
+  std::uniform_int_distribution<int> randomTaskDist(0, taskCount - 1);
+  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    addTask(randomTaskDist(rng_));
+  }
+
+  if (marketCooldownIters_ > 0) {
+    for (int task = 0; task < taskCount; task++) {
+      if (selected[task]) {
+        marketTaskCooldownUntilIter_[task] = currentIter + marketCooldownIters_;
+      }
+    }
+  }
 }
 
 bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
@@ -181,12 +992,21 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
     //     6 @ 0 -> 22 -> 23 @ 2 -> 24 @ 3 -> 25 -> 26 ->
     else if (readingTaskPaths && agent > -1) {
       bool ok = true;
+      auto isWhitespaceOnly = [](const std::string& s) -> bool {
+        return s.find_first_not_of(" \t\r\n") == std::string::npos;
+      };
+      auto hasDigit = [](const std::string& s) -> bool {
+        return s.find_first_of("0123456789") != std::string::npos;
+      };
       auto consumeToken = [&](const std::string& rawToken, AgentTaskPath& taskPath,
                               int& taskIndex) {
-        if (rawToken.empty()) {
+        if (rawToken.empty() || isWhitespaceOnly(rawToken)) {
           return;
         }
         string token = rawToken;
+        if (isWhitespaceOnly(token)) {
+          return;
+        }
         if (token.find('@') != string::npos) {
           if (!taskPath.empty()) {
             // Mark the last location of the previous task as goal.
@@ -201,6 +1021,9 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
           const size_t atPos = token.find('@');
           const auto loc = parseInt(token.substr(0, atPos));
           if (!loc.has_value()) {
+            if (!hasDigit(token.substr(0, atPos))) {
+              return;
+            }
             PLOGE << "Failed to parse path location token: '" << token << "'\n";
             ok = false;
             return;
@@ -232,6 +1055,9 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
         } else {
           const auto loc = parseInt(token);
           if (!loc.has_value()) {
+            if (!hasDigit(token)) {
+              return;
+            }
             PLOGE << "Failed to parse path location token: '" << token << "'\n";
             ok = false;
             return;
@@ -294,7 +1120,7 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
   // Gather the information
   int initialSumOfCosts = 0;
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    initialSumOfCosts += solution_.agents[agent].path.endTime();
+    initialSumOfCosts += solution_.agents[agent].path.endTimeOrZero();
   }
   solution_.sumOfCosts = initialSumOfCosts;
   return true;
@@ -362,7 +1188,7 @@ bool LNS::buildGreedySolution() {
       int previousTask =
           solution_.agents[agent].taskAssignments[taskPosition - 1];
       assert(!initialPaths_[previousTask].empty());
-      startTime = initialPaths_[previousTask].endTime();
+      startTime = initialPaths_[previousTask].endTimeChecked();
     }
 
     PLOGI << "Planning for agent " << agent << " and task " << task << endl;
@@ -387,7 +1213,7 @@ bool LNS::buildGreedySolution() {
   // Gather the information
   int initialSumOfCosts = 0;
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    initialSumOfCosts += solution_.agents[agent].path.endTime();
+    initialSumOfCosts += solution_.agents[agent].path.endTimeOrZero();
   }
   solution_.sumOfCosts = initialSumOfCosts;
   return true;
@@ -465,7 +1291,8 @@ bool LNS::buildGreedySolutionPrecedenceOnly() {
     int earliestGoalTime = 0;
     for (int pred : predecessors[task]) {
       assert(!initialPaths_[pred].empty());
-      earliestGoalTime = max(earliestGoalTime, initialPaths_[pred].endTime() + 1);
+      earliestGoalTime =
+          max(earliestGoalTime, initialPaths_[pred].endTimeChecked() + 1);
     }
 
     ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
@@ -662,53 +1489,9 @@ void LNS::shawRemoval(int prioritySize) {
   PLOGD << "Shaw Removal Step -> Random Task " << randomTask << " is removed!"
         << endl;
 
-  // Precedence-aware relatedness:
-  // prefer tasks that are close in the precedence graph (either ancestor or
-  // descendant) to remove a coherent "precedence neighborhood".
   const int taskCount = instance_.getTasksNum();
   const int cappedPrioritySize = min(prioritySize, taskCount);
   const int cappedNeighborSize = min(neighborSize_, taskCount);
-  const int precedenceDepthCap = 4;  // tasks within 4 precedence edges
-  const double precedenceWeight = shawDistanceWeight_ * 10.0;
-  const int precedenceUnrelatedPenalty = precedenceDepthCap + 1;
-
-  const vector<vector<int>> successors = instance_.getSuccessors();
-  const vector<vector<int>> predecessors = instance_.getAncestors();
-  const int INF = taskCount + 1000000;
-  auto bfsDistancesFrom = [&](const vector<vector<int>>& adj) -> vector<int> {
-    vector<int> dist(taskCount, INF);
-    std::queue<int> q;
-    dist[randomTask] = 0;
-    q.push(randomTask);
-    while (!q.empty()) {
-      const int u = q.front();
-      q.pop();
-      const int du = dist[u];
-      for (const int v : adj[u]) {
-        if (dist[v] == INF) {
-          dist[v] = du + 1;
-          q.push(v);
-        }
-      }
-    }
-    return dist;
-  };
-
-  const vector<int> distDown = bfsDistancesFrom(successors);
-  const vector<int> distUp = bfsDistancesFrom(predecessors);
-  vector<int> precedencePenalty(taskCount, precedenceUnrelatedPenalty);
-  vector<int> precedenceNearby;
-  precedenceNearby.reserve(taskCount);
-  for (int t = 0; t < taskCount; t++) {
-    const int d = min(distDown[t], distUp[t]);
-    if (d != INF) {
-      precedencePenalty[t] = min(d, precedenceUnrelatedPenalty);
-    }
-    if (t != randomTask && precedencePenalty[t] <= precedenceDepthCap) {
-      precedenceNearby.push_back(t);
-    }
-  }
-  std::shuffle(precedenceNearby.begin(), precedenceNearby.end(), rng_);
 
   // Get information about random task
   int randomTaskLocation = instance_.getTaskLocations(randomTask);
@@ -752,10 +1535,9 @@ void LNS::shawRemoval(int prioritySize) {
     // Compute the relatedness (smaller => more related).
     const int temporalDiff =
         abs(randomTaskST - relatedTaskST) + abs(randomTaskET - relatedTaskET);
-    const int prec = precedencePenalty[relatedTask];
     const int relatedness =
         (int)(shawDistanceWeight_ * relatedManhattanDistance +
-              shawTemporalWeight_ * temporalDiff + precedenceWeight * prec);
+              shawTemporalWeight_ * temporalDiff);
 
     // Store information
     RelatedTasks relatedToRandomTask(relatedTask, relatedTaskAgent,
@@ -767,18 +1549,7 @@ void LNS::shawRemoval(int prioritySize) {
     alreadyExpanded[relatedTask] = true;
   };
 
-  // Prefer candidates close to the seed task in the precedence graph.
-  for (const int relatedTask : precedenceNearby) {
-    if ((int)expandedTasks.size() >= cappedPrioritySize) {
-      break;
-    }
-    if (alreadyExpanded[relatedTask]) {
-      continue;
-    }
-    pushRelatedCandidate(relatedTask);
-  }
-
-  // Fill remaining candidates uniformly at random.
+  // Fill candidates uniformly at random.
   while ((int)expandedTasks.size() < cappedPrioritySize) {
     const int relatedTask = distribution(rng_);
     if (alreadyExpanded[relatedTask]) {
@@ -811,6 +1582,417 @@ void LNS::shawRemoval(int prioritySize) {
     assert(agent != UNASSIGNED);
     const int pos = solution_.getLocalTaskIndex(agent, t);
     lnsNeighborhood_.removedTasks.insert(Conflicts(t, agent, pos));
+  }
+}
+
+void LNS::precedenceWaitRemoval(
+    std::optional<set<Conflicts>> potentialNeighborhood) {
+  PLOGD << "Using precedence-wait removal\n";
+
+  // Clear old information about the LNS neighborhood. This should be the
+  // first thing that any removal operator must do!
+  lnsNeighborhood_.patchedTasks.clear();
+  lnsNeighborhood_.regretMaxHeap.clear();
+  lnsNeighborhood_.commitedTasks.clear();
+  lnsNeighborhood_.removedTasksPathSize.clear();
+  lnsNeighborhood_.removedTasks.clear();
+
+  const int taskCount = instance_.getTasksNum();
+  if (taskCount <= 0) {
+    return;
+  }
+  const int cappedNeighborSize = min(neighborSize_, taskCount);
+  if (cappedNeighborSize <= 0) {
+    return;
+  }
+
+  const vector<vector<int>> predecessors = instance_.getAncestors();
+  const vector<vector<int>> successors = instance_.getSuccessors();
+
+  vector<int> criticalPred(taskCount, UNASSIGNED);
+  vector<int> releaseTime(taskCount, 0);
+  vector<int> precedenceWait(taskCount, 0);
+  vector<char> taskFeasible(taskCount, 1);
+  vector<int> taskToAgent(taskCount, UNASSIGNED);
+  vector<int> taskToPosition(taskCount, -1);
+
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    const auto& taskPaths = solution_.agents[agent].taskPaths;
+    const int maxPos = min((int)assignments.size(), (int)taskPaths.size());
+    for (int pos = 0; pos < maxPos; pos++) {
+      const int task = assignments[pos];
+      if (task >= 0 && task < taskCount) {
+        taskToAgent[task] = agent;
+        taskToPosition[task] = pos;
+      }
+    }
+  }
+
+  for (int task = 0; task < taskCount; task++) {
+    const int agent = taskToAgent[task];
+    const int taskPos = taskToPosition[task];
+    if (agent == UNASSIGNED || taskPos < 0 ||
+        taskPos >= (int)solution_.agents[agent].taskPaths.size()) {
+      taskFeasible[task] = 0;
+      continue;
+    }
+
+    int prevEnd = 0;
+    int prevLocation = instance_.getStartLocations()[agent];
+    if (taskPos > 0) {
+      const AgentTaskPath& previousTaskPath =
+          solution_.agents[agent].taskPaths[taskPos - 1];
+      if (!previousTaskPath.empty()) {
+        prevEnd = previousTaskPath.endTime();
+        prevLocation = previousTaskPath.back().location;
+      } else {
+        // Defensive fallback for malformed intermediate schedules.
+        const int previousTask =
+            solution_.agents[agent].taskAssignments[taskPos - 1];
+        prevLocation = instance_.getTaskLocations(previousTask);
+        prevEnd = 0;
+      }
+    }
+
+    const int taskLocation = instance_.getTaskLocations(task);
+    const int travelToTask =
+        instance_.getManhattanDistance(prevLocation, taskLocation);
+    const int earliestArrivalNoPrec = prevEnd + travelToTask;
+
+    int maxPredEnd = std::numeric_limits<int>::min();
+    int blocker = UNASSIGNED;
+    for (int pred : predecessors[task]) {
+      if (pred < 0 || pred >= taskCount) {
+        continue;
+      }
+      const int predAgent = taskToAgent[pred];
+      const int predPos = taskToPosition[pred];
+      if (predAgent == UNASSIGNED) {
+        continue;
+      }
+      if (predPos < 0 ||
+          predPos >= (int)solution_.agents[predAgent].taskPaths.size()) {
+        continue;
+      }
+      const AgentTaskPath& predPath = solution_.agents[predAgent].taskPaths[predPos];
+      if (predPath.empty()) {
+        continue;
+      }
+      const int predEnd = predPath.endTime();
+      if (predEnd > maxPredEnd) {
+        maxPredEnd = predEnd;
+        blocker = pred;
+      }
+    }
+
+    if (blocker != UNASSIGNED) {
+      criticalPred[task] = blocker;
+      releaseTime[task] = maxPredEnd;
+      precedenceWait[task] = max(0, maxPredEnd - earliestArrivalNoPrec);
+    }
+  }
+
+  vector<int> order(taskCount);
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(),
+                   [&](int lhs, int rhs) {
+                     if (taskFeasible[lhs] != taskFeasible[rhs]) {
+                       return taskFeasible[lhs] > taskFeasible[rhs];
+                     }
+                     if (precedenceWait[lhs] != precedenceWait[rhs]) {
+                       return precedenceWait[lhs] > precedenceWait[rhs];
+                     }
+                     if (releaseTime[lhs] != releaseTime[rhs]) {
+                       return releaseTime[lhs] > releaseTime[rhs];
+                     }
+                     return lhs < rhs;
+                   });
+
+  vector<char> selected(taskCount, 0);
+  auto addTask = [&](int task) -> bool {
+    if (task < 0 || task >= taskCount || selected[task]) {
+      return false;
+    }
+    const int agent = taskToAgent[task];
+    const int taskPos = taskToPosition[task];
+    if (agent == UNASSIGNED || taskPos < 0) {
+      return false;
+    }
+    selected[task] = 1;
+    lnsNeighborhood_.removedTasks.insert(Conflicts(task, agent, taskPos));
+    return true;
+  };
+
+  // If the current solution is infeasible, keep a conflict-focused anchor so
+  // this operator can still drive towards feasibility instead of only
+  // precedence reshaping.
+  if (potentialNeighborhood.has_value() && !potentialNeighborhood->empty()) {
+    // Bootstrap phase: until we find the first feasible incumbent, prioritize
+    // conflict-driven neighborhoods to quickly recover feasibility.
+    const bool noFeasibleIncumbent = incumbentSolution_.agentPaths.empty();
+    const int conflictQuota =
+        noFeasibleIncumbent ? cappedNeighborSize : max(1, cappedNeighborSize / 2);
+    const set<Conflicts> conflictSeeds =
+        extractNConflicts(conflictQuota, potentialNeighborhood.value());
+    for (const Conflicts& conflict : conflictSeeds) {
+      if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+        break;
+      }
+      addTask(conflict.task);
+    }
+  }
+
+  auto addOneHopNeighborhood = [&](int task) {
+    if (task < 0 || task >= taskCount) {
+      return;
+    }
+    for (int pred : predecessors[task]) {
+      if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+        return;
+      }
+      addTask(pred);
+    }
+    for (int succ : successors[task]) {
+      if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+        return;
+      }
+      addTask(succ);
+    }
+  };
+
+  // Pass 1: prioritize tasks with positive precedence wait. Include the critical
+  // predecessor and one-hop precedence neighbors to address root causes.
+  for (int task : order) {
+    if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+      break;
+    }
+    if (!taskFeasible[task] || precedenceWait[task] <= 0) {
+      continue;
+    }
+    const bool insertedSeed = addTask(task);
+    if (!insertedSeed) {
+      continue;
+    }
+    const int blocker = criticalPred[task];
+    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
+        blocker != UNASSIGNED) {
+      addTask(blocker);
+    }
+    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+      addOneHopNeighborhood(task);
+    }
+    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
+        blocker != UNASSIGNED) {
+      addOneHopNeighborhood(blocker);
+    }
+  }
+
+  // Pass 2: if needed, fill from global precedence-wait order.
+  for (int task : order) {
+    if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+      break;
+    }
+    addTask(task);
+  }
+
+  // Pass 3: fallback random fill (defensive; should almost never trigger).
+  std::uniform_int_distribution<int> distribution(0, taskCount - 1);
+  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    addTask(distribution(rng_));
+  }
+}
+
+void LNS::lowSlackRemoval(std::optional<set<Conflicts>> potentialNeighborhood) {
+  PLOGD << "Using low-slack removal\n";
+
+  // Clear old information about the LNS neighborhood. This should be the
+  // first thing that any removal operator must do!
+  lnsNeighborhood_.patchedTasks.clear();
+  lnsNeighborhood_.regretMaxHeap.clear();
+  lnsNeighborhood_.commitedTasks.clear();
+  lnsNeighborhood_.removedTasksPathSize.clear();
+  lnsNeighborhood_.removedTasks.clear();
+
+  const int taskCount = instance_.getTasksNum();
+  if (taskCount <= 0) {
+    return;
+  }
+  const int cappedNeighborSize = min(neighborSize_, taskCount);
+  if (cappedNeighborSize <= 0) {
+    return;
+  }
+
+  const vector<vector<int>> predecessors = instance_.getAncestors();
+  const vector<vector<int>> successors = instance_.getSuccessors();
+  const int INF = std::numeric_limits<int>::max() / 4;
+
+  vector<int> taskToAgent(taskCount, UNASSIGNED);
+  vector<int> taskToPosition(taskCount, -1);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    const auto& taskPaths = solution_.agents[agent].taskPaths;
+    const int maxPos = min((int)assignments.size(), (int)taskPaths.size());
+    for (int pos = 0; pos < maxPos; pos++) {
+      const int task = assignments[pos];
+      if (task >= 0 && task < taskCount) {
+        taskToAgent[task] = agent;
+        taskToPosition[task] = pos;
+      }
+    }
+  }
+
+  vector<char> taskFeasible(taskCount, 1);
+  vector<char> hasSuccessor(taskCount, 0);
+  vector<int> slack(taskCount, INF);
+  vector<int> tightSuccessor(taskCount, UNASSIGNED);
+
+  for (int task = 0; task < taskCount; task++) {
+    const int agent = taskToAgent[task];
+    const int taskPos = taskToPosition[task];
+    if (agent == UNASSIGNED || taskPos < 0 ||
+        taskPos >= (int)solution_.agents[agent].taskPaths.size()) {
+      taskFeasible[task] = 0;
+      continue;
+    }
+    const AgentTaskPath& taskPath = solution_.agents[agent].taskPaths[taskPos];
+    if (taskPath.empty()) {
+      taskFeasible[task] = 0;
+      continue;
+    }
+
+    const int endTask = taskPath.endTime();
+    int minSuccStart = INF;
+    int minSucc = UNASSIGNED;
+    for (int succ : successors[task]) {
+      if (succ < 0 || succ >= taskCount) {
+        continue;
+      }
+      const int succAgent = taskToAgent[succ];
+      const int succPos = taskToPosition[succ];
+      if (succAgent == UNASSIGNED || succPos < 0 ||
+          succPos >= (int)solution_.agents[succAgent].taskPaths.size()) {
+        continue;
+      }
+      const AgentTaskPath& succPath = solution_.agents[succAgent].taskPaths[succPos];
+      if (succPath.empty()) {
+        continue;
+      }
+      hasSuccessor[task] = 1;
+      const int succStart = succPath.beginTime;
+      if (succStart < minSuccStart) {
+        minSuccStart = succStart;
+        minSucc = succ;
+      }
+    }
+
+    if (minSucc != UNASSIGNED) {
+      tightSuccessor[task] = minSucc;
+      slack[task] = minSuccStart - endTask;
+    }
+  }
+
+  vector<int> order(taskCount);
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(), [&](int lhs, int rhs) {
+    if (taskFeasible[lhs] != taskFeasible[rhs]) {
+      return taskFeasible[lhs] > taskFeasible[rhs];
+    }
+    if (hasSuccessor[lhs] != hasSuccessor[rhs]) {
+      return hasSuccessor[lhs] > hasSuccessor[rhs];
+    }
+    if (slack[lhs] != slack[rhs]) {
+      return slack[lhs] < slack[rhs];  // lower slack = tighter
+    }
+    return lhs < rhs;
+  });
+
+  vector<char> selected(taskCount, 0);
+  auto addTask = [&](int task) -> bool {
+    if (task < 0 || task >= taskCount || selected[task]) {
+      return false;
+    }
+    const int agent = taskToAgent[task];
+    const int taskPos = taskToPosition[task];
+    if (agent == UNASSIGNED || taskPos < 0) {
+      return false;
+    }
+    selected[task] = 1;
+    lnsNeighborhood_.removedTasks.insert(Conflicts(task, agent, taskPos));
+    return true;
+  };
+
+  // If the current solution is infeasible, keep a conflict-focused anchor so
+  // this operator can recover feasibility.
+  if (potentialNeighborhood.has_value() && !potentialNeighborhood->empty()) {
+    const int conflictQuota = max(1, cappedNeighborSize / 2);
+    const set<Conflicts> conflictSeeds =
+        extractNConflicts(conflictQuota, potentialNeighborhood.value());
+    for (const Conflicts& conflict : conflictSeeds) {
+      if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+        break;
+      }
+      addTask(conflict.task);
+    }
+  }
+
+  auto addOneHopNeighborhood = [&](int task) {
+    if (task < 0 || task >= taskCount) {
+      return;
+    }
+    for (int pred : predecessors[task]) {
+      if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+        return;
+      }
+      addTask(pred);
+    }
+    for (int succ : successors[task]) {
+      if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+        return;
+      }
+      addTask(succ);
+    }
+  };
+
+  // Pass 1: remove low-slack tasks and their tight successors / local DAG
+  // neighbors to unlock precedence bottlenecks.
+  for (int task : order) {
+    if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+      break;
+    }
+    if (!taskFeasible[task] || !hasSuccessor[task]) {
+      continue;
+    }
+    const bool insertedSeed = addTask(task);
+    if (!insertedSeed) {
+      continue;
+    }
+    const int succ = tightSuccessor[task];
+    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
+        succ != UNASSIGNED) {
+      addTask(succ);
+    }
+    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+      addOneHopNeighborhood(task);
+    }
+    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
+        succ != UNASSIGNED) {
+      addOneHopNeighborhood(succ);
+    }
+  }
+
+  // Pass 2: if needed, fill from sorted slack order.
+  for (int task : order) {
+    if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+      break;
+    }
+    addTask(task);
+  }
+
+  // Pass 3: random fallback to guarantee neighborhood size.
+  std::uniform_int_distribution<int> distribution(0, taskCount - 1);
+  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    addTask(distribution(rng_));
   }
 }
 
@@ -867,6 +2049,7 @@ void LNS::alnsRemoval(std::optional<set<Conflicts>> potentialNeighborhood) {
                                             adaptiveLNS_.weights.end());
 
   int sampledDestroyHeuristic = distribution(rng_);
+  adaptiveLNS_.recentDestroyHeuristic = sampledDestroyHeuristic;
   switch (sampledDestroyHeuristic) {
     case DestroyHeuristic::randomRemoval:  // RANDOM
       randomRemoval();
@@ -879,6 +2062,15 @@ void LNS::alnsRemoval(std::optional<set<Conflicts>> potentialNeighborhood) {
       break;
     case DestroyHeuristic::shawRemoval:  // SHAW
       shawRemoval(neighborSize_ * 3);
+      break;
+    case DestroyHeuristic::precedenceWaitRemoval:  // PRECEDENCE WAIT
+      precedenceWaitRemoval(std::move(potentialNeighborhood));
+      break;
+    case DestroyHeuristic::lowSlackRemoval:  // LOW SLACK
+      lowSlackRemoval(std::move(potentialNeighborhood));
+      break;
+    case DestroyHeuristic::marketTatonnementRemoval:  // MARKET TATONNEMENT
+      marketTatonnementRemoval(std::move(potentialNeighborhood));
       break;
     default:
       PLOGD << "Sampled a non-existant destroy heuristic!\n";
@@ -992,6 +2184,14 @@ bool LNS::run() {
     extractFeasibleSolution();
   }
 
+  if (marketHeuristics_) {
+    updateMarketStateFromCurrentSolution();
+    if (valid) {
+      marketBestPressure_ = computeSolutionMarketPressure();
+      marketBestWait_ = computeSolutionPrecedenceWait();
+    }
+  }
+
   iterationStats.emplace_back(initialSolutionRuntime_, initialSolutionStrategy,
                               instance_.getAgentNum(), instance_.getTasksNum(),
                               solution_.sumOfCosts, feasibleSolutionUpdated,
@@ -1016,6 +2216,8 @@ bool LNS::run() {
   // LNS loop
   while (runtime < timeLimit_ &&
          (int)iterationStats.size() < numOfIterations_ * 2) {
+    const int previousSocForIter = previousSolution_.sumOfCosts;
+    int alnsHeuristicForIter = -1;
 
     // These functions populate the LNS neighborhoods' removedTask parameter
     if (destroyHeuristic == "conflict") {
@@ -1026,8 +2228,19 @@ bool LNS::run() {
       randomRemoval();
     } else if (destroyHeuristic == "shaw") {
       shawRemoval(neighborSize_ * 3);
+    } else if (destroyHeuristic == "precedence_wait") {
+      precedenceWaitRemoval(std::make_optional(potentialNeighborhood));
+    } else if (destroyHeuristic == "low_slack") {
+      lowSlackRemoval(std::make_optional(potentialNeighborhood));
+    } else if (destroyHeuristic == "market_tatonnement") {
+      marketTatonnementRemoval(std::make_optional(potentialNeighborhood));
     } else if (destroyHeuristic == "alns") {
       alnsRemoval(std::make_optional(potentialNeighborhood));
+      alnsHeuristicForIter = adaptiveLNS_.recentDestroyHeuristic;
+      if (alnsHeuristicForIter >= 0 &&
+          alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
+        adaptiveLNS_.selections[alnsHeuristicForIter]++;
+      }
     } else {
       static_assert(true);
     }
@@ -1155,6 +2368,10 @@ bool LNS::run() {
 
     // If we could not successfully compute the regrets and commit to all the tasks in the neighborhood then we need to reset this neighborhood!
     if (repairFailed || !lnsNeighborhood_.removedTasks.empty()) {
+      if (alnsHeuristicForIter >= 0 &&
+          alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
+        adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
+      }
       // Reject whatever we done till now
       solution_ = previousSolution_;
       feasibleSolutionUpdated = false;
@@ -1166,6 +2383,7 @@ bool LNS::run() {
       // Skip everything after this statement
       PLOGD << "Could not find paths for the neighborhood! Attempting a new "
                "neighborhood computation\n";
+      maybeUpdateMarketState(false);
       continue;
     }
 
@@ -1180,10 +2398,7 @@ bool LNS::run() {
     // Compute the updated sum of costs
     solution_.sumOfCosts = 0;
     for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-      if (!solution_.agents[agent].taskAssignments.empty()) {
-        solution_.sumOfCosts +=
-            solution_.agents[agent].taskPaths.back().endTime();
-      }
+      solution_.sumOfCosts += solution_.agents[agent].path.endTimeOrZero();
     }
 
     PLOGD << "Old sum of costs = " << previousSolution_.sumOfCosts << endl;
@@ -1219,23 +2434,64 @@ bool LNS::run() {
     }
 
     // Ensure that we are either accepting or rejecting a solution here!
-    bool accepted;
-    if (acceptanceCriteria == "SA") {
-      accepted = simulatedAnnealing();
-    } else if (acceptanceCriteria == "TA") {
-      accepted = thresholdAcceptance();
-    } else if (acceptanceCriteria == "OBA") {
-      accepted = oldBachelorsAcceptance();
-    } else if (acceptanceCriteria == "GDA") {
-      accepted = greatDelugeAlgorithm();
-    } else {
+    const int proposedSocForIter = solution_.sumOfCosts;
+    const double candidatePressure =
+        marketHeuristics_ ? computeSolutionMarketPressure() : 0.0;
+    const double candidateWait =
+        marketHeuristics_ ? computeSolutionPrecedenceWait() : 0.0;
+    bool accepted = false;
+    bool guardRejected = false;
+    if (marketHeuristics_ && marketAcceptanceGuards_ &&
+        !passMarketAcceptanceGuards(candidatePressure, candidateWait)) {
+      solution_ = previousSolution_;
       accepted = false;
-      static_assert(true);
+      guardRejected = true;
+      PLOGD << "Rejecting this solution due to market acceptance guards\n";
+    } else {
+      if (acceptanceCriteria == "SA") {
+        accepted = simulatedAnnealing();
+      } else if (acceptanceCriteria == "TA") {
+        accepted = thresholdAcceptance();
+      } else if (acceptanceCriteria == "OBA") {
+        accepted = oldBachelorsAcceptance();
+      } else if (acceptanceCriteria == "GDA") {
+        accepted = greatDelugeAlgorithm();
+      } else {
+        accepted = false;
+        static_assert(true);
+      }
+    }
+
+    if (alnsHeuristicForIter >= 0 &&
+        alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
+      const double deltaSoc = (double)(previousSocForIter - proposedSocForIter);
+      adaptiveLNS_.deltaSocAll[alnsHeuristicForIter] += deltaSoc;
+      if (valid) {
+        adaptiveLNS_.feasible[alnsHeuristicForIter]++;
+      }
+      if (!accepted) {
+        adaptiveLNS_.rejected[alnsHeuristicForIter]++;
+      } else {
+        adaptiveLNS_.accepted[alnsHeuristicForIter]++;
+        adaptiveLNS_.deltaSocAccepted[alnsHeuristicForIter] += deltaSoc;
+        if (previousSolution_.utility < solution_.utility) {
+          adaptiveLNS_.downgradedAccepted[alnsHeuristicForIter]++;
+        } else {
+          adaptiveLNS_.improvedAccepted[alnsHeuristicForIter]++;
+        }
+        if (feasibleSolutionUpdated) {
+          adaptiveLNS_.bestUpdates[alnsHeuristicForIter]++;
+        }
+      }
     }
 
     if (!accepted) {
       quality = IterationQuality::none;
       potentialNeighborhood = oldNeighborhood;
+      if (guardRejected && marketHeuristics_) {
+        // Candidate utility was discarded; keep previous temperature behavior
+        // untouched and preserve previous solution.
+      }
     } else {
       if (previousSolution_.utility < solution_.utility) {
         // We accepted a potentially worse solution to get out of local minima
@@ -1245,7 +2501,13 @@ bool LNS::run() {
         quality = IterationQuality::improvedSolution;
       }
       previousSolution_ = solution_;
+      if (marketHeuristics_) {
+        marketBestPressure_ = min(marketBestPressure_, candidatePressure);
+        marketBestWait_ = min(marketBestWait_, candidateWait);
+      }
     }
+
+    maybeUpdateMarketState(accepted);
 
     runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
     double costToLog = (feasibleSolutionUpdated) ? incumbentSolution_.sumOfCosts
@@ -1377,8 +2639,7 @@ void LNS::prepareNextIteration() {
       int taskPosition = solution_.getLocalTaskIndex(agent, task);
 
       if (taskPosition != 0) {
-        startTime =
-            solution_.agents[agent].taskPaths[taskPosition - 1].endTime();
+        startTime = solution_.agents[agent].taskPaths[taskPosition - 1].endTime();
       }
       assert(taskPosition <=
              (int)solution_.getAgentGlobalTasks(agent).size() - 1);
@@ -1596,6 +2857,11 @@ bool LNS::computeRegretForTask(int task) {
 
   vector<vector<int>> ancestors(instance_.getTasksNum());
   for (pair<int, int> precConstraint : precedenceConstraints) {
+    if (precConstraint.first < 0 || precConstraint.second < 0 ||
+        precConstraint.first >= instance_.getTasksNum() ||
+        precConstraint.second >= instance_.getTasksNum()) {
+      continue;
+    }
     ancestors[precConstraint.second].push_back(precConstraint.first);
   }
   set<int> ancestorsOfTask = reachableSet(task, ancestors);
@@ -1639,7 +2905,6 @@ bool LNS::computeRegretForTask(int task) {
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     for (int localTask = 0; localTask < (int)agentTaskAssignments[agent].size();
          localTask++) {
-
       if (localTask > 0) {
         agentPrecedenceConstraints[agent].emplace_back(
             agentTaskAssignments[agent][localTask - 1],
@@ -1665,10 +2930,9 @@ bool LNS::computeRegretForTask(int task) {
         }
         vector<int> goalLocations =
             instance_.getTaskLocations(agentTaskAssignments[agent]);
-        MultiLabelSpaceTimeAStar localPlanner =
-            MultiLabelSpaceTimeAStar(instance_, agent);
-        localPlanner.setGoalLocations(goalLocations);
-        localPlanner.computeHeuristics();
+        auto localPlanner = createLocalPlanner(agent);
+        localPlanner->setGoalLocations(goalLocations);
+        localPlanner->computeHeuristics();
 
         ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
         TaskRegretPacket taskPacket = {agentTaskAssignments[agent][localTask],
@@ -1677,7 +2941,7 @@ bool LNS::computeRegretForTask(int task) {
         buildConstraintTable(constraintTable, taskPacket,
                              goalLocations[localTask], &agentTaskAssignments,
                              &agentTaskPaths, &precedenceConstraints);
-        AgentTaskPath path = localPlanner.findPathSegment(
+        AgentTaskPath path = localPlanner->findPathSegment(
             constraintTable, startTime, localTask, 0);
         // We must be able to find the path for the next task. If not then we cannot move forward!
         assert(!path.empty());
@@ -1716,6 +2980,11 @@ bool LNS::computeRegretForTask(int task) {
   ancestors.clear();
   ancestors.resize(instance_.getTasksNum());
   for (pair<int, int> precConstraint : precedenceConstraints) {
+    if (precConstraint.first < 0 || precConstraint.second < 0 ||
+        precConstraint.first >= instance_.getTasksNum() ||
+        precConstraint.second >= instance_.getTasksNum()) {
+      continue;
+    }
     ancestors[precConstraint.second].push_back(precConstraint.first);
   }
   ancestorsOfTask = reachableSet(task, ancestors);
@@ -1729,13 +2998,35 @@ bool LNS::computeRegretForTask(int task) {
     } else {
       ancestorTaskAgent = solution_.taskAgentMap[ancestorTask];
     }
-    int ancestorTaskPosition =
+    if (ancestorTaskAgent < 0 || ancestorTaskAgent >= instance_.getAgentNum()) {
+      PLOGE << "Invalid ancestor agent " << ancestorTaskAgent
+            << " for task " << ancestorTask << "\n";
+      return false;
+    }
+    assert(ancestorTaskAgent != UNASSIGNED);
+    auto ancestorTaskIt =
         find(agentTaskAssignments[ancestorTaskAgent].begin(),
-             agentTaskAssignments[ancestorTaskAgent].end(), ancestorTask) -
-        agentTaskAssignments[ancestorTaskAgent].begin();
-    earliestTimestep = max(
-        earliestTimestep,
-        agentTaskPaths[ancestorTaskAgent][ancestorTaskPosition].endTime() + 1);
+             agentTaskAssignments[ancestorTaskAgent].end(), ancestorTask);
+    if (ancestorTaskIt == agentTaskAssignments[ancestorTaskAgent].end()) {
+      PLOGE << "Ancestor task " << ancestorTask
+            << " missing from temporary assignment for agent "
+            << ancestorTaskAgent << "\n";
+      return false;
+    }
+    int ancestorTaskPosition =
+        (int)distance(agentTaskAssignments[ancestorTaskAgent].begin(),
+                      ancestorTaskIt);
+    if (ancestorTaskPosition >=
+            (int)agentTaskPaths[ancestorTaskAgent].size() ||
+        agentTaskPaths[ancestorTaskAgent][ancestorTaskPosition].empty()) {
+      PLOGE << "Ancestor path missing for task " << ancestorTask
+            << " at position " << ancestorTaskPosition << "\n";
+      return false;
+    }
+    earliestTimestep =
+        max(earliestTimestep, agentTaskPaths[ancestorTaskAgent][ancestorTaskPosition]
+                                   .endTimeChecked() +
+                                   1);
   }
 
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
@@ -1837,7 +3128,7 @@ std::variant<bool, Utility> LNS::insertTask(
     vector<pair<int, int>>* precedenceConstraints) {
 
   double pathSizeChange = 0;
-  int startTime = 0, previousTask = -1, nextTask = -1;
+  int startTime = 0, previousTask = UNDEFINED, nextTask = UNDEFINED;
 
   // The task paths are all the task paths when we dont commit but if we commit they will be agent specific task paths
   vector<vector<AgentTaskPath>>& agentTaskPathsRef = *agentTaskPaths;
@@ -1911,7 +3202,7 @@ std::variant<bool, Utility> LNS::insertTask(
     agentTaskPathsRef[regretPacket.agent].emplace_back();
   }
 
-  if (nextTask != -1) {
+  if (nextTask >= 0) {
     // The task paths reference does not have ancestor information about next task, so we need to add those in
 
     vector<vector<int>> ancestors(instance_.getTasksNum());
@@ -1970,12 +3261,15 @@ std::variant<bool, Utility> LNS::insertTask(
         } else {
           agentTaskPathsRef[agent][localTask].beginTime = 0;
         }
-
-        if ((regretPacket.task ==
-                 agentTaskAssignmentsRef[agent][localTask - 1] ||
-             regretPacket.task == agentTaskAssignmentsRef[agent][localTask]) ||
-            (nextTask == agentTaskAssignmentsRef[agent][localTask - 1] ||
-             nextTask == agentTaskAssignmentsRef[agent][localTask])) {
+        const bool touchesRegretTask =
+            (regretPacket.task == agentTaskAssignmentsRef[agent][localTask]) ||
+            (localTask > 0 &&
+             regretPacket.task == agentTaskAssignmentsRef[agent][localTask - 1]);
+        const bool touchesNextTask =
+            (nextTask == agentTaskAssignmentsRef[agent][localTask]) ||
+            (localTask > 0 &&
+             nextTask == agentTaskAssignmentsRef[agent][localTask - 1]);
+        if (touchesRegretTask || touchesNextTask) {
           continue;
         }
 
@@ -1994,10 +3288,9 @@ std::variant<bool, Utility> LNS::insertTask(
           }
           vector<int> goalLocations =
               instance_.getTaskLocations(agentTaskAssignmentsRef[agent]);
-          MultiLabelSpaceTimeAStar localPlanner =
-              MultiLabelSpaceTimeAStar(instance_, agent);
-          localPlanner.setGoalLocations(goalLocations);
-          localPlanner.computeHeuristics();
+          auto localPlanner = createLocalPlanner(agent);
+          localPlanner->setGoalLocations(goalLocations);
+          localPlanner->computeHeuristics();
 
           ConstraintTable constraintTable(instance_.numOfCols,
                                           instance_.mapSize);
@@ -2007,7 +3300,7 @@ std::variant<bool, Utility> LNS::insertTask(
                                goalLocations[localTask],
                                &agentTaskAssignmentsRef, &agentTaskPathsRef,
                                &precedenceConstraintsRef);
-          AgentTaskPath path = localPlanner.findPathSegment(
+          AgentTaskPath path = localPlanner->findPathSegment(
               constraintTable, startTime, localTask, 0);
           // We must be able to find the path for the next task. If not then we cannot move forward!
           assert(!path.empty());
@@ -2045,15 +3338,14 @@ std::variant<bool, Utility> LNS::insertTask(
         instance_.getTaskLocations(agentTaskAssignmentsRef[regretPacket.agent]);
     ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
 
-    MultiLabelSpaceTimeAStar localPlanner =
-        MultiLabelSpaceTimeAStar(instance_, regretPacket.agent);
-    localPlanner.setGoalLocations(goalLocations);
-    localPlanner.computeHeuristics();
+    auto localPlanner = createLocalPlanner(regretPacket.agent);
+    localPlanner->setGoalLocations(goalLocations);
+    localPlanner->computeHeuristics();
 
     buildConstraintTable(constraintTable, regretPacket,
                          goalLocations[taskPosition], &agentTaskAssignmentsRef,
                          &agentTaskPathsRef, &precedenceConstraintsRef);
-    AgentTaskPath path = localPlanner.findPathSegment(
+    AgentTaskPath path = localPlanner->findPathSegment(
         constraintTable, startTime, taskPosition, 0);
     if (path.empty()) {
       return false;
@@ -2073,7 +3365,7 @@ std::variant<bool, Utility> LNS::insertTask(
                          goalLocations[nextTaskPosition],
                          &agentTaskAssignmentsRef, &agentTaskPathsRef,
                          &precedenceConstraintsRef, true);
-    AgentTaskPath nextPath = localPlanner.findPathSegment(
+    AgentTaskPath nextPath = localPlanner->findPathSegment(
         constraintTable, startTime, nextTaskPosition, 0);
     if (nextPath.empty()) {
       return false;
@@ -2093,16 +3385,15 @@ std::variant<bool, Utility> LNS::insertTask(
         instance_.getTaskLocations(agentTaskAssignmentsRef[regretPacket.agent]);
     ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
 
-    MultiLabelSpaceTimeAStar localPlanner =
-        MultiLabelSpaceTimeAStar(instance_, regretPacket.agent);
-    localPlanner.setGoalLocations(goalLocations);
-    localPlanner.computeHeuristics();
+    auto localPlanner = createLocalPlanner(regretPacket.agent);
+    localPlanner->setGoalLocations(goalLocations);
+    localPlanner->computeHeuristics();
 
     buildConstraintTable(constraintTable, regretPacket,
                          goalLocations[regretPacket.taskPosition],
                          &agentTaskAssignmentsRef, &agentTaskPathsRef,
                          &precedenceConstraintsRef);
-    AgentTaskPath path = localPlanner.findPathSegment(
+    AgentTaskPath path = localPlanner->findPathSegment(
         constraintTable, startTime, regretPacket.taskPosition, 0);
     if (path.empty()) {
       return false;
@@ -2111,13 +3402,52 @@ std::variant<bool, Utility> LNS::insertTask(
     value = path.size();
   }
 
-  auto pathLength = value;
-  value -= (lnsNeighborhood_.removedTasksPathSize.at(regretPacket.task) +
-            pathSizeChange);
+  const auto pathLength = value;
+  const double baseDeltaSoc =
+      value - (lnsNeighborhood_.removedTasksPathSize.at(regretPacket.task) +
+               pathSizeChange);
+  double adjustedValue = baseDeltaSoc;
+  double deltaExposure = 0.0;
+  double deltaWait = 0.0;
+
+  if (marketRepairTieBreak_ || marketRepairBlend_) {
+    const int task = regretPacket.task;
+    const int taskLocation = instance_.getTaskLocations(task);
+    const double oldExposure = computeTaskMarketExposure(task, true);
+    const int oldWait = computeTaskPrecedenceWaitInCurrentSolution(task);
+
+    const auto itTaskPos = find(agentTaskAssignmentsRef[regretPacket.agent].begin(),
+                                agentTaskAssignmentsRef[regretPacket.agent].end(),
+                                task);
+    if (itTaskPos != agentTaskAssignmentsRef[regretPacket.agent].end()) {
+      const int currentTaskPos =
+          (int)(itTaskPos - agentTaskAssignmentsRef[regretPacket.agent].begin());
+      if (currentTaskPos >= 0 &&
+          currentTaskPos < (int)agentTaskPathsRef[regretPacket.agent].size()) {
+        const AgentTaskPath& insertedTaskPath =
+            agentTaskPathsRef[regretPacket.agent][currentTaskPos];
+        const double newExposure =
+            computeMarketExposureFromPath(insertedTaskPath, true);
+        const int newWait = computeTaskPrecedenceWaitFromState(
+            task, taskLocation, agentTaskAssignmentsRef, agentTaskPathsRef,
+            precedenceConstraintsRef);
+        deltaExposure = newExposure - oldExposure;
+        deltaWait = (double)newWait - (double)oldWait;
+      }
+    }
+
+    const bool applyBlend = marketRepairBlend_;
+    const bool applyTieBreak =
+        marketRepairTieBreak_ && std::abs(baseDeltaSoc) <= marketTieBreakEpsSoc_;
+    if (applyBlend || applyTieBreak) {
+      adjustedValue +=
+          marketLambdaPrice_ * deltaExposure + marketLambdaWait_ * deltaWait;
+    }
+  }
 
   Utility utility(regretPacket.agent, regretPacket.taskPosition, (int)pathLength,
                   (int)agentTaskAssignmentsRef[regretPacket.agent].size(),
-                  value);
+                  adjustedValue, baseDeltaSoc, deltaExposure, deltaWait);
   return utility;
 }
 
@@ -2138,6 +3468,11 @@ void LNS::commitAncestorTaskOf(
 
   vector<vector<int>> ancestors(instance_.getTasksNum());
   for (pair<int, int> precConstraint : precedenceConstraints) {
+    if (precConstraint.first < 0 || precConstraint.second < 0 ||
+        precConstraint.first >= instance_.getTasksNum() ||
+        precConstraint.second >= instance_.getTasksNum()) {
+      continue;
+    }
     ancestors[precConstraint.second].push_back(precConstraint.first);
   }
   set<int> ancestorsOfTask = reachableSet(globalTask, ancestors);
@@ -2205,19 +3540,24 @@ void LNS::commitAncestorTaskOf(
       } else {
         solution_.agents[agent].taskPaths[localTask].beginTime = 0;
       }
-
-      if (globalTask ==
-              solution_.agents[agent].taskAssignments[localTask - 1] ||
-          globalTask == solution_.agents[agent].taskAssignments[localTask]) {
+      const bool touchesGlobalTask =
+          (globalTask == solution_.agents[agent].taskAssignments[localTask]) ||
+          (localTask > 0 &&
+           globalTask ==
+               solution_.agents[agent].taskAssignments[localTask - 1]);
+      if (touchesGlobalTask) {
         // We have not found the path for this global task yet so its task path would be empty placeholder!
         continue;
       }
 
-      if (committingNextTask.has_value() &&
-          (committingNextTask.value().second ==
-               solution_.agents[agent].taskAssignments[localTask - 1] ||
-           committingNextTask.value().second ==
-               solution_.agents[agent].taskAssignments[localTask])) {
+      const bool touchesCommittingNext =
+          committingNextTask.has_value() &&
+          ((committingNextTask.value().second ==
+            solution_.agents[agent].taskAssignments[localTask]) ||
+           (localTask > 0 &&
+            committingNextTask.value().second ==
+                solution_.agents[agent].taskAssignments[localTask - 1]));
+      if (touchesCommittingNext) {
         // We wont have the path for the original commiting task here yet
         continue;
       }
@@ -2274,19 +3614,24 @@ void LNS::commitAncestorTaskOf(
     for (int localTask = 0;
          localTask < (int)solution_.agents[agent].taskAssignments.size();
          localTask++) {
-
-      if (globalTask ==
-              solution_.agents[agent].taskAssignments[localTask - 1] ||
-          globalTask == solution_.agents[agent].taskAssignments[localTask]) {
+      const bool touchesGlobalTask =
+          (globalTask == solution_.agents[agent].taskAssignments[localTask]) ||
+          (localTask > 0 &&
+           globalTask ==
+               solution_.agents[agent].taskAssignments[localTask - 1]);
+      if (touchesGlobalTask) {
         // We have not found the path for this global task yet so its task path would be empty placeholder!
         continue;
       }
 
-      if (committingNextTask.has_value() &&
-          (committingNextTask.value().second ==
-               solution_.agents[agent].taskAssignments[localTask - 1] ||
-           committingNextTask.value().second ==
-               solution_.agents[agent].taskAssignments[localTask])) {
+      const bool touchesCommittingNext =
+          committingNextTask.has_value() &&
+          ((committingNextTask.value().second ==
+            solution_.agents[agent].taskAssignments[localTask]) ||
+           (localTask > 0 &&
+            committingNextTask.value().second ==
+                solution_.agents[agent].taskAssignments[localTask - 1]));
+      if (touchesCommittingNext) {
         // We wont have the path for the original commiting task here yet
         continue;
       }
@@ -2323,7 +3668,7 @@ void LNS::commitBestRegretTask(Regret bestRegret) {
 
 void LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
 
-  int startTime = 0, previousTask = -1, nextTask = -1;
+  int startTime = 0, previousTask = UNDEFINED, nextTask = UNDEFINED;
 
   vector<pair<int, int>> precedenceConstraints =
       instance_.getInputPrecedenceConstraints();
@@ -2400,7 +3745,7 @@ void LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
     solution_.agents[bestRegretPacket.agent].taskPaths.emplace_back();
   }
 
-  if (nextTask != -1) {
+  if (nextTask >= 0) {
 
     commitAncestorTaskOf(
         nextTask, std::make_optional(make_pair(true, bestRegretPacket.task)));
@@ -2565,6 +3910,11 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable, int task) {
 
   vector<vector<int>> ancestors(instance_.getTasksNum());
   for (pair<int, int> precConstraint : precedenceConstraints) {
+    if (precConstraint.first < 0 || precConstraint.second < 0 ||
+        precConstraint.first >= instance_.getTasksNum() ||
+        precConstraint.second >= instance_.getTasksNum()) {
+      continue;
+    }
     ancestors[precConstraint.second].push_back(precConstraint.first);
   }
 
@@ -2900,10 +4250,7 @@ bool LNS::validateSolution(set<Conflicts>* conflictedTasks) {
 
 void LNS::printPaths() const {
   for (int i = 0; i < instance_.getAgentNum(); i++) {
-    int agentPathSize = 0;
-    if (!solution_.agents[i].taskAssignments.empty()) {
-      agentPathSize = solution_.agents[i].path.endTime();
-    }
+    const int agentPathSize = solution_.agents[i].path.endTimeOrZero();
     cout << "Agent " << i << " (cost = " << agentPathSize << "): ";
     cout << "\n\tPaths:\n\t";
     for (int t = 0; t < (int)solution_.agents[i].path.size(); t++) {

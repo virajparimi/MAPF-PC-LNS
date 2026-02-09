@@ -169,16 +169,19 @@ bool topologicalSort(const Instance* instance,
   return true;
 }
 
-bool isSamePath(const Path& p1, const Path& p2) {
-  if (p1.size() != p2.size()) {
-    return false;
-  }
-  for (int i = 0; i < (int)p1.size(); i++) {
-    if (p1.path[i].location != p2.path[i].location) {
-      return false;
+std::ostream& operator<<(std::ostream& os, const Path& path) {
+  os << "[begin=" << path.beginTime << ", size=" << path.size() << ", path=";
+  for (int i = 0; i < (int)path.size(); i++) {
+    os << path.path[i].location;
+    if (path.path[i].isGoal) {
+      os << "*";
+    }
+    if (i + 1 < (int)path.size()) {
+      os << "->";
     }
   }
-  return true;
+  os << "]";
+  return os;
 }
 
 set<Conflicts> extractNConflicts(int size, const set<Conflicts>& conflicts) {

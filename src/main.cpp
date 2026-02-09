@@ -5,6 +5,7 @@
 #include "plog/Initializers/ConsoleInitializer.h"
 
 #include <chrono>
+#include <iomanip>
 #include <limits>
 #include <boost/program_options.hpp>
 #include "common.hpp"
@@ -66,6 +67,93 @@ int main(int argc, char** argv) {
       po::value<string>()->default_value("descendants+agent"),
       "Dirty-set strategy for incremental regret: 'descendants' or "
       "'descendants+agent'");
+  desc.add_options()(
+      "lowLevelPlanner",
+      po::value<string>()->default_value("mlastar"),
+      "Low-level planner to use: 'mlastar' or 'sipps'");
+  desc.add_options()(
+      "plannerParityCheck",
+      po::bool_switch()->default_value(false),
+      "Debug mode: in SIPPS runs, shadow each low-level segment with MLA* and "
+      "log parity mismatches");
+  desc.add_options()(
+      "plannerParityMaxLogs",
+      po::value<int>()->default_value(10),
+      "Maximum number of SIPPS-vs-MLA* parity mismatch logs");
+  desc.add_options()("marketHeuristics",
+                     po::bool_switch()->default_value(false),
+                     "Enable tatonnement-style market heuristics");
+  desc.add_options()("marketBucketDt", po::value<int>()->default_value(3),
+                     "Time bucket size used by market resources");
+  desc.add_options()(
+      "marketVertexBucketCapacity",
+      po::value<int>()->default_value(2),
+      "Capacity used for vertex-bucket market resources");
+  desc.add_options()(
+      "marketEdgeBucketCapacity",
+      po::value<int>()->default_value(2),
+      "Capacity used for edge-bucket market resources");
+  desc.add_options()("marketUpdateOnAcceptedOnly",
+                     po::value<bool>()->default_value(true),
+                     "Update market prices only after accepted iterations");
+  desc.add_options()("marketUpdatePeriodAccepted",
+                     po::value<int>()->default_value(1),
+                     "Number of accepted iterations between market updates");
+  desc.add_options()("marketEta", po::value<double>()->default_value(0.05),
+                     "Market tatonnement base step size");
+  desc.add_options()("marketRho", po::value<double>()->default_value(0.9),
+                     "EMA smoothing factor for excess demand");
+  desc.add_options()("marketPriceCap", po::value<double>()->default_value(50.0),
+                     "Maximum market resource price");
+  desc.add_options()("marketGamma", po::value<double>()->default_value(0.01),
+                     "Price evaporation factor per market update");
+  desc.add_options()("marketAcceptanceGuards",
+                     po::bool_switch()->default_value(false),
+                     "Enable market pressure / precedence-wait acceptance guards");
+  desc.add_options()("marketTauP", po::value<double>()->default_value(0.0),
+                     "Acceptance guard threshold for market pressure");
+  desc.add_options()("marketTauW", po::value<double>()->default_value(0.0),
+                     "Acceptance guard threshold for precedence wait");
+  desc.add_options()("marketDestroyWeightPrice",
+                     po::value<double>()->default_value(1.0),
+                     "Weight of market exposure in market destroy burden");
+  desc.add_options()("marketDestroyWeightWait",
+                     po::value<double>()->default_value(2.0),
+                     "Weight of precedence wait in market destroy burden");
+  desc.add_options()("marketDestroyWeightRoot",
+                     po::value<double>()->default_value(1.5),
+                     "Weight of blocker-root wait in market destroy burden");
+  desc.add_options()("marketSeedTopFrac",
+                     po::value<double>()->default_value(0.2),
+                     "Top fraction of burden-ranked tasks used as market destroy seed pool");
+  desc.add_options()("marketRandomDestroyQuota",
+                     po::value<double>()->default_value(0.15),
+                     "Random sampling quota for market destroy neighborhoods");
+  desc.add_options()("marketCooldownIters",
+                     po::value<int>()->default_value(3),
+                     "Cooldown iterations before re-selecting a task in market destroy");
+  desc.add_options()("marketDUp", po::value<int>()->default_value(1),
+                     "Ancestor expansion depth for market destroy");
+  desc.add_options()("marketDDown", po::value<int>()->default_value(1),
+                     "Successor expansion depth for market destroy");
+  desc.add_options()("marketClosureCap",
+                     po::value<int>()->default_value(0),
+                     "Maximum tasks expanded by market closure (0 = neighbor size cap)");
+  desc.add_options()("marketRepairTieBreak",
+                     po::bool_switch()->default_value(false),
+                     "Enable market-aware tie-break in repair when deltaSoC is near zero");
+  desc.add_options()("marketRepairBlend",
+                     po::bool_switch()->default_value(false),
+                     "Enable blended market-aware repair score");
+  desc.add_options()("marketTieBreakEpsSoc",
+                     po::value<double>()->default_value(0.0),
+                     "Tie-break epsilon on |deltaSoC| for market-aware repair");
+  desc.add_options()("marketLambdaPrice",
+                     po::value<double>()->default_value(0.0),
+                     "Repair weight for market exposure delta");
+  desc.add_options()("marketLambdaWait",
+                     po::value<double>()->default_value(0.0),
+                     "Repair weight for precedence-wait delta");
 
   po::variables_map vm;
   try {
@@ -108,10 +196,13 @@ int main(int argc, char** argv) {
   string destroyHeuristic = vm["destroyHeuristic"].as<string>();
   if (destroyHeuristic != "conflict" && destroyHeuristic != "worst" &&
       destroyHeuristic != "random" && destroyHeuristic != "shaw" &&
+      destroyHeuristic != "precedence_wait" &&
+      destroyHeuristic != "low_slack" &&
+      destroyHeuristic != "market_tatonnement" &&
       destroyHeuristic != "alns") {
     PLOGE << "The destroy heuristic provided is not supported! Please choose "
-             "from 'conflict', 'worst', 'random', 'shaw' and 'alns' removal "
-             "operators\n";
+             "from 'conflict', 'worst', 'random', 'shaw', 'precedence_wait', "
+             "'low_slack', 'market_tatonnement' and 'alns' removal operators\n";
     return 1;
   }
 
@@ -138,6 +229,94 @@ int main(int argc, char** argv) {
       incrementalRegretMode != "descendants+agent") {
     PLOGE << "The incremental regret mode provided is not supported! Please "
              "choose from 'descendants' and 'descendants+agent'\n";
+    return 1;
+  }
+
+  const string lowLevelPlanner = vm["lowLevelPlanner"].as<string>();
+  if (lowLevelPlanner != "mlastar" && lowLevelPlanner != "sipps") {
+    PLOGE << "The low-level planner provided is not supported! Please choose "
+             "from 'mlastar' and 'sipps'\n";
+    return 1;
+  }
+  const bool plannerParityCheck = vm["plannerParityCheck"].as<bool>();
+  const int plannerParityMaxLogs = vm["plannerParityMaxLogs"].as<int>();
+  if (plannerParityMaxLogs <= 0) {
+    PLOGE << "plannerParityMaxLogs must be a positive integer\n";
+    return 1;
+  }
+
+  const bool marketHeuristics = vm["marketHeuristics"].as<bool>();
+  const int marketBucketDt = vm["marketBucketDt"].as<int>();
+  const int marketVertexBucketCapacity =
+      vm["marketVertexBucketCapacity"].as<int>();
+  const int marketEdgeBucketCapacity =
+      vm["marketEdgeBucketCapacity"].as<int>();
+  const bool marketUpdateOnAcceptedOnly =
+      vm["marketUpdateOnAcceptedOnly"].as<bool>();
+  const int marketUpdatePeriodAccepted =
+      vm["marketUpdatePeriodAccepted"].as<int>();
+  const double marketEta = vm["marketEta"].as<double>();
+  const double marketRho = vm["marketRho"].as<double>();
+  const double marketPriceCap = vm["marketPriceCap"].as<double>();
+  const double marketGamma = vm["marketGamma"].as<double>();
+  const bool marketAcceptanceGuards = vm["marketAcceptanceGuards"].as<bool>();
+  const double marketTauP = vm["marketTauP"].as<double>();
+  const double marketTauW = vm["marketTauW"].as<double>();
+  const double marketDestroyWeightPrice =
+      vm["marketDestroyWeightPrice"].as<double>();
+  const double marketDestroyWeightWait =
+      vm["marketDestroyWeightWait"].as<double>();
+  const double marketDestroyWeightRoot =
+      vm["marketDestroyWeightRoot"].as<double>();
+  const double marketSeedTopFrac = vm["marketSeedTopFrac"].as<double>();
+  const double marketRandomDestroyQuota =
+      vm["marketRandomDestroyQuota"].as<double>();
+  const int marketCooldownIters = vm["marketCooldownIters"].as<int>();
+  const int marketDUp = vm["marketDUp"].as<int>();
+  const int marketDDown = vm["marketDDown"].as<int>();
+  const int marketClosureCap = vm["marketClosureCap"].as<int>();
+  const bool marketRepairTieBreak = vm["marketRepairTieBreak"].as<bool>();
+  const bool marketRepairBlend = vm["marketRepairBlend"].as<bool>();
+  const double marketTieBreakEpsSoc = vm["marketTieBreakEpsSoc"].as<double>();
+  const double marketLambdaPrice = vm["marketLambdaPrice"].as<double>();
+  const double marketLambdaWait = vm["marketLambdaWait"].as<double>();
+
+  if (marketBucketDt <= 0) {
+    PLOGE << "marketBucketDt must be a positive integer\n";
+    return 1;
+  }
+  if (marketVertexBucketCapacity <= 0 || marketEdgeBucketCapacity <= 0) {
+    PLOGE << "marketVertexBucketCapacity and marketEdgeBucketCapacity must be positive integers\n";
+    return 1;
+  }
+  if (marketUpdatePeriodAccepted <= 0) {
+    PLOGE << "marketUpdatePeriodAccepted must be a positive integer\n";
+    return 1;
+  }
+  if (marketEta < 0.0 || marketPriceCap < 0.0 || marketGamma < 0.0) {
+    PLOGE << "marketEta, marketPriceCap and marketGamma must be non-negative\n";
+    return 1;
+  }
+  if (marketRho <= 0.0 || marketRho >= 1.0) {
+    PLOGE << "marketRho must be strictly between 0 and 1\n";
+    return 1;
+  }
+  if (marketSeedTopFrac <= 0.0 || marketSeedTopFrac > 1.0) {
+    PLOGE << "marketSeedTopFrac must be in (0, 1]\n";
+    return 1;
+  }
+  if (marketRandomDestroyQuota < 0.0 || marketRandomDestroyQuota > 1.0) {
+    PLOGE << "marketRandomDestroyQuota must be in [0, 1]\n";
+    return 1;
+  }
+  if (marketCooldownIters < 0 || marketDUp < 0 || marketDDown < 0 ||
+      marketClosureCap < 0) {
+    PLOGE << "marketCooldownIters, marketDUp, marketDDown and marketClosureCap must be non-negative\n";
+    return 1;
+  }
+  if (marketTieBreakEpsSoc < 0.0 || marketLambdaPrice < 0.0 ||
+      marketLambdaWait < 0.0) {
+    PLOGE << "marketTieBreakEpsSoc, marketLambdaPrice and marketLambdaWait must be non-negative\n";
     return 1;
   }
 
@@ -178,11 +357,25 @@ int main(int argc, char** argv) {
                        vm["cutoffTime"].as<double>(), 100, 0.99975, 1.00025, 5,
                        9, 3, 0.75, 0.25, initialSolutionStrategy,
                        destroyHeuristic, acceptanceCriteria, regretType,
-                       incrementalRegret, incrementalRegretMode, seed);
-  LNS lnsInstance = LNS(vm["maxIterations"].as<int>(), instance, parameters);
-  bool success = lnsInstance.run();
+                       incrementalRegret, incrementalRegretMode, seed,
+                       plannerParityCheck, plannerParityMaxLogs, marketHeuristics,
+                       marketBucketDt, marketVertexBucketCapacity,
+                       marketEdgeBucketCapacity, marketUpdateOnAcceptedOnly,
+                       marketUpdatePeriodAccepted, marketEta, marketRho,
+                       marketPriceCap, marketGamma, marketAcceptanceGuards,
+                       marketTauP, marketTauW, marketDestroyWeightPrice,
+                       marketDestroyWeightWait, marketDestroyWeightRoot,
+                       marketSeedTopFrac, marketRandomDestroyQuota,
+                       marketCooldownIters, marketDUp, marketDDown,
+                       marketClosureCap, marketRepairTieBreak,
+                       marketRepairBlend, marketTieBreakEpsSoc,
+                       marketLambdaPrice, marketLambdaWait,
+                       lowLevelPlanner);
+  auto lnsInstance =
+      std::make_unique<LNS>(vm["maxIterations"].as<int>(), instance, parameters);
+  bool success = lnsInstance->run();
 
-  FeasibleSolution anytimeSolution = lnsInstance.getFeasibleSolution();
+  FeasibleSolution anytimeSolution = lnsInstance->getFeasibleSolution();
   if (success) {
     PLOGI << "Anytime solution found!\n";
     std::cout << anytimeSolution.toString() << std::endl;
@@ -193,7 +386,7 @@ int main(int argc, char** argv) {
   if (vm["genReport"].as<bool>()) {
     SaveToTxt saveFileForCBSPC;
     saveFileForCBSPC.printStart();
-    Solution finalSolution = lnsInstance.getSolution();
+    Solution finalSolution = lnsInstance->getSolution();
     saveFileForCBSPC.runData(&instance, &finalSolution);
     saveFileForCBSPC.fileSave();
   }
@@ -203,13 +396,13 @@ int main(int argc, char** argv) {
   double firstFeasibleSolutionTime = 0, numFeasibleSolutionUpdate = 0,
          couldNotFindCounter = 0, counter = 0;
   if (success) {
-    for (const IterationStats& iter : lnsInstance.iterationStats) {
+    for (const IterationStats& iter : lnsInstance->iterationStats) {
       if (iter.feasibleSolutionFound) {
         firstFeasibleSolutionTime = iter.runtime;
         break;
       }
     }
-    for (const IterationStats& iter : lnsInstance.iterationStats) {
+    for (const IterationStats& iter : lnsInstance->iterationStats) {
       if (iter.feasibleSolutionFound) {
         numFeasibleSolutionUpdate += 1;
         feasibleSolutionIterations.push_back(counter);
@@ -227,9 +420,9 @@ int main(int argc, char** argv) {
 
   // Compute the results from ALNS
   if (destroyHeuristic == "alns") {
-    ALNS adaptiveLNS = lnsInstance.getAdaptiveLNS();
+    ALNS adaptiveLNS = lnsInstance->getAdaptiveLNS();
     constexpr int kNumDestroyHeuristics =
-        (int)DestroyHeuristic::shawRemoval + 1;
+        (int)DestroyHeuristic::destroyHeuristicCount;
     vector<int> destroyHeuristicFrequency(kNumDestroyHeuristics, 0);
     std::cout << "Size of destroy heuristic history -> "
               << adaptiveLNS.destroyHeuristicHistory.size() << std::endl;
@@ -239,28 +432,76 @@ int main(int argc, char** argv) {
         destroyHeuristicFrequency[destroyHeuristicUsed] += 1;
       }
     }
-    std::cout << "Adaptive LNS performance: \n\t";
-    if (!adaptiveLNS.destroyHeuristicHistory.empty()) {
-      for (int i = 0; i < kNumDestroyHeuristics; i++) {
-        double averageUsed = (double)destroyHeuristicFrequency[i] /
-                             (int)adaptiveLNS.destroyHeuristicHistory.size();
-        switch ((DestroyHeuristic)i) {
-        case DestroyHeuristic::randomRemoval:
-          std::cout << "Random Removal: " << averageUsed << "\n\t";
-          break;
-        case DestroyHeuristic::worstRemoval:
-          std::cout << "Worst Removal: " << averageUsed << "\n\t";
-          break;
-        case DestroyHeuristic::conflictRemoval:
-          std::cout << "Conflict Removal: " << averageUsed << "\n\t";
-          break;
-        case DestroyHeuristic::shawRemoval:
-          std::cout << "Shaw Removal: " << averageUsed << "\n\t";
-          break;
-        default:
-          break;
-        }
+    auto heuristicName = [](DestroyHeuristic h) -> const char* {
+      switch (h) {
+      case DestroyHeuristic::randomRemoval:
+        return "Random";
+      case DestroyHeuristic::worstRemoval:
+        return "Worst";
+      case DestroyHeuristic::conflictRemoval:
+        return "Conflict";
+      case DestroyHeuristic::shawRemoval:
+        return "Shaw";
+      case DestroyHeuristic::precedenceWaitRemoval:
+        return "PrecedenceWait";
+      case DestroyHeuristic::lowSlackRemoval:
+        return "LowSlack";
+      case DestroyHeuristic::marketTatonnementRemoval:
+        return "MarketTatonnement";
+      default:
+        return "Unknown";
       }
+    };
+
+    if (!adaptiveLNS.destroyHeuristicHistory.empty()) {
+      const std::ios::fmtflags oldFlags = std::cout.flags();
+      const std::streamsize oldPrecision = std::cout.precision();
+
+      std::cout << "Adaptive LNS performance:\n";
+      std::cout << std::left << std::setw(18) << "Heuristic"
+                << std::right << std::setw(9) << "Share%"
+                << std::setw(10) << "Selected"
+                << std::setw(10) << "Accept%"
+                << std::setw(12) << "BestUpd%"
+                << std::setw(12) << "FailFind%"
+                << std::setw(15) << "AvgDelta(all)"
+                << std::setw(15) << "AvgDelta(acc)" << '\n';
+      std::cout << std::string(101, '-') << '\n';
+
+      std::cout << std::fixed << std::setprecision(2);
+      for (int i = 0; i < kNumDestroyHeuristics; i++) {
+        const double share =
+            (double)destroyHeuristicFrequency[i] /
+            (int)adaptiveLNS.destroyHeuristicHistory.size();
+        const int64_t selected = adaptiveLNS.selections[i];
+        const int64_t accepted = adaptiveLNS.accepted[i];
+        const int64_t bestUpdates = adaptiveLNS.bestUpdates[i];
+        const int64_t couldNotFind = adaptiveLNS.couldNotFind[i];
+        const double acceptRate =
+            selected > 0 ? (double)accepted / (double)selected : 0.0;
+        const double bestRate =
+            selected > 0 ? (double)bestUpdates / (double)selected : 0.0;
+        const double couldNotFindRate =
+            selected > 0 ? (double)couldNotFind / (double)selected : 0.0;
+        const double avgDeltaSocAll =
+            selected > 0 ? adaptiveLNS.deltaSocAll[i] / (double)selected : 0.0;
+        const double avgDeltaSocAccepted =
+            accepted > 0 ? adaptiveLNS.deltaSocAccepted[i] / (double)accepted
+                         : 0.0;
+        std::cout << std::left << std::setw(18)
+                  << heuristicName((DestroyHeuristic)i)
+                  << std::right << std::setw(9) << (share * 100.0)
+                  << std::setw(10) << selected
+                  << std::setw(10) << (acceptRate * 100.0)
+                  << std::setw(12) << (bestRate * 100.0)
+                  << std::setw(12) << (couldNotFindRate * 100.0)
+                  << std::setw(15) << avgDeltaSocAll
+                  << std::setw(15) << avgDeltaSocAccepted << '\n';
+      }
+      std::cout.flags(oldFlags);
+      std::cout.precision(oldPrecision);
+    } else {
+      std::cout << "Adaptive LNS performance: no heuristic samples collected.\n";
     }
   }
 
@@ -281,17 +522,33 @@ int main(int argc, char** argv) {
   }
 
   std::cout << "\n\nMAPF-PC-LNS: "
-            << "\n\tRuntime = " << lnsInstance.runtime
-            << "\n\tIterations = " << lnsInstance.iterationStats.size()
+            << "\n\tRuntime = " << lnsInstance->runtime
+            << "\n\tIterations = " << lnsInstance->iterationStats.size()
             << "\n\tFirst Feasible Solution Runtime = "
             << firstFeasibleSolutionTime
             << "\n\tAverage Update of Feasible Solution = "
             << numFeasibleSolutionUpdate
             << "\n\tSolution Cost = " << anytimeSolution.sumOfCosts
-            << "\n\tNumber of failures = " << lnsInstance.numOfFailures
+            << "\n\tNumber of failures = " << lnsInstance->numOfFailures
             << "\n\tSuccess = " << success << endl;
 
-  const auto regretStats = lnsInstance.getRegretEvalStats();
+  if (marketHeuristics) {
+    const MarketStats marketStats = lnsInstance->getMarketStats();
+    std::cout << "\n\nMarket Stats: "
+              << "\n\tUpdates = " << marketStats.updates
+              << "\n\tContended Resources = " << marketStats.contendedResources
+              << "\n\tMean Price (Contended) = "
+              << marketStats.meanPriceContended
+              << "\n\tMax Price = " << marketStats.maxPrice
+              << "\n\tTop Price Mass Fraction = "
+              << marketStats.topPriceMassFrac
+              << "\n\tTotal Precedence Wait = "
+              << marketStats.totalPrecedenceWait
+              << "\n\tMax Precedence Wait = "
+              << marketStats.maxPrecedenceWait << endl;
+  }
+
+  const auto regretStats = lnsInstance->getRegretEvalStats();
   const double feasibleRate =
       regretStats.candidateInsertionsTried > 0
           ? (double)regretStats.candidateInsertionsFeasible /
@@ -317,7 +574,7 @@ int main(int argc, char** argv) {
             << regretStats.removedTasksMax << endl;
 
   if (incrementalRegret) {
-    const auto statsOpt = lnsInstance.getIncrementalRegretStats();
+    const auto statsOpt = lnsInstance->getIncrementalRegretStats();
     if (statsOpt.has_value()) {
       const auto& stats = statsOpt.value();
       const double avgDirty =
@@ -332,7 +589,7 @@ int main(int argc, char** argv) {
               : 0.0;
 
       std::cout << "\n\nIncremental Regret Stats: "
-                << "\n\tMode = " << lnsInstance.getIncrementalRegretMode()
+                << "\n\tMode = " << lnsInstance->getIncrementalRegretMode()
                 << "\n\tCommits = " << stats.commits
                 << "\n\tRecompute Calls = " << stats.recomputeCalls
                 << "\n\tRecomputed Tasks = " << stats.recomputedTasks

@@ -11,7 +11,7 @@
 class LLNode {
 
  public:
-  vector<int> secondaryKeys;
+  int secondaryKey = 0;
 
   LLNode* parent = nullptr;
   int location{}, gVal{}, hVal = 0, timestep = 0, numOfConflicts = 0;
@@ -55,12 +55,8 @@ class LLNode {
 
   struct FocalCompareNode {
     bool operator()(const LLNode* lhs, const LLNode* rhs) const {
-      for (int i = 0; i < min((int)lhs->secondaryKeys.size(),
-                              (int)rhs->secondaryKeys.size());
-           i++) {
-        if (lhs->secondaryKeys[i] != rhs->secondaryKeys[i]) {
-          return lhs->secondaryKeys[i] > rhs->secondaryKeys[i];
-        }
+      if (lhs->secondaryKey != rhs->secondaryKey) {
+        return lhs->secondaryKey > rhs->secondaryKey;
       }
       if (lhs->numOfConflicts == rhs->numOfConflicts) {
         if (lhs->gVal + lhs->hVal == rhs->gVal + rhs->hVal) {
@@ -90,11 +86,23 @@ class LLNode {
         stage(stage) {
     refreshTieBreaker();
   }
-  LLNode(const LLNode& old) { copy(old); }
+  LLNode(const LLNode& old)
+      : secondaryKey(old.secondaryKey),
+        parent(old.parent),
+        location(old.location),
+        gVal(old.gVal),
+        hVal(old.hVal),
+        timestep(old.timestep),
+        numOfConflicts(old.numOfConflicts),
+        waitAtGoal(old.waitAtGoal),
+        stage(old.stage),
+        distanceToNext(old.distanceToNext),
+        tieBreaker(old.tieBreaker) {}
 
-  inline double getFVal() const { return gVal + hVal; }
+  inline int getFVal() const { return gVal + hVal; }
 
   void copy(const LLNode& old) {
+    secondaryKey = old.secondaryKey;
     location = old.location;
     gVal = old.gVal;
     hVal = old.hVal;
@@ -133,19 +141,13 @@ class SingleAgentSolver {
     goalLocations = std::move(goals);
   }
 
-  int getGlobalTaskFromLocation(int taskLocation) const {
-    const vector<int>& taskLocations = instance.taskLocations_;
-    auto it =
-        std::find(taskLocations.begin(), taskLocations.end(), taskLocation);
-    assert(it != taskLocations.end());
-    return (int)(it - taskLocations.begin());
-  }
-
   virtual string getName() const = 0;
   virtual AgentTaskPath findPathSegment(ConstraintTable& constraintTable,
                                         int startTime, int stage,
                                         int lowerBound) = 0;
-  list<int> getNeighbors(int curr) const { return instance.getNeighbors(curr); }
+  const vector<int>& getNeighbors(int curr) const {
+    return instance.getNeighbors(curr);
+  }
 
   SingleAgentSolver(const Instance& instance, int agent)
       : instance(instance),

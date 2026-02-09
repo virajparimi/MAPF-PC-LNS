@@ -35,7 +35,28 @@ Instance::Instance(const string& mapFname, const string& agentTaskFname,
     PLOGE << "Agent and task file " << agentTaskFname << " not found.\n";
     exit(-1);
   }
+  preComputeNeighbors();
   preComputeHeuristics();
+}
+
+void Instance::preComputeNeighbors() {
+  neighborsCache_.clear();
+  neighborsCache_.resize(mapSize);
+  for (int current = 0; current < mapSize; current++) {
+    auto& neighbors = neighborsCache_[current];
+    neighbors.clear();
+    neighbors.reserve(4);
+    if (map_[current]) {
+      continue;
+    }
+    int candidates[4] = {current + 1, current - 1, current + numOfCols,
+                         current - numOfCols};
+    for (int next : candidates) {
+      if (validMove(current, next)) {
+        neighbors.push_back(next);
+      }
+    }
+  }
 }
 
 bool Instance::loadKivaMap() {
@@ -356,18 +377,6 @@ bool Instance::loadAgentsAndTasks() {
       topologicalSort(this, &inputPrecedenceConstraints_, inputPlanningOrder_));
 
   return true;
-}
-
-list<int> Instance::getNeighbors(int current) const {
-  list<int> neighbors;
-  int candidates[4] = {current + 1, current - 1, current + numOfCols,
-                       current - numOfCols};
-  for (int next : candidates) {
-    if (validMove(current, next)) {
-      neighbors.emplace_back(next);
-    }
-  }
-  return neighbors;
 }
 
 void Instance::printMap() const {

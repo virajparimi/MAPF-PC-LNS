@@ -36,11 +36,17 @@ cmake --build build -j
 ```
 
 Note: initial solution (`-s`) options: `greedy`, `greedy_precedence_only`, `sota_cbs`, `sota_pbs`.
+Note: destroy heuristic (`-h`) options: `random`, `worst`, `conflict`, `shaw`, `precedence_wait`, `low_slack`, `market_tatonnement`, `alns`.
+Note: low-level planner (`--lowLevelPlanner`) options: `mlastar` (default), `sipps`.
+Note: `sipps` and `mlastar` run as separate low-level tracks for direct comparison.
+Note: planner parity debug options: `--plannerParityCheck` and `--plannerParityMaxLogs`.
+Note: market heuristics are opt-in via `--marketHeuristics` and support optional guard rails via `--marketAcceptanceGuards`, `--marketTauP`, `--marketTauW`.
+Note: Phase-4 market-aware repair is opt-in via `--marketRepairTieBreak` or `--marketRepairBlend` with knobs `--marketTieBreakEpsSoc`, `--marketLambdaPrice`, `--marketLambdaWait`.
 
 6. To run MAPF-PC problems run the following,
 
 ```sh
-./build/mapf_pc_lns -m ./sample_input/empty-16-16.map -a ./sample_input/agents_goals.txt -k 10 -l 50 -t 10 -n 2 -i 200 -d 6 -s sota_pbs -h alns -c TA -r absolute
+./build/mapf_pc_lns -m ./sample_input/empty-16-16.map -a ./sample_input/agents_goals.txt -k 10 -l 50 -t 10 -n 2 -i 200 -d 6 -s sota_pbs -h alns -c TA -r absolute --lowLevelPlanner mlastar
 ```
 
 7. To run the MAPD problems run the following,

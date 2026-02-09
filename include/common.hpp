@@ -54,16 +54,15 @@ using std::vector;
 using namespace std::chrono;
 using Time = std::chrono::high_resolution_clock;
 using fsec = std::chrono::duration<float>;
-using pq = std::priority_queue<int, vector<int>>;
 using ppq = std::priority_queue<pair<int, int>, vector<pair<int, int>>>;
 using ppqg =
     std::priority_queue<pair<int, int>, vector<pair<int, int>>, std::greater<>>;
 
-#define MAX_TIMESTEP INT_MAX / 2
-#define MAX_COST INT_MAX / 2
-#define MAX_NODES INT_MAX / 2
-#define UNASSIGNED -1
-#define UNDEFINED -1
+#define MAX_TIMESTEP ((INT_MAX) / 2)
+#define MAX_COST ((INT_MAX) / 2)
+#define MAX_NODES ((INT_MAX) / 2)
+#define UNASSIGNED (-1)
+#define UNDEFINED (-2)
 
 struct PathEntry {
   bool isGoal{};
@@ -80,7 +79,12 @@ enum IterationQuality {
 
 struct Path {
   int beginTime = 0;
-  int endTime() const { return beginTime + (int)size() - 1; }
+  int endTimeOrZero() const { return empty() ? 0 : beginTime + (int)size() - 1; }
+  int endTimeChecked() const {
+    assert(!empty());
+    return beginTime + (int)size() - 1;
+  }
+  int endTime() const { return endTimeOrZero(); }
 
   vector<PathEntry> path;
 
@@ -90,13 +94,16 @@ struct Path {
   PathEntry& front() { return path.front(); }
   const PathEntry& back() const { return path.back(); }
   const PathEntry& front() const { return path.front(); }
-  const PathEntry& at(int idx) const { return path[idx]; }
+  const PathEntry& at(int idx) const {
+    assert(idx >= 0 && idx < (int)path.size());
+    return path[idx];
+  }
 
   PathEntry& operator[](int idx) { return path[idx]; }
   const PathEntry& operator[](int idx) const { return path[idx]; }
 
   Path() = default;
-  Path(int size) : path(vector<PathEntry>(size)) {}
+  explicit Path(int size) : path(vector<PathEntry>(size)) {}
 };
 
 struct AgentTaskPath : public Path {
@@ -104,7 +111,6 @@ struct AgentTaskPath : public Path {
 };
 
 std::ostream& operator<<(std::ostream& os, const Path& path);
-bool isSamePath(const Path& p1, const Path& p2);
 
 struct IterationStats {
   double runtime;
@@ -113,17 +119,18 @@ struct IterationStats {
   int numOfAgents, numOfTasks, sumOfCosts, sumOfCostsLowerBound,
       numOfConflictingPairs;
   IterationQuality quality;
-  IterationStats(double runtime, string algorithm, int numOfAgents,
-                 int numOfTasks, int sumOfCosts, bool feasibleSolutionFound,
-                 IterationQuality quality, int sumOfCostsLowerBound = 0,
-                 int numOfConflictingPairs = 0)
-      : runtime(runtime),
-        algorithm(std::move(algorithm)),
-        feasibleSolutionFound(feasibleSolutionFound),
-        numOfAgents(numOfAgents),
-        numOfTasks(numOfTasks),
-        sumOfCosts(sumOfCosts),
-        sumOfCostsLowerBound(sumOfCostsLowerBound),
-        numOfConflictingPairs(numOfConflictingPairs),
-        quality(quality) {}
+  IterationStats(double runtimeIn, string algorithmIn, int numOfAgentsIn,
+                 int numOfTasksIn, int sumOfCostsIn,
+                 bool feasibleSolutionFoundIn, IterationQuality qualityIn,
+                 int sumOfCostsLowerBoundIn = 0,
+                 int numOfConflictingPairsIn = 0)
+      : runtime(runtimeIn),
+        algorithm(std::move(algorithmIn)),
+        feasibleSolutionFound(feasibleSolutionFoundIn),
+        numOfAgents(numOfAgentsIn),
+        numOfTasks(numOfTasksIn),
+        sumOfCosts(sumOfCostsIn),
+        sumOfCostsLowerBound(sumOfCostsLowerBoundIn),
+        numOfConflictingPairs(numOfConflictingPairsIn),
+        quality(qualityIn) {}
 };

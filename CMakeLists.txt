@@ -34,6 +34,7 @@ set(SOURCES
   src/lns.cpp
   src/main.cpp
   src/mlastar.cpp
+  src/sipps.cpp
   src/utils.cpp
 )
 

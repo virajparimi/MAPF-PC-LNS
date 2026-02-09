@@ -10,12 +10,34 @@
 #include "common.hpp"
 #include "constrainttable.hpp"
 #include "mlastar.hpp"
+#include "sipps.hpp"
+
+enum class LowLevelPlannerType {
+  mlastar = 0,
+  sipps = 1,
+};
 
 enum DestroyHeuristic {
   randomRemoval = 0,
   worstRemoval = 1,
   conflictRemoval = 2,
-  shawRemoval = 3
+  shawRemoval = 3,
+  precedenceWaitRemoval = 4,
+  lowSlackRemoval = 5,
+  marketTatonnementRemoval = 6,
+  destroyHeuristicCount = 7
+};
+
+struct MarketStats {
+  int64_t updates = 0;
+  int64_t contendedResources = 0;
+  double meanPriceContended = 0.0;
+  double maxPrice = 0.0;
+  double topPriceMassFrac = 0.0;
+  double totalPrecedenceWait = 0.0;
+  double maxPrecedenceWait = 0.0;
+
+  void reset() { *this = MarketStats(); }
 };
 
 struct Agent {
@@ -75,7 +97,7 @@ struct Agent {
 
   // This function inserts a precedence constraint when adding a new task into the agent task queue. This would involve removing the existing precedence constraint between the task before it and after it and then adding two new precedence constraints
   void insertIntraAgentPrecedenceConstraint(int task, int taskPosition) {
-    int previousTask = -1, nextTask = -1;
+    int previousTask = UNDEFINED, nextTask = UNDEFINED;
     if (taskPosition != 0) {
       previousTask = taskAssignments[taskPosition - 1];
     }
@@ -90,12 +112,12 @@ struct Agent {
                              (x.first == previousTask && x.second == nextTask));
                        }),
         intraPrecedenceConstraints.end());
-    if (previousTask != -1) {
+    if (previousTask >= 0) {
       intraPrecedenceConstraints.insert(
           intraPrecedenceConstraints.begin() + taskPosition - 1,
           make_pair(previousTask, task));
     }
-    if (nextTask != -1) {
+    if (nextTask >= 0) {
       intraPrecedenceConstraints.insert(
           intraPrecedenceConstraints.begin() + taskPosition,
           make_pair(task, nextTask));
@@ -106,14 +128,14 @@ struct Agent {
     assert(std::find(taskAssignments.begin(), taskAssignments.end(), task) !=
            taskAssignments.end());
     int taskPosition = getLocalTaskIndex(task);
-    int previousTask = -1, nextTask = -1,
+    int previousTask = UNDEFINED, nextTask = UNDEFINED,
         previousTaskPosition = taskPosition - 1,
         nextTaskPosition = taskPosition + 1;
-    while (previousTaskPosition >= 0 && previousTask == -1) {
+    while (previousTaskPosition >= 0 && (previousTask == UNDEFINED || previousTask == UNASSIGNED)) {
       previousTask = taskAssignments[previousTaskPosition];
       previousTaskPosition--;
     }
-    while (nextTaskPosition < (int)taskAssignments.size() && nextTask == -1) {
+    while (nextTaskPosition < (int)taskAssignments.size() && (nextTask == UNDEFINED || nextTask == UNASSIGNED)) {
       nextTask = taskAssignments[nextTaskPosition];
       nextTaskPosition++;
     }
@@ -128,7 +150,7 @@ struct Agent {
                        }),
         intraPrecedenceConstraints.end());
 
-    if (previousTask != -1 && nextTask != -1) {
+    if (previousTask >= 0 && nextTask >= 0) {
       insertPrecedenceConstraint(previousTask, nextTask);
     }
   }
@@ -139,6 +161,9 @@ struct Utility {
   int agent, taskPosition;
   int pathLength, agentTasksLen;
   double value;
+  double baseDeltaSoc;
+  double deltaMarketExposure;
+  double deltaPrecedenceWait;
 
   Utility() {
     agent = -1;
@@ -146,15 +171,23 @@ struct Utility {
     pathLength = -1;
     agentTasksLen = -1;
     value = std::numeric_limits<double>::max();
+    baseDeltaSoc = 0.0;
+    deltaMarketExposure = 0.0;
+    deltaPrecedenceWait = 0.0;
   }
 
   Utility(int agent, int taskPosition, int pathLength, int agentTasksLen,
-          double value)
+          double value, double baseDeltaSoc = 0.0,
+          double deltaMarketExposure = 0.0,
+          double deltaPrecedenceWait = 0.0)
       : agent(agent),
         taskPosition(taskPosition),
         pathLength(pathLength),
         agentTasksLen(agentTasksLen),
-        value(value) {}
+        value(value),
+        baseDeltaSoc(baseDeltaSoc),
+        deltaMarketExposure(deltaMarketExposure),
+        deltaPrecedenceWait(deltaPrecedenceWait) {}
 
   struct CompareUtilities {
     bool operator()(const Utility& lhs, const Utility& rhs) const {
@@ -250,7 +283,7 @@ struct FeasibleSolution {
         "\n";
     for (int agent = 0; agent < (int)agentPaths.size(); agent++) {
       result += "Agent " + std::to_string(agent) +
-                " (cost = " + std::to_string(agentPaths[agent].endTime()) +
+                " (cost = " + std::to_string(agentPaths[agent].endTimeOrZero()) +
                 "): \n\tPaths:\n\t";
       for (int t = 0; t < (int)agentPaths[agent].path.size(); t++) {
         pair<int, int> coord =
@@ -389,13 +422,16 @@ struct ALNS {
 
   // Parameter values copied from 'https://d-nb.info/1072464683/34'
   int alnsCounter = 0, alnsCounterThreshold = 100,
-      numDestroyHeuristics = (int)sizeof(DestroyHeuristic),
+      numDestroyHeuristics = (int)DestroyHeuristic::destroyHeuristicCount,
       recentDestroyHeuristic = -1;
   vector<int> destroyHeuristicHistory;
   double r1 = 65, r2 = 45, r3 = 25;
   double delta1 = r1 + r2 + r3, delta2 = r2 + r3, delta3 = r3;
   double reactionFactor = 0.35;
   vector<double> weights, used, success;
+  vector<int64_t> selections, accepted, rejected, feasible, bestUpdates,
+      improvedAccepted, downgradedAccepted, couldNotFind;
+  vector<double> deltaSocAll, deltaSocAccepted;
 
   ALNS() {
 
@@ -404,6 +440,16 @@ struct ALNS {
       weights.push_back(1);
       used.push_back(0);
       success.push_back(0);
+      selections.push_back(0);
+      accepted.push_back(0);
+      rejected.push_back(0);
+      feasible.push_back(0);
+      bestUpdates.push_back(0);
+      improvedAccepted.push_back(0);
+      downgradedAccepted.push_back(0);
+      couldNotFind.push_back(0);
+      deltaSocAll.push_back(0.0);
+      deltaSocAccepted.push_back(0.0);
     }
   }
 };
@@ -414,8 +460,37 @@ struct LNSParams {
       tolerance, shawDistanceWeight, shawTemporalWeight, lnsConflictWeight,
       lnsCostWeight;
   string initialSolutionStrategy, destroyHeuristic, acceptanceCriteria,
-      regretType;
+      regretType, lowLevelPlanner;
   bool incrementalRegret = false;
+  bool plannerParityCheck = false;
+  int plannerParityMaxLogs = 10;
+  bool marketHeuristics = false;
+  int marketBucketDt = 3;
+  int marketVertexBucketCapacity = 2;
+  int marketEdgeBucketCapacity = 2;
+  bool marketUpdateOnAcceptedOnly = true;
+  int marketUpdatePeriodAccepted = 1;
+  double marketEta = 0.05;
+  double marketRho = 0.9;
+  double marketPriceCap = 50.0;
+  double marketGamma = 0.01;
+  bool marketAcceptanceGuards = false;
+  double marketTauP = 0.0;
+  double marketTauW = 0.0;
+  double marketDestroyWeightPrice = 1.0;
+  double marketDestroyWeightWait = 2.0;
+  double marketDestroyWeightRoot = 1.5;
+  double marketSeedTopFrac = 0.2;
+  double marketRandomDestroyQuota = 0.15;
+  int marketCooldownIters = 3;
+  int marketDUp = 1;
+  int marketDDown = 1;
+  int marketClosureCap = 0;
+  bool marketRepairTieBreak = false;
+  bool marketRepairBlend = false;
+  double marketTieBreakEpsSoc = 0.0;
+  double marketLambdaPrice = 0.0;
+  double marketLambdaWait = 0.0;
   // Supported: "descendants", "descendants+agent".
   string incrementalRegretMode = "descendants+agent";
   unsigned int seed = 0;
@@ -427,7 +502,37 @@ struct LNSParams {
             double lnsCostWeight, string initialSolutionStrategy,
             string destroyHeuristic, string acceptanceCriteria,
             string regretType, bool incrementalRegret,
-            string incrementalRegretMode, unsigned int seed)
+            string incrementalRegretMode, unsigned int seed,
+            bool plannerParityCheck = false,
+            int plannerParityMaxLogs = 10,
+            bool marketHeuristics = false,
+            int marketBucketDt = 3,
+            int marketVertexBucketCapacity = 2,
+            int marketEdgeBucketCapacity = 2,
+            bool marketUpdateOnAcceptedOnly = true,
+            int marketUpdatePeriodAccepted = 1,
+            double marketEta = 0.05,
+            double marketRho = 0.9,
+            double marketPriceCap = 50.0,
+            double marketGamma = 0.01,
+            bool marketAcceptanceGuards = false,
+            double marketTauP = 0.0,
+            double marketTauW = 0.0,
+            double marketDestroyWeightPrice = 1.0,
+            double marketDestroyWeightWait = 2.0,
+            double marketDestroyWeightRoot = 1.5,
+            double marketSeedTopFrac = 0.2,
+            double marketRandomDestroyQuota = 0.15,
+            int marketCooldownIters = 3,
+            int marketDUp = 1,
+            int marketDDown = 1,
+            int marketClosureCap = 0,
+            bool marketRepairTieBreak = false,
+            bool marketRepairBlend = false,
+            double marketTieBreakEpsSoc = 0.0,
+            double marketLambdaPrice = 0.0,
+            double marketLambdaWait = 0.0,
+            string lowLevelPlanner = "mlastar")
       : neighborhoodSize(neighborhoodSize),
         timeLimit(timeLimit),
         temperature(temperature),
@@ -442,7 +547,37 @@ struct LNSParams {
         destroyHeuristic(std::move(destroyHeuristic)),
         acceptanceCriteria(std::move(acceptanceCriteria)),
         regretType(std::move(regretType)),
+        lowLevelPlanner(std::move(lowLevelPlanner)),
         incrementalRegret(incrementalRegret),
+        plannerParityCheck(plannerParityCheck),
+        plannerParityMaxLogs(plannerParityMaxLogs),
+        marketHeuristics(marketHeuristics),
+        marketBucketDt(marketBucketDt),
+        marketVertexBucketCapacity(marketVertexBucketCapacity),
+        marketEdgeBucketCapacity(marketEdgeBucketCapacity),
+        marketUpdateOnAcceptedOnly(marketUpdateOnAcceptedOnly),
+        marketUpdatePeriodAccepted(marketUpdatePeriodAccepted),
+        marketEta(marketEta),
+        marketRho(marketRho),
+        marketPriceCap(marketPriceCap),
+        marketGamma(marketGamma),
+        marketAcceptanceGuards(marketAcceptanceGuards),
+        marketTauP(marketTauP),
+        marketTauW(marketTauW),
+        marketDestroyWeightPrice(marketDestroyWeightPrice),
+        marketDestroyWeightWait(marketDestroyWeightWait),
+        marketDestroyWeightRoot(marketDestroyWeightRoot),
+        marketSeedTopFrac(marketSeedTopFrac),
+        marketRandomDestroyQuota(marketRandomDestroyQuota),
+        marketCooldownIters(marketCooldownIters),
+        marketDUp(marketDUp),
+        marketDDown(marketDDown),
+        marketClosureCap(marketClosureCap),
+        marketRepairTieBreak(marketRepairTieBreak),
+        marketRepairBlend(marketRepairBlend),
+        marketTieBreakEpsSoc(marketTieBreakEpsSoc),
+        marketLambdaPrice(marketLambdaPrice),
+        marketLambdaWait(marketLambdaWait),
         incrementalRegretMode(std::move(incrementalRegretMode)),
         seed(seed) {}
 };
@@ -478,8 +613,60 @@ class LNS {
   };
 
  private:
-  int numOfIterations_;
+ int numOfIterations_;
   bool incrementalRegret_ = false;
+  LowLevelPlannerType lowLevelPlannerType_ = LowLevelPlannerType::mlastar;
+  bool plannerParityCheck_ = false;
+  int plannerParityMaxLogs_ = 10;
+  bool marketHeuristics_ = false;
+  int marketBucketDt_ = 3;
+  int marketVertexBucketCapacity_ = 2;
+  int marketEdgeBucketCapacity_ = 2;
+  bool marketUpdateOnAcceptedOnly_ = true;
+  int marketUpdatePeriodAccepted_ = 1;
+  int marketAcceptedCounter_ = 0;
+  int marketUpdateCounter_ = 0;
+  double marketEta_ = 0.05;
+  double marketRho_ = 0.9;
+  double marketPriceCap_ = 50.0;
+  double marketGamma_ = 0.01;
+  bool marketAcceptanceGuards_ = false;
+  double marketTauP_ = 0.0;
+  double marketTauW_ = 0.0;
+  double marketDestroyWeightPrice_ = 1.0;
+  double marketDestroyWeightWait_ = 2.0;
+  double marketDestroyWeightRoot_ = 1.5;
+  double marketSeedTopFrac_ = 0.2;
+  double marketRandomDestroyQuota_ = 0.15;
+  int marketCooldownIters_ = 3;
+  int marketDUp_ = 1;
+  int marketDDown_ = 1;
+  int marketClosureCap_ = 0;
+  bool marketRepairTieBreak_ = false;
+  bool marketRepairBlend_ = false;
+  double marketTieBreakEpsSoc_ = 0.0;
+  double marketLambdaPrice_ = 0.0;
+  double marketLambdaWait_ = 0.0;
+  double marketBestPressure_ = std::numeric_limits<double>::infinity();
+  double marketBestWait_ = std::numeric_limits<double>::infinity();
+
+  unordered_map<uint64_t, double> marketVertexPrices_;
+  unordered_map<uint64_t, double> marketEdgePrices_;
+  unordered_map<uint64_t, double> marketVertexExcessHat_;
+  unordered_map<uint64_t, double> marketEdgeExcessHat_;
+  vector<int> marketTaskCooldownUntilIter_;
+  MarketStats marketStats_;
+
+  struct TaskScheduleMetrics {
+    bool valid = false;
+    int arrive = 0;
+    int release = 0;
+    int start = 0;
+    int end = 0;
+    int waitPrec = 0;
+    int blocker = UNASSIGNED;
+  };
+
   enum class IncrementalRegretMode { descendants, descendants_and_agent };
   IncrementalRegretMode incrementalRegretMode_ =
       IncrementalRegretMode::descendants_and_agent;
@@ -567,6 +754,8 @@ class LNS {
                                           const vector<int>& endTimesAfter,
                                           const vector<int>& lastTaskBefore,
                                           const vector<int>& lastTaskAfter);
+  std::shared_ptr<SingleAgentSolver> createSharedPlanner(int agent) const;
+  std::unique_ptr<SingleAgentSolver> createLocalPlanner(int agent) const;
 
   void commitBestRegretTask(Regret bestRegret);
   void commitAncestorTaskOf(int globalTask,
@@ -596,17 +785,45 @@ class LNS {
 
   bool extractFeasibleSolution();
   FeasibleSolution getFeasibleSolution() { return incumbentSolution_; }
+  MarketStats getMarketStats() const { return marketStats_; }
 
   void randomRemoval();
   void worstRemoval();
   void conflictRemoval(std::optional<set<Conflicts>> potentialNeighborhood);
   void shawRemoval(int prioritySize);
+  void precedenceWaitRemoval(
+      std::optional<set<Conflicts>> potentialNeighborhood = std::nullopt);
+  void lowSlackRemoval(
+      std::optional<set<Conflicts>> potentialNeighborhood = std::nullopt);
+  void marketTatonnementRemoval(
+      std::optional<set<Conflicts>> potentialNeighborhood = std::nullopt);
   void alnsRemoval(std::optional<set<Conflicts>> potentialNeighborhood);
 
   bool simulatedAnnealing();
   bool thresholdAcceptance();
   bool oldBachelorsAcceptance();
   bool greatDelugeAlgorithm();
+
+  int marketTimeBucket(int timestep) const;
+  uint64_t makeMarketVertexKey(int location, int bucket) const;
+  uint64_t makeMarketEdgeKey(int from, int to, int bucket) const;
+  void computeTaskScheduleMetrics(
+      vector<TaskScheduleMetrics>& perTask,
+      vector<double>* blockedWaitSum = nullptr) const;
+  double computeTaskMarketExposure(int task, bool normalized) const;
+  double computeSolutionMarketPressure() const;
+  double computeSolutionPrecedenceWait() const;
+  bool passMarketAcceptanceGuards(double candidatePressure,
+                                  double candidateWait) const;
+  void updateMarketStateFromCurrentSolution();
+  void maybeUpdateMarketState(bool accepted);
+  double computeMarketExposureFromPath(const AgentTaskPath& taskPath,
+                                       bool normalized) const;
+  int computeTaskPrecedenceWaitFromState(
+      int task, int taskLocation, const vector<vector<int>>& agentTaskAssignments,
+      const vector<vector<AgentTaskPath>>& agentTaskPaths,
+      const vector<pair<int, int>>& precedenceConstraints) const;
+  int computeTaskPrecedenceWaitInCurrentSolution(int task) const;
 
   void computeMovingMetrics(int numberOfConflicts, int sumOfCosts);
 

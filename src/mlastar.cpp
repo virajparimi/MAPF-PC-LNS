@@ -89,7 +89,7 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
 
   start->openHandle = openList_.push(start);
   start->focalHandle = focalList_.push(start);
-  start->secondaryKeys.push_back(-start->gVal);
+  start->secondaryKey = -start->gVal;
 
   lowerBound_ = max(holdingTime - startTime, max(minFVal_, lb));
 
@@ -107,18 +107,12 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
       continue;  // Why is this needed? Probably because this node is not "good" and needs to be discarded
     }
 
-    list<int> successors = instance.getNeighbors(current->location);
-
-    // We can stay at the same location for the next timestep
-    successors.emplace_back(current->location);
-    for (int successor : successors) {
+    const vector<int>& neighbors = instance.getNeighbors(current->location);
+    for (int successor : neighbors) {
       int nextTimestep = current->timestep + 1;
 
       if (max(constraintTable.size, constraintTable.latestTimestep) + 1 <
           current->timestep) {
-        if (successor == current->location) {
-          continue;
-        }
         nextTimestep--;  // What does this do?
       }
 
@@ -140,7 +134,90 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
                                            successorHVal, nextTimestep,
                                            successorInternalConflicts,
                                            currentStage);
-      next->secondaryKeys.push_back(-successorGVal);
+      next->secondaryKey = -successorGVal;
+      next->distanceToNext = (*heuristic[currentStage])[successor];
+
+      if (next->stage == goalLocations.size() - 1 &&
+          successor == goalLocations.back() &&
+          current->location == goalLocations.back()) {
+        next->waitAtGoal = true;
+        next->refreshTieBreaker();
+      }
+
+      // Try to retrieve it from the hash table
+      auto it = allNodesTable_.find(next);
+      if (it == allNodesTable_.end()) {
+        pushNode(next);
+        allNodesTable_.insert(next);
+        continue;
+      }
+
+      // If we found existing entry then we need to update it but only if its in the open list
+      if ((*it)->getFVal() > next->getFVal() ||
+          ((*it)->getFVal() == next->getFVal() &&
+           LLNode::FocalCompareNode()((*it), next))) {
+        if (!(*it)->inOpenlist) {
+          (*it)->copy(*next);
+          pushNode(*it);
+        } else {
+          bool addToFocal = false, updateInFocal = false, updateOpen = false;
+          // New node can be in focal list
+          if ((successorGVal + successorHVal) <= lowerBound_) {
+            if ((*it)->getFVal() > lowerBound_) {
+              addToFocal = true;  // Old node could not be in focal list
+            } else {
+              updateInFocal =
+                  true;  // Old node could be in focal list so need to update
+            }
+          }
+          if ((*it)->getFVal() > successorGVal + successorHVal) {
+            updateOpen =
+                true;  // This node would not have been popped yet from the open list
+          }
+          (*it)->copy(*next);
+          if (updateOpen) {
+            openList_.increase((*it)->openHandle);
+          }
+          if (addToFocal) {
+            (*it)->focalHandle = focalList_.push(*it);
+          }
+          if (updateInFocal) {
+            focalList_.update((*it)->focalHandle);
+          }
+        }
+      }
+      delete next;
+    }
+
+    {
+      // We can stay at the same location for the next timestep.
+      const int successor = current->location;
+      int nextTimestep = current->timestep + 1;
+
+      if (max(constraintTable.size, constraintTable.latestTimestep) + 1 <
+          current->timestep) {
+        continue;
+      }
+
+      if (constraintTable.constrained(successor, nextTimestep) ||
+          constraintTable.constrained(current->location, successor,
+                                      nextTimestep)) {
+        continue;
+      }
+
+      // Setting the stage
+      const unsigned int currentStage = current->stage;
+
+      int successorGVal = current->gVal + 1;
+      // getHeuristic(stage, successor)
+      int successorHVal = max((*heuristic[currentStage])[successor],
+                              holdingTime - nextTimestep);
+      int successorInternalConflicts = current->numOfConflicts;
+      auto* next = new MultiLabelAStarNode(current, successor, successorGVal,
+                                           successorHVal, nextTimestep,
+                                           successorInternalConflicts,
+                                           currentStage);
+      next->secondaryKey = -successorGVal;
       next->distanceToNext = (*heuristic[currentStage])[successor];
 
       if (next->stage == goalLocations.size() - 1 &&

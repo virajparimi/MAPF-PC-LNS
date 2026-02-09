@@ -1,11 +1,45 @@
 #include "constrainttable.hpp"
 
+void ConstraintTable::normalizeIntervals(size_t key) const {
+  const auto it = constraintTable_.find(key);
+  if (it == constraintTable_.end()) {
+    return;
+  }
+  auto& bucket = it->second;
+  auto& intervals = bucket.intervals;
+  if (bucket.normalized || intervals.size() <= 1) {
+    bucket.normalized = true;
+    return;
+  }
+
+  std::sort(intervals.begin(), intervals.end(),
+            [](const pair<int, int>& lhs, const pair<int, int>& rhs) {
+              if (lhs.first == rhs.first) {
+                return lhs.second < rhs.second;
+              }
+              return lhs.first < rhs.first;
+            });
+
+  int write = 0;
+  for (int read = 1; read < (int)intervals.size(); read++) {
+    if (intervals[read].first <= intervals[write].second) {
+      intervals[write].second =
+          max(intervals[write].second, intervals[read].second);
+    } else {
+      write++;
+      intervals[write] = intervals[read];
+    }
+  }
+  intervals.resize(write + 1);
+  bucket.normalized = true;
+}
+
 int ConstraintTable::getHoldingTime() const {
   int holdingTime = lengthMin;
   if (goalLocation >= 0) {
     auto it = constraintTable_.find((size_t)goalLocation);
     if (it != constraintTable_.end()) {
-      for (const auto& timeRange : it->second) {
+      for (const auto& timeRange : it->second.intervals) {
         holdingTime = max(holdingTime, timeRange.second);
       }
     }
@@ -31,12 +65,21 @@ bool ConstraintTable::constrained(size_t location, int timestep) const {
   if (it == constraintTable_.end()) {
     return false;
   }
-  for (const auto& constraint : it->second) {
-    if (constraint.first <= timestep && timestep < constraint.second) {
-      return true;
-    }
+  normalizeIntervals(location);
+  const auto& intervals = it->second.intervals;
+  if (intervals.empty()) {
+    return false;
   }
-  return false;
+  const auto upper =
+      std::upper_bound(intervals.begin(), intervals.end(), timestep,
+                       [](int t, const pair<int, int>& interval) {
+                         return t < interval.first;
+                       });
+  if (upper == intervals.begin()) {
+    return false;
+  }
+  const auto& candidate = *(upper - 1);
+  return candidate.first <= timestep && timestep < candidate.second;
 }
 
 bool ConstraintTable::constrained(size_t currentLocation, size_t nextLocation,
@@ -56,21 +99,11 @@ void ConstraintTable::insertLandmark(size_t location, int timestep) {
   }
 }
 
-void ConstraintTable::copy(const ConstraintTable& old) {
-  size = old.size;
-  lengthMin = old.lengthMin;
-  lengthMax = old.lengthMax;
-  goalLocation = old.goalLocation;
-  latestTimestep = old.latestTimestep;
-  numCol = old.numCol;
-  mapSize = old.mapSize;
-  landmarks_ = old.landmarks_;
-  constraintTable_ = old.constraintTable_;
-}
-
 void ConstraintTable::insert2CT(size_t location, int tMin, int tMax) {
   assert(tMin >= 0 && tMax > tMin);
-  constraintTable_[location].emplace_back(tMin, tMax);
+  auto& bucket = constraintTable_[location];
+  bucket.intervals.emplace_back(tMin, tMax);
+  bucket.normalized = false;
   if (tMax < MAX_TIMESTEP && tMax > latestTimestep) {
     latestTimestep = tMax;
   } else if (tMax == MAX_TIMESTEP && tMin > latestTimestep) {

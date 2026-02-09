@@ -6,11 +6,18 @@
 class ConstraintTable {
 
  protected:
+  struct IntervalBucket {
+    // Stored as sorted, merged [start, end) intervals after normalization.
+    mutable vector<pair<int, int>> intervals;
+    mutable bool normalized = true;
+  };
+
   unordered_map<size_t, size_t> landmarks_;  // (key, value) - (time, location)
-  unordered_map<size_t, list<pair<int, int>>>
-      constraintTable_;  // (key, value) - (location, occupied time intervals)
+  unordered_map<size_t, IntervalBucket>
+      constraintTable_;  // (key, value) - (location/edge key, occupied time intervals)
 
   void insertLandmark(size_t location, int timestep);
+  void normalizeIntervals(size_t key) const;
   inline size_t getEdgeIndex(size_t from, size_t to) const {
     return (1 + from) * mapSize + to;
   }
@@ -25,7 +32,10 @@ class ConstraintTable {
   ConstraintTable() = default;
   ConstraintTable(size_t numCol, size_t mapSize)
       : numCol(numCol), mapSize(mapSize) {}
-  ConstraintTable(const ConstraintTable& old) { copy(old); }
+  ConstraintTable(const ConstraintTable&) = default;
+  ConstraintTable& operator=(const ConstraintTable&) = default;
+  ConstraintTable(ConstraintTable&&) noexcept = default;
+  ConstraintTable& operator=(ConstraintTable&&) noexcept = default;
 
   int getHoldingTime() const;
   bool constrained(size_t location, int timestep) const;
@@ -44,7 +54,6 @@ class ConstraintTable {
                        nextTimestep);
   }
 
-  void copy(const ConstraintTable& old);
   void insert2CT(size_t location, int tMin, int tMax);
   void insert2CT(size_t from, size_t to, int tMin, int tMax);
 
@@ -59,4 +68,28 @@ class ConstraintTable {
 
   void addPath(const Path& path, bool waitAtGoal);
   unordered_map<size_t, size_t> getLandmarks() const { return landmarks_; }
+  const unordered_map<size_t, size_t>& getLandmarksRef() const {
+    return landmarks_;
+  }
+  const vector<pair<int, int>>* getConstraintIntervals(size_t key) const {
+    const auto it = constraintTable_.find(key);
+    if (it == constraintTable_.end()) {
+      return nullptr;
+    }
+    normalizeIntervals(key);
+    return &it->second.intervals;
+  }
+  const vector<pair<int, int>>* getConstraintIntervals(int key) const {
+    assert(key >= 0);
+    return getConstraintIntervals((size_t)key);
+  }
+  const vector<pair<int, int>>* getEdgeConstraintIntervals(size_t from,
+                                                           size_t to) const {
+    return getConstraintIntervals(getEdgeIndex(from, to));
+  }
+  const vector<pair<int, int>>* getEdgeConstraintIntervals(int from,
+                                                           int to) const {
+    assert(from >= 0 && to >= 0);
+    return getEdgeConstraintIntervals((size_t)from, (size_t)to);
+  }
 };

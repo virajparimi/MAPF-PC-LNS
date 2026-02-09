@@ -11,6 +11,7 @@ class Instance {
   string agentTaskFname_;
 
   vector<vector<int>> heuristics_;
+  vector<vector<int>> neighborsCache_;
   int numOfAgents_{}, numOfTasks_{};
   vector<int> endPoints_, taskLocations_, startLocations_, inputPlanningOrder_;
   // Maps given task to all its predecessors as given in the input
@@ -27,6 +28,7 @@ class Instance {
   void saveAgents() const;
 
   bool isConnected(int start, int goal);
+  void preComputeNeighbors();
   friend class Solution;
   friend class SingleAgentSolver;
 
@@ -57,7 +59,10 @@ class Instance {
     assert(globalTask < numOfTasks_);
     return heuristics_[globalTask];
   }
-  list<int> getNeighbors(int current) const;
+  inline const vector<int>& getNeighbors(int current) const {
+    assert(current >= 0 && current < mapSize);
+    return neighborsCache_[current];
+  }
   inline bool isObstacle(int loc) const { return map_[loc]; }
   inline bool validMove(int curr, int next) const {
     if (next < 0 || next >= mapSize || map_[next]) {
