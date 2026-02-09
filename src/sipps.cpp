@@ -91,17 +91,6 @@ std::vector<TimeInterval> computeSafeIntervalsForLocation(
   std::vector<TimeInterval> blocked = mergeIntervals(
       constraintTable.getConstraintIntervals(location), upperExclusive);
 
-  // Positive landmarks force the agent to be at a specific location and are
-  // vertex constraints for all other locations at those timesteps.
-  for (const auto& landmark : constraintTable.getLandmarksRef()) {
-    const int t = (int)landmark.first;
-    const int requiredLocation = (int)landmark.second;
-    if (requiredLocation == location || t < 0 || t >= upperExclusive) {
-      continue;
-    }
-    blocked.push_back({t, t + 1});
-  }
-
   if (!blocked.empty()) {
     std::sort(blocked.begin(), blocked.end(),
               [](const TimeInterval& lhs, const TimeInterval& rhs) {
@@ -379,6 +368,7 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     ConstraintTable mlaConstraintTable(constraintTable);
     MultiLabelSpaceTimeAStar mlaSolver(instance, agent_);
     mlaSolver.setGoalLocations(goalLocations);
+    mlaSolver.setSegmentTimeout(segmentTimeoutSec);
     mlaSolver.computeHeuristics();
     AgentTaskPath mlaPath =
         mlaSolver.findPathSegment(mlaConstraintTable, startTime, stage, lb);
@@ -645,7 +635,7 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     }
 
     const auto elapsed = ((fsec)(Time::now() - timeStart)).count();
-    if (elapsed > 600) {
+    if (elapsed > segmentTimeoutSec) {
       return finalizeAndReturn(path, "timeout");
     }
   }

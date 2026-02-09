@@ -44,23 +44,11 @@ int ConstraintTable::getHoldingTime() const {
       }
     }
   }
-  for (const auto& landmark : landmarks_) {
-    if ((int)landmark.second != goalLocation) {
-      holdingTime = max(holdingTime, (int)landmark.first + 1);
-    }
-  }
   return holdingTime;
 }
 
 bool ConstraintTable::constrained(size_t location, int timestep) const {
   assert(timestep >= 0);
-  if (location < mapSize) {
-    const auto it = landmarks_.find((size_t)timestep);
-    if (it != landmarks_.end() && it->second != location) {
-      return true;  // Violate the positive vertex constraint
-    }
-  }
-
   const auto it = constraintTable_.find(location);
   if (it == constraintTable_.end()) {
     return false;
@@ -85,18 +73,6 @@ bool ConstraintTable::constrained(size_t location, int timestep) const {
 bool ConstraintTable::constrained(size_t currentLocation, size_t nextLocation,
                                   int nextTimestep) const {
   return constrained(getEdgeIndex(currentLocation, nextLocation), nextTimestep);
-}
-
-void ConstraintTable::insertLandmark(size_t location, int timestep) {
-  assert(timestep >= 0);
-  const auto it = landmarks_.find((size_t)timestep);
-  if (it == landmarks_.end()) {
-    landmarks_[(size_t)timestep] = location;
-    latestTimestep = max(latestTimestep, timestep);
-    size = max(size, latestTimestep);
-  } else {
-    assert(it->second == location);
-  }
 }
 
 void ConstraintTable::insert2CT(size_t location, int tMin, int tMax) {

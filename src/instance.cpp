@@ -111,12 +111,12 @@ bool Instance::loadKivaMap() {
   }
 
   for (int i = 0; i < numOfRows; i++) {
-    map_[i * numOfCols] = false;
-    map_[i * numOfCols + numOfCols - 1] = false;
+    map_[i * numOfCols] = true;
+    map_[i * numOfCols + numOfCols - 1] = true;
   }
   for (int j = 1; j < numOfCols - 1; j++) {
-    map_[j] = false;
-    map_[mapSize - numOfCols + j] = false;
+    map_[j] = true;
+    map_[mapSize - numOfCols + j] = true;
   }
 
   assert(agentNum == numOfAgents_);
@@ -143,7 +143,13 @@ bool Instance::loadKivaTasks() {
     stringLine >> taskNum;
   }
 
-  assert(taskNum * 2 == numOfTasks_);
+  if (taskNum * 2 != numOfTasks_) {
+    PLOGE << "Kiva task count mismatch: file contains " << taskNum
+          << " tasks (expects " << taskNum * 2
+          << " expanded pickup+delivery tasks), but --taskNum is "
+          << numOfTasks_ << ".\n";
+    return false;
+  }
   // Initialize the task locations
   taskLocations_.resize(numOfTasks_);
   vector<pair<int, int>> temporalDependencies;
@@ -345,17 +351,34 @@ bool Instance::loadAgentsAndTasks() {
     return false;
   }
   int numDependencies = atoi(line.c_str());
+  if (numDependencies < 0) {
+    PLOGE << "Invalid number of dependencies in input: " << numDependencies
+          << "\n";
+    return false;
+  }
   vector<pair<int, int>> temporalDependencies;
+  temporalDependencies.reserve((size_t)numDependencies);
 
   for (int i = 0; i < numDependencies; i++) {
     if (!getline(file, line)) {
       return false;
     }
     tokenizer<char_separator<char>> tokenizer(line, sep);
+    if (std::distance(tokenizer.begin(), tokenizer.end()) < 2) {
+      PLOGE << "Invalid dependency line (expected two integers): " << line
+            << "\n";
+      return false;
+    }
     begin = tokenizer.begin();
     int predecessor = atoi((*begin).c_str());
     begin++;
     int successor = atoi((*begin).c_str());
+    if (predecessor < 0 || predecessor >= numOfTasks_ || successor < 0 ||
+        successor >= numOfTasks_) {
+      PLOGE << "Dependency index out of bounds: " << predecessor << " -> "
+            << successor << " with numOfTasks = " << numOfTasks_ << "\n";
+      return false;
+    }
     temporalDependencies.emplace_back(predecessor, successor);
   }
 

@@ -23,11 +23,7 @@ class Instance {
   bool loadKivaMap();
   bool loadKivaTasks();
   bool loadAgentsAndTasks();
-  void saveMap() const;
   void printMap() const;
-  void saveAgents() const;
-
-  bool isConnected(int start, int goal);
   void preComputeNeighbors();
   friend class Solution;
   friend class SingleAgentSolver;
@@ -63,9 +59,15 @@ class Instance {
     assert(current >= 0 && current < mapSize);
     return neighborsCache_[current];
   }
-  inline bool isObstacle(int loc) const { return map_[loc]; }
+  inline bool isObstacle(int loc) const {
+    if (loc < 0 || loc >= mapSize) {
+      return true;
+    }
+    return map_[loc];
+  }
   inline bool validMove(int curr, int next) const {
-    if (next < 0 || next >= mapSize || map_[next]) {
+    if (curr < 0 || curr >= mapSize || map_[curr] || next < 0 ||
+        next >= mapSize || map_[next]) {
       return false;
     }
     return getManhattanDistance(curr, next) < 2;
@@ -87,18 +89,39 @@ class Instance {
   inline map<int, vector<int>> getTaskDependencies() const {
     return taskDependencies_;
   }
+  inline const map<int, vector<int>>& getTaskDependenciesRef() const {
+    return taskDependencies_;
+  }
+  inline const vector<pair<int, int>>& getInputPrecedenceConstraintsRef() const {
+    return inputPrecedenceConstraints_;
+  }
   inline vector<pair<int, int>> getInputPrecedenceConstraints() const {
     return inputPrecedenceConstraints_;
   }
+  inline const vector<vector<int>>& getAncestorsRef() const { return ancestors_; }
   inline vector<vector<int>> getAncestors() const { return ancestors_; }
+  inline const vector<int>& getAncestorsRef(int globalTask) const {
+    assert(globalTask < numOfTasks_);
+    return ancestors_[globalTask];
+  }
   inline vector<int> getAncestors(int globalTask) const {
     assert(globalTask < numOfTasks_);
     return ancestors_[globalTask];
   }
+  inline const vector<vector<int>>& getSuccessorsRef() const {
+    return successors_;
+  }
   inline vector<vector<int>> getSuccessors() const { return successors_; }
+  inline const vector<int>& getSuccessorsRef(int globalTask) const {
+    assert(globalTask < numOfTasks_);
+    return successors_[globalTask];
+  }
   inline vector<int> getSuccessors(int globalTask) const {
     assert(globalTask < numOfTasks_);
     return successors_[globalTask];
+  }
+  inline const vector<int>& getInputPlanningOrderRef() const {
+    return inputPlanningOrder_;
   }
   inline vector<int> getInputPlanningOrder() const {
     return inputPlanningOrder_;
@@ -121,38 +144,25 @@ class Instance {
   string getMapName() const { return mapFname_; }
 
   void preComputeHeuristics() {
-    struct Node {
-      int location, value;
-      Node(int location, int value) : location(location), value(value) {}
-
-      struct CompareNode {
-        bool operator()(const Node& lhs, const Node& rhs) const {
-          return lhs.value >= rhs.value;
-        }
-      };
-    };
-
     heuristics_.clear();
     heuristics_.resize(numOfTasks_);
 
     for (int i = 0; i < numOfTasks_; i++) {
       heuristics_[i].resize(mapSize, MAX_TIMESTEP);
-      pairing_heap<Node, compare<Node::CompareNode>> heap;
-
-      // h-val of the goal is always 0
-      Node root(taskLocations_[i], 0);
+      const int root = taskLocations_[i];
       heuristics_[i][taskLocations_[i]] = 0;
+      deque<int> frontier;
+      frontier.push_back(root);
 
-      heap.push(root);
-
-      while (!heap.empty()) {
-        Node current = heap.top();
-        heap.pop();
-        for (int nextLocation : getNeighbors(current.location)) {
-          if (heuristics_[i][nextLocation] > current.value + 1) {
-            heuristics_[i][nextLocation] = current.value + 1;
-            Node next(nextLocation, heuristics_[i][nextLocation]);
-            heap.push(next);
+      // Unit-cost graph: BFS computes exact shortest-path distances.
+      while (!frontier.empty()) {
+        const int current = frontier.front();
+        frontier.pop_front();
+        const int nextDistance = heuristics_[i][current] + 1;
+        for (int nextLocation : getNeighbors(current)) {
+          if (heuristics_[i][nextLocation] > nextDistance) {
+            heuristics_[i][nextLocation] = nextDistance;
+            frontier.push_back(nextLocation);
           }
         }
       }

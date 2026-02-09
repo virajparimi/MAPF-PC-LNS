@@ -1,6 +1,7 @@
 #pragma once
 
 #include <plog/Log.h>
+#include <memory>
 #include "astar.hpp"
 #include "common.hpp"
 #include "constrainttable.hpp"
@@ -24,10 +25,12 @@ class MultiLabelAStarNode : public LLNode {
 
   struct NodeHasher {
     size_t operator()(const MultiLabelAStarNode* node) const {
-      size_t locationHash = hash<int>()(node->location);
-      size_t stageHash = hash<int>()(node->stage);
-      size_t timestepHash = hash<int>()(node->timestep);
-      return (locationHash ^ (timestepHash << 1) ^ (stageHash << 1));
+      uint64_t x = 0;
+      x ^= (uint64_t)(uint32_t)node->location;
+      x ^= ((uint64_t)(uint32_t)node->timestep) << 21;
+      x ^= ((uint64_t)(uint32_t)node->stage) << 42;
+      x ^= node->waitAtGoal ? 0xD1B54A32D192ED03ULL : 0ULL;
+      return (size_t)LLNode::mix64(x);
     }
   };
 
@@ -57,6 +60,7 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
   unordered_set<MultiLabelAStarNode*, MultiLabelAStarNode::NodeHasher,
                 MultiLabelAStarNode::CompareNode>
       allNodesTable_;
+  vector<std::unique_ptr<MultiLabelAStarNode>> allNodesStorage_;
 
   void releaseNodes();
   void updateFocalList();

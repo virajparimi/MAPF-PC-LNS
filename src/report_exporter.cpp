@@ -1,4 +1,4 @@
-#include "costchecker.hpp"
+#include "report_exporter.hpp"
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -19,13 +19,13 @@ std::tm localtimeSafe(std::time_t timeValue) {
 }
 }  // namespace
 
-void SaveToTxt::printStart() {
+void CBSReportExporter::printStart() {
   std::cout
       << "Loading task assignment, locations and precedence constraint data"
       << std::endl;
 }
 
-void SaveToTxt::fileSave() {
+void CBSReportExporter::printSaveStatus() {
   if (outputFile.empty()) {
     std::cout << "No report was generated." << std::endl;
     return;
@@ -34,7 +34,8 @@ void SaveToTxt::fileSave() {
   std::cout << "Name of file: " << outputFile << std::endl;
 }
 
-void SaveToTxt::runData(const Instance* inst, const Solution* sol) {
+void CBSReportExporter::writeReport(const Instance* inst,
+                                    const Solution* sol) {
   assert(inst != nullptr);
   assert(sol != nullptr);
 
@@ -64,7 +65,7 @@ void SaveToTxt::runData(const Instance* inst, const Solution* sol) {
       const vector<int>& globalTasks = sol->agents[a].taskAssignments;
       const int numTasks = (int)globalTasks.size();
       const pair<int, int> startLocAgent =
-          inst->getCoordinate(inst->getStartLocations()[a]);
+          inst->getCoordinate(inst->getStartLocationsRef()[a]);
       myFile << numTasks << "\t" << startLocAgent.second << "\t"
              << startLocAgent.first << "\t";
       for (int i = 0; i < numTasks; i++) {
@@ -79,19 +80,37 @@ void SaveToTxt::runData(const Instance* inst, const Solution* sol) {
     // Write the precedence constraints
     myFile << "temporal cons:" << std::endl;
 
-    const vector<pair<int, int>> globalPc =
-        inst->getInputPrecedenceConstraints();
+    const vector<pair<int, int>>& globalPc =
+        inst->getInputPrecedenceConstraintsRef();
 
     for (const auto& pc : globalPc) {
       const int predecessor = pc.first;
       const int successor = pc.second;
 
-      const int predAgent = sol->taskAgentMap.at(predecessor);
-      const int succAgent = sol->taskAgentMap.at(successor);
-      assert(predAgent != UNASSIGNED && succAgent != UNASSIGNED);
+      const auto itPredAgent = sol->taskAgentMap.find(predecessor);
+      const auto itSuccAgent = sol->taskAgentMap.find(successor);
+      if (itPredAgent == sol->taskAgentMap.end() ||
+          itSuccAgent == sol->taskAgentMap.end()) {
+        std::cerr << "Skipping precedence constraint with missing task "
+                     "assignment: "
+                  << predecessor << " -> " << successor << std::endl;
+        continue;
+      }
+      const int predAgent = itPredAgent->second;
+      const int succAgent = itSuccAgent->second;
+      if (predAgent == UNASSIGNED || succAgent == UNASSIGNED) {
+        std::cerr << "Skipping precedence constraint with unassigned task: "
+                  << predecessor << " -> " << successor << std::endl;
+        continue;
+      }
 
       const int predLocalIndex = sol->getLocalTaskIndex(predAgent, predecessor);
       const int succLocalIndex = sol->getLocalTaskIndex(succAgent, successor);
+      if (predLocalIndex == UNASSIGNED || succLocalIndex == UNASSIGNED) {
+        std::cerr << "Skipping precedence constraint with missing local index: "
+                  << predecessor << " -> " << successor << std::endl;
+        continue;
+      }
 
       myFile << predAgent << "\t" << predLocalIndex << "\t" << succAgent << "\t"
              << succLocalIndex << std::endl;

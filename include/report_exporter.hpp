@@ -4,7 +4,7 @@
 class Instance;
 class Solution;
 
-class SaveToTxt {
+class CBSReportExporter {
   /*
     Please add  - 
 
@@ -30,7 +30,7 @@ class SaveToTxt {
  */
  public:
   std::string outputFile;
-  void fileSave();
+  void printSaveStatus();
   void printStart();
-  void runData(const Instance* inst, const Solution* sol);
+  void writeReport(const Instance* inst, const Solution* sol);
 };

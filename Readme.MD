@@ -39,6 +39,7 @@ Note: initial solution (`-s`) options: `greedy`, `greedy_precedence_only`, `sota
 Note: destroy heuristic (`-h`) options: `random`, `worst`, `conflict`, `shaw`, `precedence_wait`, `low_slack`, `market_tatonnement`, `alns`.
 Note: low-level planner (`--lowLevelPlanner`) options: `mlastar` (default), `sipps`.
 Note: `sipps` and `mlastar` run as separate low-level tracks for direct comparison.
+Note: low-level segment timeout is configurable via `--lowLevelSegmentTimeout` (seconds, default `600`).
 Note: planner parity debug options: `--plannerParityCheck` and `--plannerParityMaxLogs`.
 Note: market heuristics are opt-in via `--marketHeuristics` and support optional guard rails via `--marketAcceptanceGuards`, `--marketTauP`, `--marketTauW`.
 Note: Phase-4 market-aware repair is opt-in via `--marketRepairTieBreak` or `--marketRepairBlend` with knobs `--marketTieBreakEpsSoc`, `--marketLambdaPrice`, `--marketLambdaWait`.

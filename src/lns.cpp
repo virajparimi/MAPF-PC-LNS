@@ -47,6 +47,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   } else {
     lowLevelPlannerType_ = LowLevelPlannerType::mlastar;
   }
+  lowLevelSegmentTimeout_ = max(0.0, parameters.lowLevelSegmentTimeout);
   plannerParityCheck_ = parameters.plannerParityCheck;
   plannerParityMaxLogs_ = parameters.plannerParityMaxLogs;
   marketHeuristics_ = parameters.marketHeuristics;
@@ -100,25 +101,35 @@ LNS::LNS(int numOfIterations, const Instance& instance,
 }
 
 std::shared_ptr<SingleAgentSolver> LNS::createSharedPlanner(int agent) const {
+  std::shared_ptr<SingleAgentSolver> planner;
   switch (lowLevelPlannerType_) {
     case LowLevelPlannerType::sipps:
-      return std::make_shared<MultiLabelSIPPS>(
+      planner = std::make_shared<MultiLabelSIPPS>(
           instance_, agent, plannerParityCheck_, plannerParityMaxLogs_);
+      break;
     case LowLevelPlannerType::mlastar:
     default:
-      return std::make_shared<MultiLabelSpaceTimeAStar>(instance_, agent);
+      planner = std::make_shared<MultiLabelSpaceTimeAStar>(instance_, agent);
+      break;
   }
+  planner->setSegmentTimeout(lowLevelSegmentTimeout_);
+  return planner;
 }
 
 std::unique_ptr<SingleAgentSolver> LNS::createLocalPlanner(int agent) const {
+  std::unique_ptr<SingleAgentSolver> planner;
   switch (lowLevelPlannerType_) {
     case LowLevelPlannerType::sipps:
-      return std::make_unique<MultiLabelSIPPS>(
+      planner = std::make_unique<MultiLabelSIPPS>(
           instance_, agent, plannerParityCheck_, plannerParityMaxLogs_);
+      break;
     case LowLevelPlannerType::mlastar:
     default:
-      return std::make_unique<MultiLabelSpaceTimeAStar>(instance_, agent);
+      planner = std::make_unique<MultiLabelSpaceTimeAStar>(instance_, agent);
+      break;
   }
+  planner->setSegmentTimeout(lowLevelSegmentTimeout_);
+  return planner;
 }
 
 int LNS::marketTimeBucket(int timestep) const {
@@ -152,7 +163,7 @@ void LNS::computeTaskScheduleMetrics(vector<TaskScheduleMetrics>& perTask,
   if (blockedWaitSum != nullptr) {
     blockedWaitSum->assign(taskCount, 0.0);
   }
-  const vector<vector<int>> predecessors = instance_.getAncestors();
+  const auto& predecessors = instance_.getAncestorsRef();
 
   for (int task = 0; task < taskCount; task++) {
     const auto itAgent = solution_.taskAgentMap.find(task);
@@ -426,7 +437,7 @@ int LNS::computeTaskPrecedenceWaitInCurrentSolution(int task) const {
   }
 
   int release = 0;
-  for (const auto& prec : instance_.getInputPrecedenceConstraints()) {
+  for (const auto& prec : instance_.getInputPrecedenceConstraintsRef()) {
     if (prec.second != task) {
       continue;
     }
@@ -684,8 +695,8 @@ void LNS::marketTatonnementRemoval(
   vector<TaskScheduleMetrics> perTask;
   vector<double> blockedWaitSum;
   computeTaskScheduleMetrics(perTask, &blockedWaitSum);
-  const vector<vector<int>> predecessors = instance_.getAncestors();
-  const vector<vector<int>> successors = instance_.getSuccessors();
+  const auto& predecessors = instance_.getAncestorsRef();
+  const auto& successors = instance_.getSuccessorsRef();
 
   vector<pair<int, double>> rankedTasks;
   rankedTasks.reserve(taskCount);
@@ -1606,8 +1617,8 @@ void LNS::precedenceWaitRemoval(
     return;
   }
 
-  const vector<vector<int>> predecessors = instance_.getAncestors();
-  const vector<vector<int>> successors = instance_.getSuccessors();
+  const auto& predecessors = instance_.getAncestorsRef();
+  const auto& successors = instance_.getSuccessorsRef();
 
   vector<int> criticalPred(taskCount, UNASSIGNED);
   vector<int> releaseTime(taskCount, 0);
@@ -1639,7 +1650,7 @@ void LNS::precedenceWaitRemoval(
     }
 
     int prevEnd = 0;
-    int prevLocation = instance_.getStartLocations()[agent];
+    int prevLocation = instance_.getStartLocationsRef()[agent];
     if (taskPos > 0) {
       const AgentTaskPath& previousTaskPath =
           solution_.agents[agent].taskPaths[taskPos - 1];
@@ -1823,8 +1834,8 @@ void LNS::lowSlackRemoval(std::optional<set<Conflicts>> potentialNeighborhood) {
     return;
   }
 
-  const vector<vector<int>> predecessors = instance_.getAncestors();
-  const vector<vector<int>> successors = instance_.getSuccessors();
+  const auto& predecessors = instance_.getAncestorsRef();
+  const auto& successors = instance_.getSuccessorsRef();
   const int INF = std::numeric_limits<int>::max() / 4;
 
   vector<int> taskToAgent(taskCount, UNASSIGNED);
@@ -2525,7 +2536,7 @@ void LNS::prepareNextIteration() {
   PLOGI << "Preparing the solution object for the next iteration\n";
 
   // Find the tasks that are following the earliest conflicting task as their paths need to be invalidated
-  vector<vector<int>> successors = instance_.getSuccessors();
+  const auto& successors = instance_.getSuccessorsRef();
   // vector<pair<int, int>> precedenceConstraints =
   //     instance_.getInputPrecedenceConstraints();
   // vector<vector<int>> successors(instance_.getTasksNum());
@@ -2630,7 +2641,7 @@ void LNS::prepareNextIteration() {
   lnsNeighborhood_.patchedTasks = tasksToFix;
 
   // Find the paths for the tasks whose previous tasks were removed
-  for (int task : instance_.getInputPlanningOrder()) {
+  for (int task : instance_.getInputPlanningOrderRef()) {
     if (tasksToFix.count(task) > 0) {
 
       PLOGD << "Going to find path for next task: " << task << endl;
@@ -2786,7 +2797,7 @@ vector<int> LNS::computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
 
   vector<bool> isDirty(instance_.getTasksNum(), false);
 
-  const vector<vector<int>> successors = instance_.getSuccessors();
+  const auto& successors = instance_.getSuccessorsRef();
   std::vector<int> stack;
   stack.reserve(changedTasks.size());
   for (int t : changedTasks) {
@@ -2917,7 +2928,7 @@ bool LNS::computeRegretForTask(int task) {
 
       if ((localTask == 0 &&
            agentTaskPaths[agent][localTask].front().location !=
-               instance_.getStartLocations()[agent]) ||
+               instance_.getStartLocationsRef()[agent]) ||
           (localTask > 0 &&
            agentTaskPaths[agent][localTask - 1].path.back().location !=
                agentTaskPaths[agent][localTask].path.front().location)) {
@@ -2972,7 +2983,7 @@ bool LNS::computeRegretForTask(int task) {
                agentTaskPaths[agent][localTask].path.front().location);
       } else {
         assert(agentTaskPaths[agent][localTask].front().location ==
-               instance_.getStartLocations()[agent]);
+               instance_.getStartLocationsRef()[agent]);
       }
     }
   }
@@ -3275,7 +3286,7 @@ std::variant<bool, Utility> LNS::insertTask(
 
         if ((localTask == 0 &&
              agentTaskPathsRef[agent][localTask].front().location !=
-                 instance_.getStartLocations()[agent]) ||
+                 instance_.getStartLocationsRef()[agent]) ||
             (localTask > 0 &&
              agentTaskPathsRef[agent][localTask - 1].path.back().location !=
                  agentTaskPathsRef[agent][localTask].path.front().location)) {

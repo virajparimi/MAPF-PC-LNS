@@ -8,7 +8,7 @@ void greedyTaskAssignment(const Instance* instance, Solution* solution) {
 
   const int numAgents = instance->getAgentNum();
   const int numTasks = instance->getTasksNum();
-  const auto taskDependencies = instance->getTaskDependencies();
+  const auto& taskDependencies = instance->getTaskDependenciesRef();
 
   ppqg q;
   vector<int> agentLastTimesteps(numAgents, 0);

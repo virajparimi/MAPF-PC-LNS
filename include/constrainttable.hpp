@@ -12,11 +12,9 @@ class ConstraintTable {
     mutable bool normalized = true;
   };
 
-  unordered_map<size_t, size_t> landmarks_;  // (key, value) - (time, location)
   unordered_map<size_t, IntervalBucket>
       constraintTable_;  // (key, value) - (location/edge key, occupied time intervals)
 
-  void insertLandmark(size_t location, int timestep);
   void normalizeIntervals(size_t key) const;
   inline size_t getEdgeIndex(size_t from, size_t to) const {
     return (1 + from) * mapSize + to;
@@ -67,10 +65,6 @@ class ConstraintTable {
   }
 
   void addPath(const Path& path, bool waitAtGoal);
-  unordered_map<size_t, size_t> getLandmarks() const { return landmarks_; }
-  const unordered_map<size_t, size_t>& getLandmarksRef() const {
-    return landmarks_;
-  }
   const vector<pair<int, int>>* getConstraintIntervals(size_t key) const {
     const auto it = constraintTable_.find(key);
     if (it == constraintTable_.end()) {

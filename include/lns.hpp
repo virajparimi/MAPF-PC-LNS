@@ -77,14 +77,13 @@ struct Agent {
   ~Agent() = default;
 
   int getLocalTaskIndex(int globalTask) const {
-    assert(std::find(taskAssignments.begin(), taskAssignments.end(),
-                     globalTask) != taskAssignments.end());
     for (int i = 0; i < (int)taskAssignments.size(); i++) {
       if (taskAssignments[i] == globalTask) {
         return i;
       }
     }
     assert(false);
+    return UNASSIGNED;
   }
 
   inline void insertPrecedenceConstraint(int taskA, int taskB) {
@@ -293,7 +292,7 @@ struct FeasibleSolution {
         if (agentPaths[agent].path.at(t).isGoal) {
           result += "*";
         }
-        if (agent != (int)agentPaths[agent].path.size() - 1) {
+        if (t != (int)agentPaths[agent].path.size() - 1) {
           result += " -> ";
         }
       }
@@ -491,6 +490,7 @@ struct LNSParams {
   double marketTieBreakEpsSoc = 0.0;
   double marketLambdaPrice = 0.0;
   double marketLambdaWait = 0.0;
+  double lowLevelSegmentTimeout = 600.0;
   // Supported: "descendants", "descendants+agent".
   string incrementalRegretMode = "descendants+agent";
   unsigned int seed = 0;
@@ -532,7 +532,8 @@ struct LNSParams {
             double marketTieBreakEpsSoc = 0.0,
             double marketLambdaPrice = 0.0,
             double marketLambdaWait = 0.0,
-            string lowLevelPlanner = "mlastar")
+            string lowLevelPlanner = "mlastar",
+            double lowLevelSegmentTimeout = 600.0)
       : neighborhoodSize(neighborhoodSize),
         timeLimit(timeLimit),
         temperature(temperature),
@@ -578,6 +579,7 @@ struct LNSParams {
         marketTieBreakEpsSoc(marketTieBreakEpsSoc),
         marketLambdaPrice(marketLambdaPrice),
         marketLambdaWait(marketLambdaWait),
+        lowLevelSegmentTimeout(lowLevelSegmentTimeout),
         incrementalRegretMode(std::move(incrementalRegretMode)),
         seed(seed) {}
 };
@@ -616,6 +618,7 @@ class LNS {
  int numOfIterations_;
   bool incrementalRegret_ = false;
   LowLevelPlannerType lowLevelPlannerType_ = LowLevelPlannerType::mlastar;
+  double lowLevelSegmentTimeout_ = 600.0;
   bool plannerParityCheck_ = false;
   int plannerParityMaxLogs_ = 10;
   bool marketHeuristics_ = false;
@@ -830,7 +833,7 @@ class LNS {
   void printAgents() const {
     for (int i = 0; i < instance_.getAgentNum(); i++) {
       pair<int, int> startLoc =
-          instance_.getCoordinate(instance_.getStartLocations()[i]);
+          instance_.getCoordinate(instance_.getStartLocationsRef()[i]);
       PLOGI << "Agent " << i << " : S = (" << startLoc.first << ", "
             << startLoc.second << ") ;\nGoals : \n";
       for (int j = 0; j < (int)solution_.agents[i].taskAssignments.size();

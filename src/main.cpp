@@ -9,7 +9,7 @@
 #include <limits>
 #include <boost/program_options.hpp>
 #include "common.hpp"
-#include "costchecker.hpp"
+#include "report_exporter.hpp"
 #include "instance.hpp"
 #include "lns.hpp"
 #include "utils.hpp"
@@ -80,6 +80,10 @@ int main(int argc, char** argv) {
       "plannerParityMaxLogs",
       po::value<int>()->default_value(10),
       "Maximum number of SIPPS-vs-MLA* parity mismatch logs");
+  desc.add_options()(
+      "lowLevelSegmentTimeout",
+      po::value<double>()->default_value(600.0),
+      "Per-segment timeout (seconds) for low-level planner searches");
   desc.add_options()("marketHeuristics",
                      po::bool_switch()->default_value(false),
                      "Enable tatonnement-style market heuristics");
@@ -240,8 +244,14 @@ int main(int argc, char** argv) {
   }
   const bool plannerParityCheck = vm["plannerParityCheck"].as<bool>();
   const int plannerParityMaxLogs = vm["plannerParityMaxLogs"].as<int>();
+  const double lowLevelSegmentTimeout =
+      vm["lowLevelSegmentTimeout"].as<double>();
   if (plannerParityMaxLogs <= 0) {
     PLOGE << "plannerParityMaxLogs must be a positive integer\n";
+    return 1;
+  }
+  if (lowLevelSegmentTimeout <= 0.0) {
+    PLOGE << "lowLevelSegmentTimeout must be positive\n";
     return 1;
   }
 
@@ -335,7 +345,7 @@ int main(int argc, char** argv) {
 
   for (int i = 0; i < instance.getAgentNum(); i++) {
     pair<int, int> location =
-        instance.getCoordinate(instance.getStartLocations()[i]);
+        instance.getCoordinate(instance.getStartLocationsRef()[i]);
     PLOGD << "Agent " << i << " starts at :(" << location.first << ", "
           << location.second << ")\n";
   }
@@ -345,7 +355,7 @@ int main(int argc, char** argv) {
     PLOGD << "Task " << i << " starts at :(" << location.first << ", "
           << location.second << ")\n";
   }
-  for (const auto& dependencies : instance.getTaskDependencies()) {
+  for (const auto& dependencies : instance.getTaskDependenciesRef()) {
     PLOGD << "Task  " << dependencies.first
           << " has the following dependent tasks\n";
     for (int task : dependencies.second) {
@@ -370,7 +380,7 @@ int main(int argc, char** argv) {
                        marketClosureCap, marketRepairTieBreak,
                        marketRepairBlend, marketTieBreakEpsSoc,
                        marketLambdaPrice, marketLambdaWait,
-                       lowLevelPlanner);
+                       lowLevelPlanner, lowLevelSegmentTimeout);
   auto lnsInstance =
       std::make_unique<LNS>(vm["maxIterations"].as<int>(), instance, parameters);
   bool success = lnsInstance->run();
@@ -384,11 +394,11 @@ int main(int argc, char** argv) {
   }
 
   if (vm["genReport"].as<bool>()) {
-    SaveToTxt saveFileForCBSPC;
-    saveFileForCBSPC.printStart();
+    CBSReportExporter reportExporter;
+    reportExporter.printStart();
     Solution finalSolution = lnsInstance->getSolution();
-    saveFileForCBSPC.runData(&instance, &finalSolution);
-    saveFileForCBSPC.fileSave();
+    reportExporter.writeReport(&instance, &finalSolution);
+    reportExporter.printSaveStatus();
   }
 
   vector<double> feasibleSolutionIterations, feasibleSolutionRuntimes,

@@ -119,6 +119,7 @@ class LLNode {
 class SingleAgentSolver {
  public:
   uint64_t numExpanded = 0, numGenerated = 0;
+  double segmentTimeoutSec = 600.0;
 
   const Instance& instance;
 
@@ -140,6 +141,10 @@ class SingleAgentSolver {
   inline void setGoalLocations(vector<int> goals) {
     goalLocations = std::move(goals);
   }
+  inline void setSegmentTimeout(double timeoutSec) {
+    segmentTimeoutSec = timeoutSec;
+  }
+  inline double getSegmentTimeout() const { return segmentTimeoutSec; }
 
   virtual string getName() const = 0;
   virtual AgentTaskPath findPathSegment(ConstraintTable& constraintTable,
