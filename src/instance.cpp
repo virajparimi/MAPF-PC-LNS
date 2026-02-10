@@ -2,7 +2,48 @@
 #include <boost/tokenizer.hpp>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
+#include "internal/parse_helpers.hpp"
 #include "utils.hpp"
+
+namespace {
+
+bool detectKivaMapFormat(const std::string& mapPath) {
+  using namespace boost;
+  std::ifstream file(mapPath.c_str());
+  if (!file.is_open()) {
+    return false;
+  }
+
+  std::string line;
+  if (!std::getline(file, line)) {
+    return false;
+  }
+
+  char_separator<char> sep(",");
+  tokenizer<char_separator<char>> tokenizer(line, sep);
+  auto it = tokenizer.begin();
+  const auto end = tokenizer.end();
+  int rows = 0, cols = 0;
+  if (!parse_helpers::parseNextInt(it, end, rows) ||
+      !parse_helpers::parseNextInt(it, end, cols) ||
+      rows <= 0 || cols <= 0) {
+    return false;
+  }
+
+  // Kiva map files contain three integer metadata lines after the first header
+  // line: workpoint count, agent count, and max time.
+  int metadata = 0;
+  for (int i = 0; i < 3; i++) {
+    if (!std::getline(file, line) ||
+        !parse_helpers::parseIntStrict(line, metadata)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
 
 Instance::Instance(const string& mapFname, const string& agentTaskFname,
                    int numOfAgents, int numOfTasks)
@@ -10,33 +51,48 @@ Instance::Instance(const string& mapFname, const string& agentTaskFname,
       agentTaskFname_(agentTaskFname),
       numOfAgents_(numOfAgents),
       numOfTasks_(numOfTasks) {
+  const bool kivaFormat = detectKivaMapFormat(mapFname_);
   bool succ = false;
-  if (mapFname_.find("kiva") != string::npos) {
+  if (kivaFormat) {
     // We are going to work with KIVA instances
     succ = loadKivaMap();
   } else {
     succ = loadMap();
   }
   if (!succ) {
-    PLOGE << "Map file " << mapFname << " not found.\n";
-    exit(-1);
+    throw std::runtime_error("Failed to load map '" + mapFname_ +
+                             "'. See preceding log messages for details.");
   }
 
   ancestors_.resize(numOfTasks_);
   successors_.resize(numOfTasks_);
 
-  if (mapFname_.find("kiva") != string::npos) {
+  if (kivaFormat) {
     // We are going to load KIVA tasks with implicit precedence constraints
     succ = loadKivaTasks();
   } else {
     succ = loadAgentsAndTasks();
   }
   if (!succ) {
-    PLOGE << "Agent and task file " << agentTaskFname << " not found.\n";
-    exit(-1);
+    throw std::runtime_error(
+        "Failed to load agent/task data '" + agentTaskFname_ +
+        "'. See preceding log messages for details.");
   }
+  buildTaskLocationIndex();
   preComputeNeighbors();
   preComputeHeuristics();
+}
+
+void Instance::buildTaskLocationIndex() {
+  taskLocationToGlobalTask_.clear();
+  taskLocationToGlobalTask_.reserve(taskLocations_.size());
+  for (int globalTask = 0; globalTask < (int)taskLocations_.size();
+       ++globalTask) {
+    const int taskLocation = taskLocations_[globalTask];
+    // Multiple tasks may share a location; one representative id is sufficient
+    // because heuristics are location-based and thus identical for duplicates.
+    taskLocationToGlobalTask_.try_emplace(taskLocation, globalTask);
+  }
 }
 
 void Instance::preComputeNeighbors() {
@@ -45,10 +101,10 @@ void Instance::preComputeNeighbors() {
   for (int current = 0; current < mapSize; current++) {
     auto& neighbors = neighborsCache_[current];
     neighbors.clear();
-    neighbors.reserve(4);
     if (map_[current]) {
       continue;
     }
+    neighbors.reserve(4);
     int candidates[4] = {current + 1, current - 1, current + numOfCols,
                          current - numOfCols};
     for (int next : candidates) {
@@ -59,357 +115,41 @@ void Instance::preComputeNeighbors() {
   }
 }
 
-bool Instance::loadKivaMap() {
-  using namespace std;
-  using namespace boost;
-
-  ifstream file(mapFname_.c_str());
-  if (!file.is_open()) {
-    return false;
-  }
-
-  string line;
-  tokenizer<char_separator<char>>::iterator begin;
-
-  getline(file, line);
-  char_separator<char> sep(",");
-  tokenizer<char_separator<char>> tokenizer(line, sep);
-  begin = tokenizer.begin();
-  numOfRows = atoi((*begin).c_str()) + 2;  // Read the number of rows
-  begin++;
-  numOfCols = atoi((*begin).c_str()) + 2;  // Read the number of columns
-
-  getline(file, line);  // Workpoint number
-  getline(file, line);  // Number of agents
-  getline(file, line);  // Maximum time
-
-  // Initialize the agent start locations
-  int agentNum = 0;
-  startLocations_.resize(numOfAgents_);
-
-  mapSize = numOfCols * numOfRows;
-  map_.resize(mapSize);
-  for (int i = 1; i < numOfRows - 1; i++) {
-    getline(file, line);
-    assert((int)line.size() >= numOfCols - 2);
-    for (int j = 1; j < numOfCols - 1; j++) {
-      const char cell = line[j - 1];
-      map_[linearizeCoordinate(i, j)] = (cell == '@');
-      if (cell == 'r') {
-        // This is a robot spawn location
-        assert(agentNum < numOfAgents_);
-        startLocations_[agentNum] = linearizeCoordinate(i, j);
-        assert(!isObstacle(startLocations_[agentNum]));
-        agentNum++;
-      }
-      if (cell == 'e') {
-        // This is a task spawn location
-        endPoints_.push_back(linearizeCoordinate(i, j));
-        assert(!isObstacle(endPoints_.back()));
-      }
-    }
-  }
-
-  for (int i = 0; i < numOfRows; i++) {
-    map_[i * numOfCols] = true;
-    map_[i * numOfCols + numOfCols - 1] = true;
-  }
-  for (int j = 1; j < numOfCols - 1; j++) {
-    map_[j] = true;
-    map_[mapSize - numOfCols + j] = true;
-  }
-
-  assert(agentNum == numOfAgents_);
-  file.close();
-  return true;
-}
-
-bool Instance::loadKivaTasks() {
-  using namespace std;
-  using namespace boost;
-
-  ifstream file(agentTaskFname_.c_str());
-  if (!file.is_open()) {
-    return false;
-  }
-
-  string line;
-  int taskNum;
-  if (!getline(file, line)) {
-    return false;
-  }
-  {
-    std::istringstream stringLine(line);
-    stringLine >> taskNum;
-  }
-
-  if (taskNum * 2 != numOfTasks_) {
-    PLOGE << "Kiva task count mismatch: file contains " << taskNum
-          << " tasks (expects " << taskNum * 2
-          << " expanded pickup+delivery tasks), but --taskNum is "
-          << numOfTasks_ << ".\n";
-    return false;
-  }
-  // Initialize the task locations
-  taskLocations_.resize(numOfTasks_);
-  vector<pair<int, int>> temporalDependencies;
-
-  for (int i = 0; i < numOfTasks_; i += 2) {
-    assert(!endPoints_.empty());
-    int releaseTime, startTask, goalTask, timeOfStartTask, timeOfGoalTask;
-    if (!getline(file, line)) {
-      return false;
-    }
-    std::istringstream stringLine(line);
-    if (!(stringLine >> releaseTime >> startTask >> goalTask >>
-          timeOfStartTask >> timeOfGoalTask)) {
-      return false;
-    }
-    (void)releaseTime;
-    (void)timeOfStartTask;
-    (void)timeOfGoalTask;
-
-    startTask %= (int)endPoints_.size();
-    goalTask %= (int)endPoints_.size();
-    assert(startTask < (int)endPoints_.size());
-    assert(goalTask < (int)endPoints_.size());
-
-    taskLocations_[i] = endPoints_[startTask];
-    taskLocations_[i + 1] = endPoints_[goalTask];
-    assert(!isObstacle(taskLocations_[i]));
-    assert(!isObstacle(taskLocations_[i + 1]));
-
-    temporalDependencies.emplace_back(i, i + 1);
-  }
-
-  for (pair<int, int> dependency : temporalDependencies) {
-    int i, j;
-    tie(i, j) = dependency;
-    taskDependencies_[j].push_back(i);
-    ancestors_[j].push_back(i);
-    successors_[i].push_back(j);
-    inputPrecedenceConstraints_.emplace_back(i, j);
-  }
-
-  PLOGD << "# Agents: " << numOfAgents_ << "\t # Tasks: " << numOfTasks_
-        << "\t # Dependencies: " << (int)temporalDependencies.size() << endl;
-
-  file.close();
-
-  assert(
-      topologicalSort(this, &inputPrecedenceConstraints_, inputPlanningOrder_));
-
-  return true;
-}
-
-bool Instance::loadMap() {
-  using namespace std;
-  using namespace boost;
-
-  ifstream file(mapFname_.c_str());
-  if (!file.is_open()) {
-    return false;
-  }
-
-  string line;
-  tokenizer<char_separator<char>>::iterator begin;
-
-  if (!getline(file, line) || line.empty()) {
-    return false;
-  }
-
-  if (line[0] == 't') {
-    // Original MAPF benchmarks
-    char_separator<char> sep(" ");
-    getline(file, line);
-    tokenizer<char_separator<char>> tokenizer(line, sep);
-    begin = tokenizer.begin();
-    begin++;
-    numOfRows = atoi((*begin).c_str());  // Read the number of rows / height
-    getline(file, line);
-    tokenizer.assign(line, sep);
-    begin = tokenizer.begin();
-    begin++;
-    numOfCols = atoi((*begin).c_str());  // Read the number of columns / width
-    getline(file, line);                 // Skip the map
-  } else {
-    // Custom empty benchmark
-    char_separator<char> sep(",");
-    tokenizer<char_separator<char>> tokenizer(line, sep);
-    begin = tokenizer.begin();
-    numOfRows = atoi((*begin).c_str());  // Read the number of rows
-    begin++;
-    numOfCols = atoi((*begin).c_str());  // Read the number of columns
-  }
-
-  mapSize = numOfCols * numOfRows;
-  map_.resize(mapSize, false);
-  for (int i = 0; i < numOfRows; i++) {
-    getline(file, line);
-    assert((int)line.size() >= numOfCols);
-    for (int j = 0; j < numOfCols; j++) {
-      map_[linearizeCoordinate(i, j)] = (line[j] != '.');
-    }
-  }
-  file.close();
-  return true;
-}
-
-bool Instance::loadAgentsAndTasks() {
-  using namespace std;
-  using namespace boost;
-
-  ifstream file(agentTaskFname_.c_str());
-  if (!file.is_open()) {
-    return false;
-  }
-
-  string line;
-  char_separator<char> sep(",");
-  tokenizer<char_separator<char>>::iterator begin;
-
-  if (!getline(file, line)) {
-    return false;
-  }
-  if (numOfAgents_ != atoi(line.c_str())) {
-    PLOGE << "The number of robots passed in command line and the agent file "
-             "do not match.\n";
-    exit(-1);
-  }
-
-  if (numOfAgents_ == 0) {
-    PLOGE << "The number of agents should be larger than 0.\n";
-    exit(-1);
-  }
-
-  if (numOfTasks_ == 0) {
-    PLOGE << "The number of tasks should be larger than 0.\n";
-    exit(-1);
-  }
-
-  // Reading the agent start locations
-  startLocations_.resize(numOfAgents_);
-
-  for (int i = 0; i < numOfAgents_; i++) {
-    if (!getline(file, line)) {
-      return false;
-    }
-    tokenizer<char_separator<char>> tokenizer(line, sep);
-    begin = tokenizer.begin();
-    int col = atoi((*begin).c_str());
-    begin++;
-    int row = atoi((*begin).c_str());
-    startLocations_[i] = linearizeCoordinate(row, col);
-    assert(!isObstacle(startLocations_[i]));
-  }
-
-  auto skipUntilSection = [&file](string& l) {
-    while (getline(file, l)) {
-      if (!l.empty() && l[0] == 't') {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  // Skipping the extra white lines / header lines
-  if (!skipUntilSection(line)) {
-    return false;
-  }
-
-  if (!getline(file, line)) {
-    return false;
-  }
-  if (numOfTasks_ != atoi(line.c_str())) {
-    PLOGE << "The number of tasks passed in the command line and the agent "
-             "file do not match.\n";
-    exit(-1);
-  }
-
-  // Reading the task goal locations
-  taskLocations_.resize(numOfTasks_);
+void Instance::preComputeHeuristics() {
+  heuristics_.clear();
+  heuristics_.resize(numOfTasks_);
 
   for (int i = 0; i < numOfTasks_; i++) {
-    if (!getline(file, line)) {
-      return false;
+    heuristics_[i].resize(mapSize, MAX_TIMESTEP);
+    const int root = taskLocations_[i];
+    heuristics_[i][taskLocations_[i]] = 0;
+    deque<int> frontier;
+    frontier.push_back(root);
+
+    // Unit-cost graph: BFS computes exact shortest-path distances.
+    while (!frontier.empty()) {
+      const int current = frontier.front();
+      frontier.pop_front();
+      const int nextDistance = heuristics_[i][current] + 1;
+      for (int nextLocation : getNeighbors(current)) {
+        if (heuristics_[i][nextLocation] > nextDistance) {
+          heuristics_[i][nextLocation] = nextDistance;
+          frontier.push_back(nextLocation);
+        }
+      }
     }
-    tokenizer<char_separator<char>> tokenizer(line, sep);
-    begin = tokenizer.begin();
-    int col = atoi((*begin).c_str());
-    begin++;
-    int row = atoi((*begin).c_str());
-    taskLocations_[i] = linearizeCoordinate(row, col);
-    assert(!isObstacle(taskLocations_[i]));
   }
-
-  // Skipping the extra white lines / header lines
-  if (!skipUntilSection(line)) {
-    return false;
-  }
-
-  if (!getline(file, line)) {
-    return false;
-  }
-  int numDependencies = atoi(line.c_str());
-  if (numDependencies < 0) {
-    PLOGE << "Invalid number of dependencies in input: " << numDependencies
-          << "\n";
-    return false;
-  }
-  vector<pair<int, int>> temporalDependencies;
-  temporalDependencies.reserve((size_t)numDependencies);
-
-  for (int i = 0; i < numDependencies; i++) {
-    if (!getline(file, line)) {
-      return false;
-    }
-    tokenizer<char_separator<char>> tokenizer(line, sep);
-    if (std::distance(tokenizer.begin(), tokenizer.end()) < 2) {
-      PLOGE << "Invalid dependency line (expected two integers): " << line
-            << "\n";
-      return false;
-    }
-    begin = tokenizer.begin();
-    int predecessor = atoi((*begin).c_str());
-    begin++;
-    int successor = atoi((*begin).c_str());
-    if (predecessor < 0 || predecessor >= numOfTasks_ || successor < 0 ||
-        successor >= numOfTasks_) {
-      PLOGE << "Dependency index out of bounds: " << predecessor << " -> "
-            << successor << " with numOfTasks = " << numOfTasks_ << "\n";
-      return false;
-    }
-    temporalDependencies.emplace_back(predecessor, successor);
-  }
-
-  for (pair<int, int> dependency : temporalDependencies) {
-    int i, j;
-    tie(i, j) = dependency;
-    taskDependencies_[j].push_back(i);
-    ancestors_[j].push_back(i);
-    successors_[i].push_back(j);
-    inputPrecedenceConstraints_.emplace_back(i, j);
-  }
-
-  PLOGD << "# Agents: " << numOfAgents_ << "\t # Tasks: " << numOfTasks_
-        << "\t # Dependencies: " << numDependencies << endl;
-
-  file.close();
-
-  assert(
-      topologicalSort(this, &inputPrecedenceConstraints_, inputPlanningOrder_));
-
-  return true;
 }
 
+
 void Instance::printMap() const {
+  std::string row;
+  row.reserve(numOfCols);
   for (int i = 0; i < numOfRows; i++) {
+    row.clear();
     for (int j = 0; j < numOfCols; j++) {
-      if (map_[linearizeCoordinate(i, j)]) {
-        PLOGI << '@';
-      } else
-        PLOGI << '.';
+      row += map_[linearizeCoordinate(i, j)] ? '@' : '.';
     }
-    PLOGI << endl;
+    PLOGI << row;
   }
 }

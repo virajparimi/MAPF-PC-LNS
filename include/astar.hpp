@@ -2,6 +2,7 @@
 
 #include <plog/Log.h>
 #include <cstdint>
+#include <memory>
 #include "common.hpp"
 #include "constrainttable.hpp"
 #include "instance.hpp"
@@ -45,11 +46,11 @@ class LLNode {
           if (lhs->tieBreaker == rhs->tieBreaker) {
             return false;
           }
-          return lhs->tieBreaker >= rhs->tieBreaker;
+          return lhs->tieBreaker > rhs->tieBreaker;
         }
-        return lhs->hVal >= rhs->hVal;
+        return lhs->hVal > rhs->hVal;
       }
-      return lhs->gVal + lhs->hVal >= rhs->gVal + rhs->hVal;
+      return lhs->gVal + lhs->hVal > rhs->gVal + rhs->hVal;
     }
   };
 
@@ -64,13 +65,13 @@ class LLNode {
             if (lhs->tieBreaker == rhs->tieBreaker) {
               return false;
             }
-            return lhs->tieBreaker >= rhs->tieBreaker;
+            return lhs->tieBreaker > rhs->tieBreaker;
           }
-          return lhs->hVal >= rhs->hVal;
+          return lhs->hVal > rhs->hVal;
         }
-        return lhs->gVal + lhs->hVal >= rhs->gVal + rhs->hVal;
+        return lhs->gVal + lhs->hVal > rhs->gVal + rhs->hVal;
       }
-      return lhs->numOfConflicts >= rhs->numOfConflicts;
+      return lhs->numOfConflicts > rhs->numOfConflicts;
     }
   };
 
@@ -86,34 +87,27 @@ class LLNode {
         stage(stage) {
     refreshTieBreaker();
   }
-  LLNode(const LLNode& old)
-      : secondaryKey(old.secondaryKey),
-        parent(old.parent),
-        location(old.location),
-        gVal(old.gVal),
-        hVal(old.hVal),
-        timestep(old.timestep),
-        numOfConflicts(old.numOfConflicts),
-        waitAtGoal(old.waitAtGoal),
-        stage(old.stage),
-        distanceToNext(old.distanceToNext),
-        tieBreaker(old.tieBreaker) {}
+  LLNode(const LLNode& old) { *this = old; }
 
-  inline int getFVal() const { return gVal + hVal; }
-
-  void copy(const LLNode& old) {
+  LLNode& operator=(const LLNode& old) {
+    if (this == &old) {
+      return *this;
+    }
     secondaryKey = old.secondaryKey;
+    parent = old.parent;
     location = old.location;
     gVal = old.gVal;
     hVal = old.hVal;
-    parent = old.parent;
     timestep = old.timestep;
     numOfConflicts = old.numOfConflicts;
     waitAtGoal = old.waitAtGoal;
     stage = old.stage;
     distanceToNext = old.distanceToNext;
     tieBreaker = old.tieBreaker;
+    return *this;
   }
+
+  inline int getFVal() const { return gVal + hVal; }
 };
 
 class SingleAgentSolver {
@@ -135,16 +129,16 @@ class SingleAgentSolver {
   int getHeuristic(int stage, int location) const {
     return (*heuristic[stage])[location] + heuristicLandmarks[stage];
   }
-  int computeHeuristic(int from, int to) const {
-    return instance.getManhattanDistance(from, to);
-  }
   inline void setGoalLocations(vector<int> goals) {
     goalLocations = std::move(goals);
+    computeHeuristics();
   }
   inline void setSegmentTimeout(double timeoutSec) {
     segmentTimeoutSec = timeoutSec;
   }
   inline double getSegmentTimeout() const { return segmentTimeoutSec; }
+
+  virtual std::shared_ptr<SingleAgentSolver> cloneForAgent(int agent) const = 0;
 
   virtual string getName() const = 0;
   virtual AgentTaskPath findPathSegment(ConstraintTable& constraintTable,
@@ -154,11 +148,24 @@ class SingleAgentSolver {
     return instance.getNeighbors(curr);
   }
 
-  SingleAgentSolver(const Instance& instance, int agent)
+  SingleAgentSolver(const Instance& instance, int agent,
+                    bool initializeHeuristics = true)
       : instance(instance),
         startLocation(instance.startLocations_[agent]),
         goalLocations(instance.taskLocations_) {
-    computeHeuristics();
+    if (initializeHeuristics) {
+      computeHeuristics();
+    }
   }
   virtual ~SingleAgentSolver() = default;
+
+ protected:
+  void copyPlannerStateTo(SingleAgentSolver& target) const {
+    target.numExpanded = numExpanded;
+    target.numGenerated = numGenerated;
+    target.segmentTimeoutSec = segmentTimeoutSec;
+    target.goalLocations = goalLocations;
+    target.heuristicLandmarks = heuristicLandmarks;
+    target.heuristic = heuristic;
+  }
 };

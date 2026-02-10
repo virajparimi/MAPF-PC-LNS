@@ -15,14 +15,16 @@ class ConstraintTable {
   unordered_map<size_t, IntervalBucket>
       constraintTable_;  // (key, value) - (location/edge key, occupied time intervals)
 
-  void normalizeIntervals(size_t key) const;
+  void normalizeIntervals(const IntervalBucket& bucket) const;
   inline size_t getEdgeIndex(size_t from, size_t to) const {
     return (1 + from) * mapSize + to;
   }
 
  public:
   size_t numCol{}, mapSize{};
-  int size = 0, lengthMin = 0, lengthMax = MAX_TIMESTEP, goalLocation = -1;
+  // Maximum finite timestep represented by current constraints.
+  int temporalExtent = 0, lengthMin = 0, lengthMax = MAX_TIMESTEP,
+      goalLocation = -1;
   // Latest recorded timestep in the occupied interval table. Cannot be the
   // MAX_TIMESTEP
   int latestTimestep = 0;
@@ -70,7 +72,7 @@ class ConstraintTable {
     if (it == constraintTable_.end()) {
       return nullptr;
     }
-    normalizeIntervals(key);
+    normalizeIntervals(it->second);
     return &it->second.intervals;
   }
   const vector<pair<int, int>>* getConstraintIntervals(int key) const {

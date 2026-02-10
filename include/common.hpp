@@ -16,6 +16,7 @@
 #include <queue>
 #include <set>
 #include <stack>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -51,18 +52,28 @@ using std::tie;
 using std::tuple;
 using std::unique_ptr;
 using std::vector;
-using namespace std::chrono;
 using Time = std::chrono::high_resolution_clock;
 using fsec = std::chrono::duration<float>;
 using ppq = std::priority_queue<pair<int, int>, vector<pair<int, int>>>;
 using ppqg =
     std::priority_queue<pair<int, int>, vector<pair<int, int>>, std::greater<>>;
 
-#define MAX_TIMESTEP ((INT_MAX) / 2)
-#define MAX_COST ((INT_MAX) / 2)
-#define MAX_NODES ((INT_MAX) / 2)
-#define UNASSIGNED (-1)
-#define UNDEFINED (-2)
+namespace mapf_pc_lns {
+inline constexpr int kMaxTimestep = (INT_MAX / 2);
+inline constexpr int kMaxCost = (INT_MAX / 2);
+inline constexpr int kMaxNodes = (INT_MAX / 2);
+inline constexpr int kUnassigned = -1;
+inline constexpr int kUndefined = -2;
+}  // namespace mapf_pc_lns
+
+// Transitional aliases to avoid a broad edit in one change. These are typed
+// constants (not macros) and can be removed after call sites migrate to the
+// scoped names.
+inline constexpr int MAX_TIMESTEP = mapf_pc_lns::kMaxTimestep;
+inline constexpr int MAX_COST = mapf_pc_lns::kMaxCost;
+inline constexpr int MAX_NODES = mapf_pc_lns::kMaxNodes;
+inline constexpr int UNASSIGNED = mapf_pc_lns::kUnassigned;
+inline constexpr int UNDEFINED = mapf_pc_lns::kUndefined;
 
 struct PathEntry {
   bool isGoal{};
@@ -72,7 +83,7 @@ struct PathEntry {
 enum IterationQuality {
   bestSolutionYet = 1,
   improvedSolution = 2,
-  dowgradedButAccepted = 3,
+  downgradedButAccepted = 3,
   couldNotFind = 4,
   none = 5
 };
@@ -99,11 +110,22 @@ struct Path {
     return path[idx];
   }
 
-  PathEntry& operator[](int idx) { return path[idx]; }
-  const PathEntry& operator[](int idx) const { return path[idx]; }
+  PathEntry& operator[](int idx) {
+    if (idx < 0 || idx >= (int)path.size()) {
+      throw std::out_of_range("Path::operator[] index out of range");
+    }
+    return path[idx];
+  }
+  const PathEntry& operator[](int idx) const {
+    if (idx < 0 || idx >= (int)path.size()) {
+      throw std::out_of_range("Path::operator[] index out of range");
+    }
+    return path[idx];
+  }
 
   Path() = default;
   explicit Path(int size) : path(vector<PathEntry>(size)) {}
+  virtual ~Path() = default;
 };
 
 struct AgentTaskPath : public Path {

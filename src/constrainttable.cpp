@@ -1,11 +1,6 @@
 #include "constrainttable.hpp"
 
-void ConstraintTable::normalizeIntervals(size_t key) const {
-  const auto it = constraintTable_.find(key);
-  if (it == constraintTable_.end()) {
-    return;
-  }
-  auto& bucket = it->second;
+void ConstraintTable::normalizeIntervals(const IntervalBucket& bucket) const {
   auto& intervals = bucket.intervals;
   if (bucket.normalized || intervals.size() <= 1) {
     bucket.normalized = true;
@@ -39,6 +34,8 @@ int ConstraintTable::getHoldingTime() const {
   if (goalLocation >= 0) {
     auto it = constraintTable_.find((size_t)goalLocation);
     if (it != constraintTable_.end()) {
+      // No normalization is required here: holding time depends only on the
+      // maximum interval end, which is unchanged by sorting/merging.
       for (const auto& timeRange : it->second.intervals) {
         holdingTime = max(holdingTime, timeRange.second);
       }
@@ -53,7 +50,7 @@ bool ConstraintTable::constrained(size_t location, int timestep) const {
   if (it == constraintTable_.end()) {
     return false;
   }
-  normalizeIntervals(location);
+  normalizeIntervals(it->second);
   const auto& intervals = it->second.intervals;
   if (intervals.empty()) {
     return false;
@@ -85,7 +82,7 @@ void ConstraintTable::insert2CT(size_t location, int tMin, int tMax) {
   } else if (tMax == MAX_TIMESTEP && tMin > latestTimestep) {
     latestTimestep = tMin;
   }
-  size = max(size, latestTimestep);
+  temporalExtent = max(temporalExtent, latestTimestep);
 }
 
 void ConstraintTable::insert2CT(size_t from, size_t to, int tMin, int tMax) {
@@ -100,8 +97,10 @@ void ConstraintTable::addPath(const Path& path, bool waitAtGoal) {
   for (int i = 0; i < (int)path.size() - 1; i++) {
     int timestep = i + offset;
     insert2CT(path[i].location, timestep, timestep + 1);
-    insert2CT(path[i + 1].location, path[i].location, timestep + 1,
-              timestep + 2);
+    if (path[i].location != path[i + 1].location) {
+      insert2CT(path[i + 1].location, path[i].location, timestep + 1,
+                timestep + 2);
+    }
   }
   int last = (int)path.size() - 1;
   int timestep = last + offset;

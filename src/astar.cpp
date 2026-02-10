@@ -6,12 +6,8 @@ void SingleAgentSolver::computeHeuristics() {
   heuristic.assign(numGoals, nullptr);
   heuristicLandmarks.assign(numGoals, 0);
 
-  unordered_map<int, int> locationToGlobalTask;
-  locationToGlobalTask.reserve(instance.taskLocations_.size());
-  for (int globalTask = 0; globalTask < (int)instance.taskLocations_.size();
-       globalTask++) {
-    locationToGlobalTask[instance.taskLocations_[globalTask]] = globalTask;
-  }
+  const auto& locationToGlobalTask = instance.taskLocationToGlobalTask_;
+  assert(locationToGlobalTask.size() <= instance.taskLocations_.size());
 
   for (size_t stage = 0; stage < numGoals; stage++) {
     auto it = locationToGlobalTask.find(goalLocations[stage]);

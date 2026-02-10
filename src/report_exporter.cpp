@@ -22,20 +22,25 @@ std::tm localtimeSafe(std::time_t timeValue) {
 void CBSReportExporter::printStart() {
   std::cout
       << "Loading task assignment, locations and precedence constraint data"
-      << std::endl;
+      << '\n';
 }
 
 void CBSReportExporter::printSaveStatus() {
-  if (outputFile.empty()) {
-    std::cout << "No report was generated." << std::endl;
+  if (outputFile_.empty()) {
+    std::cout << "No report was generated.\n";
     return;
   }
-  std::cout << "File is saved!" << std::endl;
-  std::cout << "Name of file: " << outputFile << std::endl;
+  std::cout << "File is saved!\n";
+  std::cout << "Name of file: " << outputFile_ << '\n';
 }
 
 void CBSReportExporter::writeReport(const Instance* inst,
                                     const Solution* sol) {
+  if (inst == nullptr || sol == nullptr) {
+    std::cerr << "writeReport called with null instance or solution.\n";
+    outputFile_.clear();
+    return;
+  }
   assert(inst != nullptr);
   assert(sol != nullptr);
 
@@ -50,15 +55,14 @@ void CBSReportExporter::writeReport(const Instance* inst,
 
   const std::string fileName = "report_" + datetime.str() + ".txt";
   std::ofstream myFile(fileName);
-  outputFile.clear();
+  outputFile_.clear();
 
   if (myFile.is_open()) {
-    outputFile = fileName;
+    outputFile_ = fileName;
     // Get number of agents
     const int agentNum = inst->getAgentNum();
-    myFile << agentNum << " # number of agents" << std::endl;
-    myFile << "# Format:  num_of_goals sx sy g1x g1y g2x g2y ..."
-           << std::endl;
+    myFile << agentNum << " # number of agents\n";
+    myFile << "# Format:  num_of_goals sx sy g1x g1y g2x g2y ...\n";
 
     // Get global task ids for each agent
     for (int a = 0; a < agentNum; a++) {
@@ -74,11 +78,11 @@ void CBSReportExporter::writeReport(const Instance* inst,
         const pair<int, int> taskLoc = inst->getCoordinate(taskLocation);
         myFile << taskLoc.second << "\t" << taskLoc.first << "\t";
       }
-      myFile << std::endl;
+      myFile << '\n';
     }
 
     // Write the precedence constraints
-    myFile << "temporal cons:" << std::endl;
+    myFile << "temporal cons:\n";
 
     const vector<pair<int, int>>& globalPc =
         inst->getInputPrecedenceConstraintsRef();
@@ -87,20 +91,18 @@ void CBSReportExporter::writeReport(const Instance* inst,
       const int predecessor = pc.first;
       const int successor = pc.second;
 
-      const auto itPredAgent = sol->taskAgentMap.find(predecessor);
-      const auto itSuccAgent = sol->taskAgentMap.find(successor);
-      if (itPredAgent == sol->taskAgentMap.end() ||
-          itSuccAgent == sol->taskAgentMap.end()) {
+      if (predecessor < 0 || predecessor >= (int)sol->taskAgentMap.size() ||
+          successor < 0 || successor >= (int)sol->taskAgentMap.size()) {
         std::cerr << "Skipping precedence constraint with missing task "
                      "assignment: "
-                  << predecessor << " -> " << successor << std::endl;
+                  << predecessor << " -> " << successor << '\n';
         continue;
       }
-      const int predAgent = itPredAgent->second;
-      const int succAgent = itSuccAgent->second;
+      const int predAgent = sol->taskAgentMap[predecessor];
+      const int succAgent = sol->taskAgentMap[successor];
       if (predAgent == UNASSIGNED || succAgent == UNASSIGNED) {
         std::cerr << "Skipping precedence constraint with unassigned task: "
-                  << predecessor << " -> " << successor << std::endl;
+                  << predecessor << " -> " << successor << '\n';
         continue;
       }
 
@@ -108,14 +110,14 @@ void CBSReportExporter::writeReport(const Instance* inst,
       const int succLocalIndex = sol->getLocalTaskIndex(succAgent, successor);
       if (predLocalIndex == UNASSIGNED || succLocalIndex == UNASSIGNED) {
         std::cerr << "Skipping precedence constraint with missing local index: "
-                  << predecessor << " -> " << successor << std::endl;
+                  << predecessor << " -> " << successor << '\n';
         continue;
       }
 
       myFile << predAgent << "\t" << predLocalIndex << "\t" << succAgent << "\t"
-             << succLocalIndex << std::endl;
+             << succLocalIndex << '\n';
     }
   } else {
-    std::cerr << "Failed to create report file: " << fileName << std::endl;
+    std::cerr << "Failed to create report file: " << fileName << '\n';
   }
 }

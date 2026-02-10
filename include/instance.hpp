@@ -14,8 +14,7 @@ class Instance {
   vector<vector<int>> neighborsCache_;
   int numOfAgents_{}, numOfTasks_{};
   vector<int> endPoints_, taskLocations_, startLocations_, inputPlanningOrder_;
-  // Maps given task to all its predecessors as given in the input
-  map<int, vector<int>> taskDependencies_;
+  unordered_map<int, int> taskLocationToGlobalTask_;
   vector<vector<int>> ancestors_, successors_;
   vector<pair<int, int>> inputPrecedenceConstraints_;
 
@@ -23,6 +22,7 @@ class Instance {
   bool loadKivaMap();
   bool loadKivaTasks();
   bool loadAgentsAndTasks();
+  void buildTaskLocationIndex();
   void printMap() const;
   void preComputeNeighbors();
   friend class Solution;
@@ -38,16 +38,19 @@ class Instance {
   inline int getTaskLocations(int task) const { return taskLocations_[task]; }
   // Prefer ref-returning accessors in performance-sensitive code.
   inline const vector<int>& getTaskLocationsRef() const { return taskLocations_; }
-  vector<int> getTaskLocations(vector<int> tasks) const {
+  vector<int> getTaskLocations(const vector<int>& tasks) const {
     vector<int> taskLocs(tasks.size(), 0);
     for (int i = 0; i < (int)tasks.size(); i++) {
       taskLocs[i] = taskLocations_[tasks[i]];
     }
     return taskLocs;
   }
-  vector<vector<int>> getHeuristics() { return heuristics_; }
+  [[deprecated("Use getHeuristicsRef()")]] vector<vector<int>> getHeuristics() {
+    return heuristics_;
+  }
   inline const vector<vector<int>>& getHeuristicsRef() const { return heuristics_; }
-  vector<int> getHeuristics(int globalTask) {
+  [[deprecated("Use getHeuristicsRef(int)")]] vector<int> getHeuristics(
+      int globalTask) {
     assert(globalTask < numOfTasks_);
     return heuristics_[globalTask];
   }
@@ -83,47 +86,58 @@ class Instance {
   inline int getCols() const { return numOfCols; }
   inline int getAgentNum() const { return numOfAgents_; }
   inline int getTasksNum() const { return numOfTasks_; }
-  inline vector<int> getTaskLocations() const { return taskLocations_; }
-  inline const vector<int>& getStartLocationsRef() const { return startLocations_; }
-  inline vector<int> getStartLocations() const { return startLocations_; }
-  inline map<int, vector<int>> getTaskDependencies() const {
-    return taskDependencies_;
+  [[deprecated("Use getTaskLocationsRef()")]] inline vector<int>
+  getTaskLocations() const {
+    return taskLocations_;
   }
-  inline const map<int, vector<int>>& getTaskDependenciesRef() const {
-    return taskDependencies_;
+  inline const vector<int>& getStartLocationsRef() const { return startLocations_; }
+  [[deprecated("Use getStartLocationsRef()")]] inline vector<int>
+  getStartLocations() const {
+    return startLocations_;
   }
   inline const vector<pair<int, int>>& getInputPrecedenceConstraintsRef() const {
     return inputPrecedenceConstraints_;
   }
-  inline vector<pair<int, int>> getInputPrecedenceConstraints() const {
+  [[deprecated("Use getInputPrecedenceConstraintsRef()")]] inline vector<
+      pair<int, int>>
+  getInputPrecedenceConstraints() const {
     return inputPrecedenceConstraints_;
   }
   inline const vector<vector<int>>& getAncestorsRef() const { return ancestors_; }
-  inline vector<vector<int>> getAncestors() const { return ancestors_; }
+  [[deprecated("Use getAncestorsRef()")]] inline vector<vector<int>>
+  getAncestors() const {
+    return ancestors_;
+  }
   inline const vector<int>& getAncestorsRef(int globalTask) const {
     assert(globalTask < numOfTasks_);
     return ancestors_[globalTask];
   }
-  inline vector<int> getAncestors(int globalTask) const {
+  [[deprecated("Use getAncestorsRef(int)")]] inline vector<int> getAncestors(
+      int globalTask) const {
     assert(globalTask < numOfTasks_);
     return ancestors_[globalTask];
   }
   inline const vector<vector<int>>& getSuccessorsRef() const {
     return successors_;
   }
-  inline vector<vector<int>> getSuccessors() const { return successors_; }
+  [[deprecated("Use getSuccessorsRef()")]] inline vector<vector<int>>
+  getSuccessors() const {
+    return successors_;
+  }
   inline const vector<int>& getSuccessorsRef(int globalTask) const {
     assert(globalTask < numOfTasks_);
     return successors_[globalTask];
   }
-  inline vector<int> getSuccessors(int globalTask) const {
+  [[deprecated("Use getSuccessorsRef(int)")]] inline vector<int> getSuccessors(
+      int globalTask) const {
     assert(globalTask < numOfTasks_);
     return successors_[globalTask];
   }
   inline const vector<int>& getInputPlanningOrderRef() const {
     return inputPlanningOrder_;
   }
-  inline vector<int> getInputPlanningOrder() const {
+  [[deprecated("Use getInputPlanningOrderRef()")]] inline vector<int>
+  getInputPlanningOrder() const {
     return inputPlanningOrder_;
   }
   inline int getManhattanDistance(int loc1, int loc2) const {
@@ -143,29 +157,5 @@ class Instance {
   string getAgentTaskFName() const { return agentTaskFname_; }
   string getMapName() const { return mapFname_; }
 
-  void preComputeHeuristics() {
-    heuristics_.clear();
-    heuristics_.resize(numOfTasks_);
-
-    for (int i = 0; i < numOfTasks_; i++) {
-      heuristics_[i].resize(mapSize, MAX_TIMESTEP);
-      const int root = taskLocations_[i];
-      heuristics_[i][taskLocations_[i]] = 0;
-      deque<int> frontier;
-      frontier.push_back(root);
-
-      // Unit-cost graph: BFS computes exact shortest-path distances.
-      while (!frontier.empty()) {
-        const int current = frontier.front();
-        frontier.pop_front();
-        const int nextDistance = heuristics_[i][current] + 1;
-        for (int nextLocation : getNeighbors(current)) {
-          if (heuristics_[i][nextLocation] > nextDistance) {
-            heuristics_[i][nextLocation] = nextDistance;
-            frontier.push_back(nextLocation);
-          }
-        }
-      }
-    }
-  }
+  void preComputeHeuristics();
 };

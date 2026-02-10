@@ -10,7 +10,7 @@ void MultiLabelSpaceTimeAStar::releaseNodes() {
   allNodesStorage_.clear();
 }
 
-inline void MultiLabelSpaceTimeAStar::pushNode(MultiLabelAStarNode* node) {
+void MultiLabelSpaceTimeAStar::pushNode(MultiLabelAStarNode* node) {
   numGenerated++;
   node->inOpenlist = true;
   node->openHandle = openList_.push(node);
@@ -19,7 +19,7 @@ inline void MultiLabelSpaceTimeAStar::pushNode(MultiLabelAStarNode* node) {
   }
 }
 
-inline MultiLabelAStarNode* MultiLabelSpaceTimeAStar::popNode() {
+MultiLabelAStarNode* MultiLabelSpaceTimeAStar::popNode() {
   numExpanded++;
   MultiLabelAStarNode* node = focalList_.top();
   focalList_.pop();
@@ -29,6 +29,9 @@ inline MultiLabelAStarNode* MultiLabelSpaceTimeAStar::popNode() {
 }
 
 void MultiLabelSpaceTimeAStar::updateFocalList() {
+  if (openList_.empty()) {
+    return;
+  }
   MultiLabelAStarNode* openHead = openList_.top();
   // Focal list is always supposed to be the set of nodes in open list whose f-value does not exceed the minimum f-value of a node in open list
   if (openHead->getFVal() > minFVal_) {
@@ -63,7 +66,7 @@ void MultiLabelSpaceTimeAStar::updatePath(const LLNode* goal, Path& path) {
 
 AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
     ConstraintTable& constraintTable, int startTime, int stage, int lb) {
-  high_resolution_clock::time_point timeStart = Time::now();
+  Time::time_point timeStart = Time::now();
   int location = startLocation;
   if (stage != 0) {
     location = goalLocations[stage - 1];
@@ -121,8 +124,7 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
     // After the last relevant constraint timestamp, compress time progression
     // for spatial moves to keep the state-space finite. Wait actions are
     // skipped in that regime because they are dominated.
-    const int constraintHorizon =
-        max(constraintTable.size, constraintTable.latestTimestep);
+    const int constraintHorizon = constraintTable.temporalExtent;
     const bool compressTimeBeyondHorizon =
         (current->timestep > constraintHorizon + 1);
 
@@ -165,21 +167,23 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
           ((*it)->getFVal() == probe.getFVal() &&
            LLNode::FocalCompareNode()((*it), &probe))) {
         if (!(*it)->inOpenlist) {
-          (*it)->copy(probe);
+          static_cast<LLNode&>(*(*it)) = probe;
           pushNode(*it);
         } else {
           bool addToFocal = false, updateInFocal = false, updateOpen = false;
-          if ((successorGVal + successorHVal) <= lowerBound_) {
-            if ((*it)->getFVal() > lowerBound_) {
+          const int oldFVal = (*it)->getFVal();
+          const int newFVal = successorGVal + successorHVal;
+          if (newFVal <= lowerBound_) {
+            if (oldFVal > lowerBound_) {
               addToFocal = true;
             } else {
               updateInFocal = true;
             }
           }
-          if ((*it)->getFVal() > successorGVal + successorHVal) {
+          if (oldFVal > newFVal) {
             updateOpen = true;
           }
-          (*it)->copy(probe);
+          static_cast<LLNode&>(*(*it)) = probe;
           if (updateOpen) {
             openList_.increase((*it)->openHandle);
           }
@@ -223,21 +227,22 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
 
 void MultiLabelSpaceTimeAStar::printSearchTree() {
   std::cout << "Size of allNodesTable_: " << allNodesTable_.size() << "\n";
-  vector<MultiLabelAStarNode> allNodesSorted;
-  for (auto node : allNodesTable_) {
-    allNodesSorted.push_back(*node);
+  vector<const MultiLabelAStarNode*> allNodesSorted;
+  allNodesSorted.reserve(allNodesTable_.size());
+  for (const auto* node : allNodesTable_) {
+    allNodesSorted.push_back(node);
   }
   std::sort(allNodesSorted.begin(), allNodesSorted.end(),
-            [](const MultiLabelAStarNode& lhs, const MultiLabelAStarNode& rhs) {
-              return lhs.timestep < rhs.timestep;
+            [](const MultiLabelAStarNode* lhs, const MultiLabelAStarNode* rhs) {
+              return lhs->timestep < rhs->timestep;
             });
-  for (const auto& node : allNodesSorted) {
-    std::cout << "Location: " << node.location << ", Position: ("
-              << std::to_string(instance.getRowCoordinate(node.location))
+  for (const auto* node : allNodesSorted) {
+    std::cout << "Location: " << node->location << ", Position: ("
+              << std::to_string(instance.getRowCoordinate(node->location))
               << ", "
-              << std::to_string(instance.getColCoordinate(node.location))
-              << "), G-Val: " << node.gVal << ", H-Val: " << node.hVal
-              << ", Timestep: " << node.timestep << "\n";
+              << std::to_string(instance.getColCoordinate(node->location))
+              << "), G-Val: " << node->gVal << ", H-Val: " << node->hVal
+              << ", Timestep: " << node->timestep << "\n";
   }
   std::cout << "\n\n";
 }

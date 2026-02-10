@@ -1,358 +1,12 @@
-#include "sipps.hpp"
-
-#include <atomic>
-#include <cstdint>
-#include <limits>
-#include <sstream>
+#include "internal/sipps_internal.hpp"
 #include "mlastar.hpp"
 
-namespace {
-
-struct TimeInterval {
-  int start = 0;
-  int end = 0;  // Exclusive
-};
-
-struct SIPPSNode {
-  SIPPSNode* parent = nullptr;
-  int location = -1;
-  int intervalId = -1;
-  int timestep = 0;  // Absolute time of arrival.
-  int gVal = 0;      // Cost from start in timesteps.
-  int hVal = 0;
-  uint64_t tieBreaker = 0;
-
-  int getFVal() const { return gVal + hVal; }
-};
-
-struct SIPPSNodeCompare {
-  bool operator()(const SIPPSNode* lhs, const SIPPSNode* rhs) const {
-    if (lhs->getFVal() != rhs->getFVal()) {
-      return lhs->getFVal() > rhs->getFVal();
-    }
-    if (lhs->hVal != rhs->hVal) {
-      return lhs->hVal > rhs->hVal;
-    }
-    return lhs->tieBreaker >= rhs->tieBreaker;
-  }
-};
-
-struct StateKey {
-  int location = -1;
-  int intervalId = -1;
-};
-
-struct StateKeyHash {
-  size_t operator()(const StateKey& key) const {
-    const uint64_t packed = (uint64_t)(uint32_t)key.location ^
-                            ((uint64_t)(uint32_t)key.intervalId << 32);
-    return (size_t)LLNode::mix64(packed);
-  }
-};
-
-struct StateKeyEqual {
-  bool operator()(const StateKey& lhs, const StateKey& rhs) const {
-    return lhs.location == rhs.location && lhs.intervalId == rhs.intervalId;
-  }
-};
-
-inline uint64_t makeNodeTieBreaker(int location, int intervalId, int timestep) {
-  uint64_t x = 0;
-  x ^= (uint64_t)(uint32_t)location;
-  x ^= ((uint64_t)(uint32_t)intervalId) << 21;
-  x ^= ((uint64_t)(uint32_t)timestep) << 42;
-  return LLNode::mix64(x);
-}
-
-std::vector<TimeInterval> mergeIntervals(
-    const vector<pair<int, int>>* sourceIntervals, int upperExclusive) {
-  std::vector<TimeInterval> merged;
-  if (sourceIntervals == nullptr || upperExclusive <= 0) {
-    return merged;
-  }
-
-  merged.reserve(sourceIntervals->size());
-  for (const auto& it : *sourceIntervals) {
-    int start = max(0, it.first);
-    int end = min(upperExclusive, it.second);
-    if (end > start) {
-      if (!merged.empty() && start <= merged.back().end) {
-        merged.back().end = max(merged.back().end, end);
-      } else {
-        merged.push_back({start, end});
-      }
-    }
-  }
-  return merged;
-}
-
-std::vector<TimeInterval> computeSafeIntervalsForLocation(
-    const ConstraintTable& constraintTable, int location, int upperExclusive) {
-  std::vector<TimeInterval> blocked = mergeIntervals(
-      constraintTable.getConstraintIntervals(location), upperExclusive);
-
-  if (!blocked.empty()) {
-    std::sort(blocked.begin(), blocked.end(),
-              [](const TimeInterval& lhs, const TimeInterval& rhs) {
-                if (lhs.start == rhs.start) {
-                  return lhs.end < rhs.end;
-                }
-                return lhs.start < rhs.start;
-              });
-    std::vector<TimeInterval> mergedBlocked;
-    mergedBlocked.reserve(blocked.size());
-    mergedBlocked.push_back(blocked[0]);
-    for (int i = 1; i < (int)blocked.size(); i++) {
-      TimeInterval& back = mergedBlocked.back();
-      if (blocked[i].start <= back.end) {
-        back.end = max(back.end, blocked[i].end);
-      } else {
-        mergedBlocked.push_back(blocked[i]);
-      }
-    }
-    blocked.swap(mergedBlocked);
-  }
-
-  std::vector<TimeInterval> safe;
-  int currentStart = 0;
-  for (const auto& it : blocked) {
-    if (currentStart < it.start) {
-      safe.push_back({currentStart, it.start});
-    }
-    currentStart = max(currentStart, it.end);
-    if (currentStart >= upperExclusive) {
-      break;
-    }
-  }
-  if (currentStart < upperExclusive) {
-    safe.push_back({currentStart, upperExclusive});
-  }
-
-  return safe;
-}
-
-int findIntervalContainingTime(const std::vector<TimeInterval>& intervals,
-                               int time) {
-  if (intervals.empty()) {
-    return -1;
-  }
-  int low = 0, high = (int)intervals.size() - 1;
-  while (low <= high) {
-    int mid = low + (high - low) / 2;
-    if (time < intervals[mid].start) {
-      high = mid - 1;
-    } else if (time >= intervals[mid].end) {
-      low = mid + 1;
-    } else {
-      return mid;
-    }
-  }
-  return -1;
-}
-
-int findEarliestEdgeFeasibleArrival(
-    int lowerBound, int upperBound,
-    const std::vector<TimeInterval>& blockedEdgeIntervals) {
-  int candidate = lowerBound;
-  for (const auto& blocked : blockedEdgeIntervals) {
-    if (blocked.end <= candidate) {
-      continue;
-    }
-    if (blocked.start > upperBound) {
-      break;
-    }
-    if (candidate < blocked.start) {
-      return candidate;
-    }
-    candidate = blocked.end;
-    if (candidate > upperBound) {
-      return std::numeric_limits<int>::max();
-    }
-  }
-  return candidate;
-}
-
-void reconstructPath(const SIPPSNode* goal, int goalArrivalTime,
-                     int startTime, AgentTaskPath& outPath) {
-  std::vector<const SIPPSNode*> nodesReversed;
-  const SIPPSNode* current = goal;
-  while (current != nullptr) {
-    nodesReversed.push_back(current);
-    current = current->parent;
-  }
-  std::reverse(nodesReversed.begin(), nodesReversed.end());
-
-  outPath.beginTime = startTime;
-  if (nodesReversed.empty()) {
-    return;
-  }
-
-  const int finalG = goal->gVal + (goalArrivalTime - goal->timestep);
-  outPath.path.resize(finalG + 1);
-  int pathIndex = 0;
-  outPath[pathIndex].location = nodesReversed[0]->location;
-
-  for (int i = 1; i < (int)nodesReversed.size(); i++) {
-    const SIPPSNode* parent = nodesReversed[i - 1];
-    const SIPPSNode* child = nodesReversed[i];
-    int delta = child->timestep - parent->timestep;
-    assert(delta >= 1);
-
-    for (int wait = 1; wait < delta; wait++) {
-      pathIndex++;
-      outPath[pathIndex].location = parent->location;
-    }
-
-    pathIndex++;
-    outPath[pathIndex].location = child->location;
-  }
-
-  while (pathIndex < finalG) {
-    pathIndex++;
-    outPath[pathIndex].location = goal->location;
-  }
-}
-
-bool samePathSignature(const AgentTaskPath& lhs, const AgentTaskPath& rhs) {
-  if (lhs.empty() != rhs.empty()) {
-    return false;
-  }
-  if (lhs.empty()) {
-    return true;
-  }
-  if (lhs.beginTime != rhs.beginTime || lhs.size() != rhs.size()) {
-    return false;
-  }
-  for (int i = 0; i < (int)lhs.size(); i++) {
-    if (lhs[i].location != rhs[i].location) {
-      return false;
-    }
-  }
-  return true;
-}
-
-int firstPathDifferenceIndex(const AgentTaskPath& lhs,
-                             const AgentTaskPath& rhs) {
-  if (lhs.beginTime != rhs.beginTime) {
-    return 0;
-  }
-  const int common = min((int)lhs.size(), (int)rhs.size());
-  for (int i = 0; i < common; i++) {
-    if (lhs[i].location != rhs[i].location) {
-      return i;
-    }
-  }
-  if (lhs.size() != rhs.size()) {
-    return common;
-  }
-  return -1;
-}
-
-bool isNeighborOrWait(const Instance& instance, int from, int to) {
-  if (from == to) {
-    return true;
-  }
-  const vector<int>& neighbors = instance.getNeighbors(from);
-  return std::find(neighbors.begin(), neighbors.end(), to) != neighbors.end();
-}
-
-bool validatePathAgainstConstraints(const AgentTaskPath& path,
-                                    const ConstraintTable& constraintTable,
-                                    const Instance& instance, int startTime,
-                                    int startLocation, int goalLocation,
-                                    int holdingTime, string* reason) {
-  if (path.empty()) {
-    if (reason != nullptr) {
-      *reason = "empty";
-    }
-    return false;
-  }
-  if (path.beginTime != startTime) {
-    if (reason != nullptr) {
-      *reason = "beginTime mismatch";
-    }
-    return false;
-  }
-  if (path.front().location != startLocation) {
-    if (reason != nullptr) {
-      *reason = "start location mismatch";
-    }
-    return false;
-  }
-  if (path.back().location != goalLocation) {
-    if (reason != nullptr) {
-      *reason = "goal location mismatch";
-    }
-    return false;
-  }
-
-  for (int i = 0; i < (int)path.size(); i++) {
-    const int timestep = path.beginTime + i;
-    const int location = path[i].location;
-    if (constraintTable.constrained(location, timestep)) {
-      if (reason != nullptr) {
-        *reason = "vertex constraint violated";
-      }
-      return false;
-    }
-
-    if (i > 0) {
-      const int prevLocation = path[i - 1].location;
-      if (!isNeighborOrWait(instance, prevLocation, location)) {
-        if (reason != nullptr) {
-          *reason = "non-adjacent move";
-        }
-        return false;
-      }
-      if (constraintTable.constrained(prevLocation, location, timestep)) {
-        if (reason != nullptr) {
-          *reason = "edge constraint violated";
-        }
-        return false;
-      }
-    }
-  }
-
-  if (path.endTimeChecked() < holdingTime) {
-    if (reason != nullptr) {
-      *reason = "holding time violated";
-    }
-    return false;
-  }
-  if (reason != nullptr) {
-    reason->clear();
-  }
-  return true;
-}
-
-bool shouldEmitParityLog(int maxLogs) {
-  static std::atomic<int> emitted{0};
-  int current = emitted.load();
-  while (current < maxLogs) {
-    if (emitted.compare_exchange_weak(current, current + 1)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-string compactPathSummary(const AgentTaskPath& path) {
-  if (path.empty()) {
-    return "empty";
-  }
-  return "len=" + std::to_string((int)path.size()) + ", begin=" +
-         std::to_string(path.beginTime) + ", end=" +
-         std::to_string(path.endTime()) + ", first=" +
-         std::to_string(path.front().location) + ", last=" +
-         std::to_string(path.back().location);
-}
-
-}  // namespace
+using namespace sipps_internal;
 
 AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
                                                int startTime, int stage,
                                                int lb) {
-  high_resolution_clock::time_point timeStart = Time::now();
+  Time::time_point timeStart = Time::now();
   AgentTaskPath path;
   path.beginTime = startTime;
   int start = -1;
@@ -369,24 +23,28 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     MultiLabelSpaceTimeAStar mlaSolver(instance, agent_);
     mlaSolver.setGoalLocations(goalLocations);
     mlaSolver.setSegmentTimeout(segmentTimeoutSec);
-    mlaSolver.computeHeuristics();
     AgentTaskPath mlaPath =
         mlaSolver.findPathSegment(mlaConstraintTable, startTime, stage, lb);
 
     string sippsValidityReason;
     string mlaValidityReason;
+    // Match low-level planner semantics: start node is a root state and is not
+    // vertex-constraint checked at startTime.
+    constexpr bool kAllowConstrainedStartForValidation = true;
     const bool sippsValid =
         sippsPath.empty()
             ? false
             : validatePathAgainstConstraints(sippsPath, constraintTable, instance,
                                              startTime, start, goal, holdingTime,
-                                             &sippsValidityReason);
+                                             &sippsValidityReason,
+                                             kAllowConstrainedStartForValidation);
     const bool mlaValid =
         mlaPath.empty()
             ? false
             : validatePathAgainstConstraints(mlaPath, constraintTable, instance,
                                              startTime, start, goal, holdingTime,
-                                             &mlaValidityReason);
+                                             &mlaValidityReason,
+                                             kAllowConstrainedStartForValidation);
 
     const bool successMismatch = sippsPath.empty() != mlaPath.empty();
     const bool signatureMismatch =
@@ -396,7 +54,10 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     const bool hasMismatch =
         successMismatch || signatureMismatch || validityMismatch;
 
-    if (hasMismatch && shouldEmitParityLog(plannerParityMaxLogs_)) {
+    const bool canEmitParityLog =
+        plannerParityLogsEmitted_ < plannerParityMaxLogs_;
+    if (hasMismatch && canEmitParityLog) {
+      plannerParityLogsEmitted_++;
       string mismatchType;
       if (successMismatch) {
         mismatchType = "success_mismatch";
@@ -502,15 +163,24 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
   const bool useVirtualStart = (startInterval < 0);
   if (useVirtualStart && start == goal && startTime >= holdingTime) {
     // Match MLA* semantics: start node can terminate immediately at goal even
-    // if the start vertex is constrained at startTime.
+    // if the start vertex is constrained at startTime, because the root state
+    // is not vertex-constraint checked.
     path.path.resize(1);
     path.path[0].location = start;
     return finalizeAndReturn(path, "goal_at_start_virtual");
   }
 
-  std::priority_queue<SIPPSNode*, std::vector<SIPPSNode*>, SIPPSNodeCompare> open;
+  pairing_heap<SIPPSNode*, compare<SIPPSOpenCompare>> openList;
+  pairing_heap<SIPPSNode*, compare<SIPPSFocalCompare>> focalList;
+  int minFVal = 0;
+  int lowerBound = 0;
   std::vector<std::unique_ptr<SIPPSNode>> allNodes;
   allNodes.reserve(1024);
+  constexpr uint32_t kTimeoutCheckStride = 64;
+  uint32_t intervalChecksSinceTimeoutProbe = 0;
+  const auto timedOut = [&]() -> bool {
+    return ((fsec)(Time::now() - timeStart)).count() > segmentTimeoutSec;
+  };
 
   unordered_map<StateKey, int, StateKeyHash, StateKeyEqual> bestArrivalTime;
   bestArrivalTime.reserve(1024);
@@ -525,22 +195,80 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     node->timestep = timestep;
     node->gVal = gVal;
     node->hVal = hVal;
+    node->secondaryKey = -gVal;
     node->tieBreaker = makeNodeTieBreaker(location, intervalId, timestep);
     SIPPSNode* raw = node.get();
     allNodes.push_back(std::move(node));
-    open.push(raw);
-    numGenerated++;
     return raw;
   };
 
-  const int initialIntervalId = useVirtualStart ? -1 : startInterval;
-  emplaceNode(nullptr, start, initialIntervalId, startTime, 0);
-  bestArrivalTime[{start, initialIntervalId}] = startTime;
+  auto pushNode = [&](SIPPSNode* node) {
+    numGenerated++;
+    node->inOpenlist = true;
+    node->openHandle = openList.push(node);
+    if (node->getFVal() <= lowerBound) {
+      node->focalHandle = focalList.push(node);
+      node->inFocal = true;
+    }
+  };
 
-  while (!open.empty()) {
-    SIPPSNode* current = open.top();
-    open.pop();
-    numExpanded++;
+  auto updateFocalList = [&]() {
+    if (openList.empty()) {
+      return;
+    }
+    SIPPSNode* openHead = openList.top();
+    if (openHead->getFVal() > minFVal) {
+      const int newMinFVal = openHead->getFVal();
+      const int newLowerBound = max(lowerBound, newMinFVal);
+      for (SIPPSNode* node : openList) {
+        if (!node->inFocal && node->inOpenlist &&
+            node->getFVal() > lowerBound &&
+            node->getFVal() <= newLowerBound) {
+          node->focalHandle = focalList.push(node);
+          node->inFocal = true;
+        }
+      }
+      minFVal = newMinFVal;
+      lowerBound = newLowerBound;
+    }
+  };
+
+  auto popNode = [&]() -> SIPPSNode* {
+    while (!focalList.empty()) {
+      SIPPSNode* node = focalList.top();
+      focalList.pop();
+      node->inFocal = false;
+      if (!node->inOpenlist) {
+        continue;
+      }
+      numExpanded++;
+      node->inOpenlist = false;
+      openList.erase(node->openHandle);
+      return node;
+    }
+    return nullptr;
+  };
+
+  const int initialIntervalId = useVirtualStart ? -1 : startInterval;
+  SIPPSNode* startNode =
+      emplaceNode(nullptr, start, initialIntervalId, startTime, 0);
+  bestArrivalTime[{start, initialIntervalId}] = startTime;
+  minFVal = startNode->getFVal();
+  // Mirror MLA* bounded search behavior: the focal bound is initialized from
+  // both the current minimum f and the provided lower bound `lb`.
+  lowerBound = max(holdingTime - startTime, max(minFVal, lb));
+  pushNode(startNode);
+
+  while (!openList.empty()) {
+    if (timedOut()) {
+      return finalizeAndReturn(path, "timeout");
+    }
+    updateFocalList();
+    SIPPSNode* current = popNode();
+    if (current == nullptr) {
+      // No focal-eligible nodes left (can happen with stale entries).
+      continue;
+    }
 
     const StateKey currentKey{current->location, current->intervalId};
     auto bestIt = bestArrivalTime.find(currentKey);
@@ -563,11 +291,11 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
 
     if (current->location == goal) {
       if (current->timestep >= holdingTime) {
-        reconstructPath(current, current->timestep, startTime, path);
+        reconstructPath(current, current->timestep, startTime, goal, path);
         return finalizeAndReturn(path, "goal_found");
       }
       if (!isVirtualStartNode && holdingTime < currentInterval.end) {
-        reconstructPath(current, holdingTime, startTime, path);
+        reconstructPath(current, holdingTime, startTime, goal, path);
         return finalizeAndReturn(path, "goal_wait");
       }
     }
@@ -600,6 +328,14 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
       for (int succIntervalId = 0;
            succIntervalId < (int)successorSafeIntervals.size();
            succIntervalId++) {
+        intervalChecksSinceTimeoutProbe++;
+        if (intervalChecksSinceTimeoutProbe >= kTimeoutCheckStride) {
+          intervalChecksSinceTimeoutProbe = 0;
+          if (timedOut()) {
+            return finalizeAndReturn(path, "timeout");
+          }
+        }
+
         const TimeInterval succInterval = successorSafeIntervals[succIntervalId];
 
         int earliestArrival = max(current->timestep + 1, succInterval.start);
@@ -630,14 +366,13 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
         }
 
         bestArrivalTime[childKey] = feasibleArrival;
-        emplaceNode(current, successor, succIntervalId, feasibleArrival, gVal);
+        SIPPSNode* next =
+            emplaceNode(current, successor, succIntervalId, feasibleArrival,
+                        gVal);
+        pushNode(next);
       }
     }
 
-    const auto elapsed = ((fsec)(Time::now() - timeStart)).count();
-    if (elapsed > segmentTimeoutSec) {
-      return finalizeAndReturn(path, "timeout");
-    }
   }
 
   return finalizeAndReturn(path, "search_exhausted");

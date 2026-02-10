@@ -71,8 +71,15 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
   void printSearchTree();
 
  public:
-  MultiLabelSpaceTimeAStar(const Instance& instance, int agent)
-      : SingleAgentSolver(instance, agent) {}
+  MultiLabelSpaceTimeAStar(const Instance& instance, int agent,
+                           bool initializeHeuristics = true)
+      : SingleAgentSolver(instance, agent, initializeHeuristics) {}
+  std::shared_ptr<SingleAgentSolver> cloneForAgent(int agent) const override {
+    auto cloned =
+        std::make_shared<MultiLabelSpaceTimeAStar>(instance, agent, false);
+    copyPlannerStateTo(*cloned);
+    return cloned;
+  }
   string getName() const override { return "MLAStar"; }
   AgentTaskPath findPathSegment(ConstraintTable& constraintTable, int startTime,
                                 int stage, int lb) override;

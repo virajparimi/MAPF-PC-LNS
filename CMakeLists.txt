@@ -31,9 +31,17 @@ set(SOURCES
   src/constrainttable.cpp
   src/report_exporter.cpp
   src/instance.cpp
+  src/instance_generic.cpp
+  src/instance_kiva.cpp
   src/lns.cpp
+  src/lns_destroy.cpp
+  src/lns_repair.cpp
+  src/lns_run.cpp
+  src/lns_validation.cpp
   src/main.cpp
   src/mlastar.cpp
+  src/run_reporting.cpp
+  src/sipps_helpers.cpp
   src/sipps.cpp
   src/utils.cpp
 )
