@@ -15,8 +15,6 @@ class MultiLabelAStarNode : public LLNode {
 
   MultiLabelAStarNode() = default;
 
-  MultiLabelAStarNode(const MultiLabelAStarNode& old) : LLNode(old) {}
-
   MultiLabelAStarNode(LLNode* parent, int location, int gVal, int hVal,
                       int timestep, int numOfConflicts, unsigned int stage)
       : LLNode(parent, location, gVal, hVal, timestep, numOfConflicts, stage) {}
@@ -25,12 +23,25 @@ class MultiLabelAStarNode : public LLNode {
 
   struct NodeHasher {
     size_t operator()(const MultiLabelAStarNode* node) const {
-      uint64_t x = 0;
-      x ^= (uint64_t)(uint32_t)node->location;
-      x ^= ((uint64_t)(uint32_t)node->timestep) << 21;
-      x ^= ((uint64_t)(uint32_t)node->stage) << 42;
-      x ^= node->waitAtGoal ? 0xD1B54A32D192ED03ULL : 0ULL;
-      return (size_t)LLNode::mix64(x);
+      const uint64_t hLocation =
+          LLNode::mix64((uint64_t)(uint32_t)node->location ^
+                        0x9E3779B97F4A7C15ULL);
+      const uint64_t hTimestep =
+          LLNode::mix64((uint64_t)(uint32_t)node->timestep ^
+                        0xC2B2AE3D27D4EB4FULL);
+      const uint64_t hStage =
+          LLNode::mix64((uint64_t)(uint32_t)node->stage ^
+                        0x165667B19E3779F9ULL);
+      const uint64_t hWait = node->waitAtGoal ? 0xD1B54A32D192ED03ULL
+                                              : 0x94D049BB133111EBULL;
+      uint64_t combined = hLocation;
+      combined ^= hTimestep + 0x9E3779B97F4A7C15ULL + (combined << 6) +
+                  (combined >> 2);
+      combined ^= hStage + 0x9E3779B97F4A7C15ULL + (combined << 6) +
+                  (combined >> 2);
+      combined ^= hWait + 0x9E3779B97F4A7C15ULL + (combined << 6) +
+                  (combined >> 2);
+      return (size_t)LLNode::mix64(combined);
     }
   };
 

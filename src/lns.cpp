@@ -1078,6 +1078,7 @@ bool LNS::buildGreedySolution() {
 
   // Following the topological order we find the paths for each task
   initialPaths_.resize(instance_.getTasksNum(), AgentTaskPath());
+  vector<char> plannedTasks(instance_.getTasksNum(), 0);
   for (int id : planningOrder) {
 
     const int task = id;
@@ -1112,6 +1113,37 @@ bool LNS::buildGreedySolution() {
 
     ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
     buildConstraintTable(constraintTable, task);
+    // Strengthen greedy initialization with collision constraints from tasks
+    // that have already been planned in this pass. This keeps initialization
+    // robust across low-level planners that may choose different but valid
+    // shortest paths under precedence-only constraints.
+    for (int plannedTask = 0; plannedTask < instance_.getTasksNum();
+         plannedTask++) {
+      if (!plannedTasks[plannedTask]) {
+        continue;
+      }
+      const int plannedAgent = solution_.getAgentWithTask(plannedTask);
+      if (plannedAgent == UNASSIGNED) {
+        continue;
+      }
+      const int plannedTaskPos =
+          solution_.getLocalTaskIndex(plannedAgent, plannedTask);
+      if (plannedTaskPos == UNASSIGNED ||
+          plannedTaskPos >=
+              (int)solution_.agents[plannedAgent].taskPaths.size()) {
+        continue;
+      }
+      const auto& plannedPath =
+          solution_.agents[plannedAgent].taskPaths[plannedTaskPos];
+      if (plannedPath.empty()) {
+        continue;
+      }
+      const bool waitAtGoal =
+          !solution_.agents[plannedAgent].taskAssignments.empty() &&
+          plannedTask ==
+              solution_.agents[plannedAgent].taskAssignments.back();
+      constraintTable.addPath(plannedPath, waitAtGoal);
+    }
     initialPaths_[id] = runLowLevelSearch(
         *solution_.agents[agent].pathPlanner, constraintTable, startTime,
         taskPosition, 0);
@@ -1121,6 +1153,7 @@ bool LNS::buildGreedySolution() {
       return false;
     }
     solution_.agents[agent].taskPaths[taskPosition] = initialPaths_[id];
+    plannedTasks[task] = 1;
   }
 
   // Join the individual task paths to form the agent's path

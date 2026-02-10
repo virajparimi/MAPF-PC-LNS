@@ -19,6 +19,13 @@ class MultiLabelSIPPS : public SingleAgentSolver {
     cloned->setPlannerParityLogsEmitted(plannerParityLogsEmitted_);
     return cloned;
   }
+  void copyStateFrom(const SingleAgentSolver& other) override {
+    SingleAgentSolver::copyStateFrom(other);
+    const auto* sippsOther = dynamic_cast<const MultiLabelSIPPS*>(&other);
+    if (sippsOther != nullptr) {
+      plannerParityLogsEmitted_ = sippsOther->plannerParityLogsEmitted_;
+    }
+  }
   string getName() const override { return "SIPPS"; }
   bool isPlannerParityCheckEnabled() const { return plannerParityCheck_; }
   int getPlannerParityMaxLogs() const { return plannerParityMaxLogs_; }

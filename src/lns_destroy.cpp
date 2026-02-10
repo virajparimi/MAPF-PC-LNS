@@ -205,8 +205,25 @@ void LNS::marketTatonnementRemoval(
   }
 
   std::uniform_int_distribution<int> randomTaskDist(0, taskCount - 1);
-  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+  int randomFillAttempts = 0;
+  const int maxRandomFillAttempts = max(64, taskCount * 8);
+  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
+         randomFillAttempts < maxRandomFillAttempts) {
     addTask(randomTaskDist(rng_));
+    randomFillAttempts++;
+  }
+  if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    for (int task = 0;
+         task < taskCount &&
+         (int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize;
+         task++) {
+      addTask(task);
+    }
+  }
+  if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    PLOGW << "marketTatonnementRemoval: could only remove "
+          << lnsNeighborhood_.removedTasks.size() << " out of requested "
+          << cappedNeighborSize << " tasks\n";
   }
 
   if (market_.cooldownIters > 0) {
@@ -481,12 +498,25 @@ void LNS::shawRemoval(int prioritySize) {
   };
 
   // Fill candidates uniformly at random.
-  while ((int)expandedTasks.size() < cappedPrioritySize) {
+  int candidateFillAttempts = 0;
+  const int maxCandidateFillAttempts = max(64, taskCount * 8);
+  while ((int)expandedTasks.size() < cappedPrioritySize &&
+         candidateFillAttempts < maxCandidateFillAttempts) {
     const int relatedTask = distribution(rng_);
+    candidateFillAttempts++;
     if (alreadyExpanded[relatedTask]) {
       continue;
     }
     pushRelatedCandidate(relatedTask);
+  }
+  if ((int)expandedTasks.size() < cappedPrioritySize) {
+    for (int task = 0;
+         task < taskCount && (int)expandedTasks.size() < cappedPrioritySize;
+         task++) {
+      if (!alreadyExpanded[task]) {
+        pushRelatedCandidate(task);
+      }
+    }
   }
 
   // Now remove the most-related tasks.
@@ -504,7 +534,11 @@ void LNS::shawRemoval(int prioritySize) {
 
   // If the candidate queue was exhausted (e.g., very small instances), augment
   // with random tasks to reach the requested neighborhood size.
-  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+  int finalFillAttempts = 0;
+  const int maxFinalFillAttempts = max(64, taskCount * 8);
+  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
+         finalFillAttempts < maxFinalFillAttempts) {
+    finalFillAttempts++;
     const int t = distribution(rng_);
     if (lnsNeighborhood_.removedTasks.count(t) != 0) {
       continue;
@@ -521,6 +555,32 @@ void LNS::shawRemoval(int prioritySize) {
       continue;
     }
     lnsNeighborhood_.removedTasks.emplace(t, Conflicts(t, agent, pos));
+  }
+  if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    for (int task = 0;
+         task < taskCount &&
+         (int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize;
+         task++) {
+      if (lnsNeighborhood_.removedTasks.count(task) != 0) {
+        continue;
+      }
+      const int agent =
+          (task >= 0 && task < (int)solution_.taskAgentMap.size())
+              ? solution_.taskAgentMap[task]
+              : UNASSIGNED;
+      if (agent == UNASSIGNED) {
+        continue;
+      }
+      const int pos = solution_.getLocalTaskIndex(agent, task);
+      if (pos == UNASSIGNED) {
+        continue;
+      }
+      lnsNeighborhood_.removedTasks.emplace(task, Conflicts(task, agent, pos));
+    }
+  }
+  if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    PLOGW << "shawRemoval: could only remove " << lnsNeighborhood_.removedTasks.size()
+          << " out of requested " << cappedNeighborSize << " tasks\n";
   }
 }
 

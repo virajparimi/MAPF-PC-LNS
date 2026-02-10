@@ -56,6 +56,9 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
       return false;
     }
     if (solution_.agents[taskAgent].taskPaths[taskPosition].empty()) {
+      PLOGE << "validateSolution: empty path for task " << task
+            << " on agent " << taskAgent << " at local index "
+            << taskPosition << "\n";
       result = false;
       return result;
     }

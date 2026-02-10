@@ -40,6 +40,19 @@ bool Instance::loadKivaMap() {
   if (!getline(file, line)) {  // Number of agents
     return false;
   }
+  int mapDeclaredAgents = 0;
+  if (!parse_helpers::parseIntStrict(line, mapDeclaredAgents) ||
+      mapDeclaredAgents <= 0) {
+    PLOGE << "Invalid Kiva map agent count line: " << line << "\n";
+    return false;
+  }
+  if (numOfAgents_ == 0) {
+    numOfAgents_ = mapDeclaredAgents;
+  } else if (numOfAgents_ != mapDeclaredAgents) {
+    PLOGE << "Mismatch between configured agents and map metadata: numOfAgents="
+          << numOfAgents_ << ", map declares " << mapDeclaredAgents << ".\n";
+    return false;
+  }
   if (!getline(file, line)) {  // Maximum time
     return false;
   }
@@ -65,6 +78,9 @@ bool Instance::loadKivaMap() {
     if (!getline(file, line)) {
       PLOGE << "Unexpected EOF while reading Kiva map row " << (i - 1) << ".\n";
       return false;
+    }
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
     }
     if ((int)line.size() < numOfCols - 2) {
       PLOGE << "Malformed Kiva map row " << (i - 1) << ": expected at least "
@@ -143,15 +159,23 @@ bool Instance::loadKivaTasks() {
     PLOGE << "Invalid Kiva task count (negative): " << taskNum << ".\n";
     return false;
   }
-  const long long expectedExpandedTasks =
-      static_cast<long long>(taskNum) * 2LL;
-  if (expectedExpandedTasks != static_cast<long long>(numOfTasks_)) {
+  const long long expectedExpandedTasks = static_cast<long long>(taskNum) * 2LL;
+  if (numOfTasks_ == 0) {
+    if (expectedExpandedTasks > static_cast<long long>(std::numeric_limits<int>::max())) {
+      PLOGE << "Expanded Kiva task count overflows int: " << expectedExpandedTasks
+            << ".\n";
+      return false;
+    }
+    numOfTasks_ = static_cast<int>(expectedExpandedTasks);
+  } else if (expectedExpandedTasks != static_cast<long long>(numOfTasks_)) {
     PLOGE << "Kiva task count mismatch: file contains " << taskNum
           << " tasks (expects " << taskNum * 2
           << " expanded pickup+delivery tasks), but --taskNum is "
           << numOfTasks_ << ".\n";
     return false;
   }
+  ancestors_.assign(numOfTasks_, {});
+  successors_.assign(numOfTasks_, {});
   // Initialize the task locations
   taskLocations_.resize(numOfTasks_);
   vector<pair<int, int>> temporalDependencies;
@@ -161,6 +185,7 @@ bool Instance::loadKivaTasks() {
     return false;
   }
 
+  bool warnedWrappedTaskIndex = false;
   for (int i = 0; i < numOfTasks_; i += 2) {
     int releaseTime, startTask, goalTask, timeOfStartTask, timeOfGoalTask;
     if (!getline(file, line)) {
@@ -175,8 +200,16 @@ bool Instance::loadKivaTasks() {
     (void)timeOfStartTask;
     (void)timeOfGoalTask;
 
-    startTask %= (int)endPoints_.size();
-    goalTask %= (int)endPoints_.size();
+    if ((startTask < 0 || startTask >= (int)endPoints_.size() ||
+         goalTask < 0 || goalTask >= (int)endPoints_.size()) &&
+        !warnedWrappedTaskIndex) {
+      PLOGW << "Kiva task endpoint indices exceed endpoint count. Applying modulo"
+               " mapping to preserve legacy behavior.\n";
+      warnedWrappedTaskIndex = true;
+    }
+    const int endpointCount = (int)endPoints_.size();
+    startTask = ((startTask % endpointCount) + endpointCount) % endpointCount;
+    goalTask = ((goalTask % endpointCount) + endpointCount) % endpointCount;
     assert(startTask < (int)endPoints_.size());
     assert(goalTask < (int)endPoints_.size());
 

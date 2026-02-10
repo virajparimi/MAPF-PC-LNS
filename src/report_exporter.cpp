@@ -57,8 +57,8 @@ void CBSReportExporter::writeReport(const Instance* inst,
   std::ofstream myFile(fileName);
   outputFile_.clear();
 
+  bool writeOk = false;
   if (myFile.is_open()) {
-    outputFile_ = fileName;
     // Get number of agents
     const int agentNum = inst->getAgentNum();
     myFile << agentNum << " # number of agents\n";
@@ -117,7 +117,15 @@ void CBSReportExporter::writeReport(const Instance* inst,
       myFile << predAgent << "\t" << predLocalIndex << "\t" << succAgent << "\t"
              << succLocalIndex << '\n';
     }
+    myFile.flush();
+    writeOk = myFile.good();
+    if (!writeOk) {
+      std::cerr << "Report write failed for file: " << fileName << '\n';
+    }
   } else {
     std::cerr << "Failed to create report file: " << fileName << '\n';
+  }
+  if (writeOk) {
+    outputFile_ = fileName;
   }
 }

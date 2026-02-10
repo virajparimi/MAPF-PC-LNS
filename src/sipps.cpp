@@ -353,9 +353,6 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
         }
 
         const int transitionDuration = feasibleArrival - current->timestep;
-        if (transitionDuration <= 0) {
-          continue;
-        }
         const int gVal = current->gVal + transitionDuration;
 
         const StateKey childKey{successor, succIntervalId};

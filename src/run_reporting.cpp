@@ -129,13 +129,13 @@ FeasibleTrajectoryStats collectFeasibleTrajectoryStats(const LNS& lns,
   }
 
   int counter = 0;
+  int bestFeasibleSoC = std::numeric_limits<int>::max();
   for (const IterationStats& iter : lns.iterationStats) {
     if (iter.feasibleSolutionFound) {
       stats.numFeasibleIterations += 1;
-      const bool isImproving =
-          iter.quality == IterationQuality::bestSolutionYet ||
-          iter.quality == IterationQuality::improvedSolution;
+      const bool isImproving = iter.sumOfCosts < bestFeasibleSoC;
       if (isImproving) {
+        bestFeasibleSoC = iter.sumOfCosts;
         stats.numImprovingFeasibleUpdates += 1;
         stats.improvingIterations.push_back(counter);
         stats.improvingRuntimes.push_back(iter.runtime);

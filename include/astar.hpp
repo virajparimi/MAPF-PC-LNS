@@ -87,13 +87,16 @@ class LLNode {
         stage(stage) {
     refreshTieBreaker();
   }
-  LLNode(const LLNode& old) { *this = old; }
+  // Disallow copy construction: copying nodes can create detached objects with
+  // parent pointers into another search's storage.
+  LLNode(const LLNode& old) = delete;
 
   LLNode& operator=(const LLNode& old) {
     if (this == &old) {
       return *this;
     }
     secondaryKey = old.secondaryKey;
+    inOpenlist = old.inOpenlist;
     parent = old.parent;
     location = old.location;
     gVal = old.gVal;
@@ -139,6 +142,17 @@ class SingleAgentSolver {
   inline double getSegmentTimeout() const { return segmentTimeoutSec; }
 
   virtual std::shared_ptr<SingleAgentSolver> cloneForAgent(int agent) const = 0;
+  virtual void copyStateFrom(const SingleAgentSolver& other) {
+    if (this == &other) {
+      return;
+    }
+    numExpanded = other.numExpanded;
+    numGenerated = other.numGenerated;
+    segmentTimeoutSec = other.segmentTimeoutSec;
+    goalLocations = other.goalLocations;
+    heuristicLandmarks = other.heuristicLandmarks;
+    heuristic = other.heuristic;
+  }
 
   virtual string getName() const = 0;
   virtual AgentTaskPath findPathSegment(ConstraintTable& constraintTable,
@@ -152,6 +166,9 @@ class SingleAgentSolver {
                     bool initializeHeuristics = true)
       : instance(instance),
         startLocation(instance.startLocations_[agent]),
+        // Default to all tasks so shared helpers (e.g., greedy assignment)
+        // can query any task-distance immediately; replanning paths should
+        // narrow goals via setGoalLocations(...).
         goalLocations(instance.taskLocations_) {
     if (initializeHeuristics) {
       computeHeuristics();

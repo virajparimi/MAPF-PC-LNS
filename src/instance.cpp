@@ -64,9 +64,6 @@ Instance::Instance(const string& mapFname, const string& agentTaskFname,
                              "'. See preceding log messages for details.");
   }
 
-  ancestors_.resize(numOfTasks_);
-  successors_.resize(numOfTasks_);
-
   if (kivaFormat) {
     // We are going to load KIVA tasks with implicit precedence constraints
     succ = loadKivaTasks();

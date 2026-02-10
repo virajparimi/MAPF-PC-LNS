@@ -6,11 +6,18 @@
 
 namespace sipps_internal {
 uint64_t makeNodeTieBreaker(int location, int intervalId, int timestep) {
-  uint64_t x = 0;
-  x ^= (uint64_t)(uint32_t)location;
-  x ^= ((uint64_t)(uint32_t)intervalId) << 21;
-  x ^= ((uint64_t)(uint32_t)timestep) << 42;
-  return LLNode::mix64(x);
+  const uint64_t hLocation =
+      LLNode::mix64((uint64_t)(uint32_t)location ^ 0x9E3779B97F4A7C15ULL);
+  const uint64_t hInterval =
+      LLNode::mix64((uint64_t)(uint32_t)intervalId ^ 0xC2B2AE3D27D4EB4FULL);
+  const uint64_t hTimestep =
+      LLNode::mix64((uint64_t)(uint32_t)timestep ^ 0x165667B19E3779F9ULL);
+  uint64_t combined = hLocation;
+  combined ^= hInterval + 0x9E3779B97F4A7C15ULL + (combined << 6) +
+              (combined >> 2);
+  combined ^= hTimestep + 0x9E3779B97F4A7C15ULL + (combined << 6) +
+              (combined >> 2);
+  return LLNode::mix64(combined);
 }
 
 std::vector<TimeInterval> mergeIntervals(

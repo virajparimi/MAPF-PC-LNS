@@ -34,11 +34,17 @@ void MultiLabelSpaceTimeAStar::updateFocalList() {
   }
   MultiLabelAStarNode* openHead = openList_.top();
   // Focal list is always supposed to be the set of nodes in open list whose f-value does not exceed the minimum f-value of a node in open list
-  if (openHead->getFVal() > minFVal_) {
+  if (focalList_.empty() || openHead->getFVal() > minFVal_) {
     int newMinFVal = (int)openHead->getFVal();
     int newLowerBound = max(lowerBound_, newMinFVal);
+    const bool repopulatingFromEmpty = focalList_.empty();
     for (MultiLabelAStarNode* node : openList_) {
-      if (node->getFVal() > lowerBound_ && node->getFVal() <= newLowerBound) {
+      const int fVal = node->getFVal();
+      const bool newlyEligible =
+          (fVal > lowerBound_ && fVal <= newLowerBound);
+      const bool eligibleWhenEmpty =
+          (repopulatingFromEmpty && fVal <= newLowerBound);
+      if (newlyEligible || eligibleWhenEmpty) {
         node->focalHandle = focalList_.push(node);
       }
     }
@@ -67,13 +73,17 @@ void MultiLabelSpaceTimeAStar::updatePath(const LLNode* goal, Path& path) {
 AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
     ConstraintTable& constraintTable, int startTime, int stage, int lb) {
   Time::time_point timeStart = Time::now();
+  AgentTaskPath path;
+  path.beginTime = startTime;
+  if (stage < 0 || stage >= (int)goalLocations.size()) {
+    PLOGE << "MLA*: invalid stage " << stage
+          << " for goal count " << goalLocations.size() << "\n";
+    return path;
+  }
   int location = startLocation;
   if (stage != 0) {
     location = goalLocations[stage - 1];
   }
-
-  AgentTaskPath path;
-  path.beginTime = startTime;
 
   int holdingTime = constraintTable.lengthMin;
   if (stage == (int)goalLocations.size() - 1) {
@@ -102,6 +112,8 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
   const auto timedOut = [&]() -> bool {
     return ((fsec)(Time::now() - timeStart)).count() > segmentTimeoutSec;
   };
+  constexpr uint32_t kTimeoutCheckStride = 32;
+  uint32_t expansionsSinceTimeoutProbe = 0;
 
   while (!openList_.empty()) {
     if (timedOut()) {
@@ -125,8 +137,12 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
     // for spatial moves to keep the state-space finite. Wait actions are
     // skipped in that regime because they are dominated.
     const int constraintHorizon = constraintTable.temporalExtent;
+    // Do not compress time progression before holding-time obligations are met.
+    // Otherwise stages that require waiting past the constraint horizon can
+    // become unreachable (no action can increase timestep further).
     const bool compressTimeBeyondHorizon =
-        (current->timestep > constraintHorizon + 1);
+        (current->timestep > constraintHorizon + 1 &&
+         current->timestep >= holdingTime);
 
     auto tryExpandSuccessor = [&](int successor, int nextTimestep) {
       if (constraintTable.constrained(successor, nextTimestep) ||
@@ -155,9 +171,12 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
 
       auto it = allNodesTable_.find(&probe);
       if (it == allNodesTable_.end()) {
-        allNodesStorage_.push_back(
-            std::make_unique<MultiLabelAStarNode>(probe));
+        allNodesStorage_.push_back(std::make_unique<MultiLabelAStarNode>(
+            current, successor, successorGVal, successorHVal, nextTimestep,
+            successorInternalConflicts, currentStage));
         auto* next = allNodesStorage_.back().get();
+        next->waitAtGoal = probe.waitAtGoal;
+        next->refreshTieBreaker();
         pushNode(next);
         allNodesTable_.insert(next);
         return;
@@ -166,6 +185,7 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
       if ((*it)->getFVal() > probe.getFVal() ||
           ((*it)->getFVal() == probe.getFVal() &&
            LLNode::FocalCompareNode()((*it), &probe))) {
+        probe.inOpenlist = (*it)->inOpenlist;
         if (!(*it)->inOpenlist) {
           static_cast<LLNode&>(*(*it)) = probe;
           pushNode(*it);
@@ -199,9 +219,13 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
 
     const vector<int>& neighbors = instance.getNeighbors(current->location);
     for (int successor : neighbors) {
-      if (timedOut()) {
-        releaseNodes();
-        return path;
+      expansionsSinceTimeoutProbe++;
+      if (expansionsSinceTimeoutProbe >= kTimeoutCheckStride) {
+        expansionsSinceTimeoutProbe = 0;
+        if (timedOut()) {
+          releaseNodes();
+          return path;
+        }
       }
       int nextTimestep = current->timestep + 1;
       if (compressTimeBeyondHorizon) {
@@ -212,9 +236,13 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
 
     // We can stay at the same location for the next timestep.
     if (!compressTimeBeyondHorizon) {
-      if (timedOut()) {
-        releaseNodes();
-        return path;
+      expansionsSinceTimeoutProbe++;
+      if (expansionsSinceTimeoutProbe >= kTimeoutCheckStride) {
+        expansionsSinceTimeoutProbe = 0;
+        if (timedOut()) {
+          releaseNodes();
+          return path;
+        }
       }
       const int successor = current->location;
       const int nextTimestep = current->timestep + 1;

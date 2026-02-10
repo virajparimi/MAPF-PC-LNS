@@ -1,10 +1,24 @@
 #include "lns.hpp"
 #include "utils.hpp"
+#include <cmath>
+#include <limits>
 
 bool LNS::simulatedAnnealing() {
 
   bool accepted = false;
-  double acceptanceProb =
+  // Guard against degenerate temperatures to avoid NaN/inf behavior.
+  if (!std::isfinite(temperature_) ||
+      temperature_ <= std::numeric_limits<double>::epsilon()) {
+    accepted = solution_.utility <= previousSolution_.utility;
+    if (!accepted) {
+      solution_ = previousSolution_;
+      PLOGD << "Rejecting this solution!\n";
+    }
+    temperature_ *= coolingCoefficient_;
+    return accepted;
+  }
+
+  const double acceptanceProb =
       exp((previousSolution_.utility - solution_.utility) / temperature_);
   std::uniform_real_distribution<double> unit01(0.0, 1.0);
   if (unit01(rng_) < acceptanceProb) {

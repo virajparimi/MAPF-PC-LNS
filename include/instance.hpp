@@ -25,6 +25,12 @@ class Instance {
   void buildTaskLocationIndex();
   void printMap() const;
   void preComputeNeighbors();
+  inline void validateTaskIndex(int globalTask, const char* caller) const {
+    if (globalTask < 0 || globalTask >= numOfTasks_) {
+      throw std::out_of_range(string(caller) + ": task index out of range: " +
+                              std::to_string(globalTask));
+    }
+  }
   friend class Solution;
   friend class SingleAgentSolver;
 
@@ -35,12 +41,16 @@ class Instance {
   Instance(const string& mapFname, const string& agentTaskFname,
            int numOfAgents = 0, int numOfTasks = 0);
 
-  inline int getTaskLocations(int task) const { return taskLocations_[task]; }
+  inline int getTaskLocations(int task) const {
+    validateTaskIndex(task, "Instance::getTaskLocations");
+    return taskLocations_[task];
+  }
   // Prefer ref-returning accessors in performance-sensitive code.
   inline const vector<int>& getTaskLocationsRef() const { return taskLocations_; }
   vector<int> getTaskLocations(const vector<int>& tasks) const {
     vector<int> taskLocs(tasks.size(), 0);
     for (int i = 0; i < (int)tasks.size(); i++) {
+      validateTaskIndex(tasks[i], "Instance::getTaskLocations(vector)");
       taskLocs[i] = taskLocations_[tasks[i]];
     }
     return taskLocs;
@@ -51,11 +61,11 @@ class Instance {
   inline const vector<vector<int>>& getHeuristicsRef() const { return heuristics_; }
   [[deprecated("Use getHeuristicsRef(int)")]] vector<int> getHeuristics(
       int globalTask) {
-    assert(globalTask < numOfTasks_);
+    validateTaskIndex(globalTask, "Instance::getHeuristics");
     return heuristics_[globalTask];
   }
   inline const vector<int>& getHeuristicsRef(int globalTask) const {
-    assert(globalTask < numOfTasks_);
+    validateTaskIndex(globalTask, "Instance::getHeuristicsRef");
     return heuristics_[globalTask];
   }
   inline const vector<int>& getNeighbors(int current) const {
@@ -109,12 +119,12 @@ class Instance {
     return ancestors_;
   }
   inline const vector<int>& getAncestorsRef(int globalTask) const {
-    assert(globalTask < numOfTasks_);
+    validateTaskIndex(globalTask, "Instance::getAncestorsRef");
     return ancestors_[globalTask];
   }
   [[deprecated("Use getAncestorsRef(int)")]] inline vector<int> getAncestors(
       int globalTask) const {
-    assert(globalTask < numOfTasks_);
+    validateTaskIndex(globalTask, "Instance::getAncestors");
     return ancestors_[globalTask];
   }
   inline const vector<vector<int>>& getSuccessorsRef() const {
@@ -125,12 +135,12 @@ class Instance {
     return successors_;
   }
   inline const vector<int>& getSuccessorsRef(int globalTask) const {
-    assert(globalTask < numOfTasks_);
+    validateTaskIndex(globalTask, "Instance::getSuccessorsRef");
     return successors_[globalTask];
   }
   [[deprecated("Use getSuccessorsRef(int)")]] inline vector<int> getSuccessors(
       int globalTask) const {
-    assert(globalTask < numOfTasks_);
+    validateTaskIndex(globalTask, "Instance::getSuccessors");
     return successors_[globalTask];
   }
   inline const vector<int>& getInputPlanningOrderRef() const {

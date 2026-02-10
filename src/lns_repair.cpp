@@ -297,6 +297,11 @@ bool LNS::computeRegretForTask(
           ancestorTask,
           previousSolution_.agents[ancestorTaskAgent].taskAssignments,
           agentTaskAssignments[ancestorTaskAgent]);
+      if (ancestorTaskLocalIndexRelativeToSolution == UNASSIGNED) {
+        PLOGE << "computeRegretForTask: failed to map ancestor task "
+              << ancestorTask << " into current assignment order\n";
+        return false;
+      }
       agentTaskAssignments[ancestorTaskAgent].insert(
           agentTaskAssignments[ancestorTaskAgent].begin() +
               ancestorTaskLocalIndexRelativeToSolution,
@@ -691,6 +696,13 @@ std::variant<bool, Utility> LNS::insertTask(
                   previousSolution_.agents[nextTaskAncestorAgent]
                       .taskAssignments,
                   agentTaskAssignmentsRef[nextTaskAncestorAgent]);
+          if (ancestorTaskLocalIndexRelativeToSolution == UNASSIGNED) {
+            PLOGE << "insertTask: failed to map ancestor task "
+                  << nextTaskAncestor
+                  << " into current assignment order for agent "
+                  << nextTaskAncestorAgent << "\n";
+            return false;
+          }
           agentTaskAssignmentsRef[nextTaskAncestorAgent].insert(
               agentTaskAssignmentsRef[nextTaskAncestorAgent].begin() +
                   ancestorTaskLocalIndexRelativeToSolution,
@@ -784,12 +796,25 @@ std::variant<bool, Utility> LNS::insertTask(
       return false;
     }
 
-    int taskPosition = find(agentTaskAssignmentsRef[regretPacket.agent].begin(),
-                            agentTaskAssignmentsRef[regretPacket.agent].end(),
-                            regretPacket.task) -
-                       agentTaskAssignmentsRef[regretPacket.agent].begin();
+    const auto taskIt =
+        find(agentTaskAssignmentsRef[regretPacket.agent].begin(),
+             agentTaskAssignmentsRef[regretPacket.agent].end(),
+             regretPacket.task);
+    if (taskIt == agentTaskAssignmentsRef[regretPacket.agent].end()) {
+      PLOGE << "insertTask: regret task " << regretPacket.task
+            << " not found in agent " << regretPacket.agent << " queue\n";
+      return false;
+    }
+    const int taskPosition =
+        (int)distance(agentTaskAssignmentsRef[regretPacket.agent].begin(), taskIt);
     vector<int> goalLocations =
         instance_.getTaskLocations(agentTaskAssignmentsRef[regretPacket.agent]);
+    if (taskPosition < 0 || taskPosition >= (int)goalLocations.size()) {
+      PLOGE << "insertTask: invalid task position " << taskPosition
+            << " for agent " << regretPacket.agent << " goal list size "
+            << goalLocations.size() << "\n";
+      return false;
+    }
     ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
 
     auto localPlanner = createLocalPlanner(regretPacket.agent);
@@ -808,10 +833,23 @@ std::variant<bool, Utility> LNS::insertTask(
     startTime = agentTaskPathsRef[regretPacket.agent][taskPosition].endTime();
 
     // Need to recompute the positions as we might add paths for parent tasks before reaching here!
-    int nextTaskPosition =
+    const auto nextTaskIt =
         find(agentTaskAssignmentsRef[regretPacket.agent].begin(),
-             agentTaskAssignmentsRef[regretPacket.agent].end(), nextTask) -
-        agentTaskAssignmentsRef[regretPacket.agent].begin();
+             agentTaskAssignmentsRef[regretPacket.agent].end(), nextTask);
+    if (nextTaskIt == agentTaskAssignmentsRef[regretPacket.agent].end()) {
+      PLOGE << "insertTask: next task " << nextTask << " not found in agent "
+            << regretPacket.agent << " queue\n";
+      return false;
+    }
+    const int nextTaskPosition =
+        (int)distance(agentTaskAssignmentsRef[regretPacket.agent].begin(),
+                      nextTaskIt);
+    if (nextTaskPosition < 0 || nextTaskPosition >= (int)goalLocations.size()) {
+      PLOGE << "insertTask: invalid next-task position " << nextTaskPosition
+            << " for agent " << regretPacket.agent << " goal list size "
+            << goalLocations.size() << "\n";
+      return false;
+    }
     TaskRegretPacket nextTaskPacket = {
         nextTask, regretPacket.agent, nextTaskPosition, {}};
     buildConstraintTable(constraintTable, nextTaskPacket,
@@ -963,6 +1001,12 @@ bool LNS::commitAncestorTaskOf(
           ancestorTask,
           previousSolution_.agents[ancestorTaskAgent].taskAssignments,
           solution_.agents[ancestorTaskAgent].taskAssignments);
+      if (ancestorTaskPositionRelativeToSolution == UNASSIGNED) {
+        PLOGE << "commitAncestorTaskOf: failed to map ancestor task "
+              << ancestorTask << " into current assignment order for agent "
+              << ancestorTaskAgent << "\n";
+        return false;
+      }
       int ancestorTaskPosition =
           previousSolution_.getLocalTaskIndex(ancestorTaskAgent, ancestorTask);
       if (ancestorTaskPosition == UNASSIGNED ||
@@ -1350,9 +1394,19 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable,
     }
 
     int ancestorTaskAgent = UNDEFINED;
-    if (findingNextTask &&
-        ancestorTask == agentTaskAssignmentsRef[taskPacket.agent]
-                                               [taskPacket.taskPosition - 1]) {
+    int previousTaskInAgent = UNDEFINED;
+    bool hasPreviousTaskInAgent = false;
+    if (findingNextTask && taskPacket.agent >= 0 &&
+        taskPacket.agent < (int)agentTaskAssignmentsRef.size() &&
+        taskPacket.taskPosition > 0 &&
+        taskPacket.taskPosition <
+            (int)agentTaskAssignmentsRef[taskPacket.agent].size()) {
+      previousTaskInAgent =
+          agentTaskAssignmentsRef[taskPacket.agent][taskPacket.taskPosition - 1];
+      hasPreviousTaskInAgent = true;
+    }
+
+    if (hasPreviousTaskInAgent && ancestorTask == previousTaskInAgent) {
       ancestorTaskAgent = taskPacket.agent;
     } else if (isPendingCommitState(lnsNeighborhood_, ancestorTask)) {
       const int prevAssignedAgent =
@@ -1472,6 +1526,11 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable, int task) {
       max(constraintTable.latestTimestep, constraintTable.lengthMin);
 }
 
+int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue) {
+  static const vector<int> kEmptyTaskQueue;
+  return extractOldLocalTaskIndex(task, oldTaskQueue, kEmptyTaskQueue);
+}
+
 int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue,
                                   const vector<int>& newTaskQueue) {
   int localTaskPositionOffset = 0;
@@ -1498,8 +1557,20 @@ int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue,
       break;
     }
   }
-  assert(index < (int)oldTaskQueue.size());
-  return index - localTaskPositionOffset;
+  if (index >= (int)oldTaskQueue.size()) {
+    PLOGE << "extractOldLocalTaskIndex: task " << task
+          << " not found in old task queue\n";
+    return UNASSIGNED;
+  }
+  const int relativeIndex = index - localTaskPositionOffset;
+  if (relativeIndex < 0 || relativeIndex > (int)newTaskQueue.size()) {
+    PLOGE << "extractOldLocalTaskIndex: computed invalid relative index "
+          << relativeIndex << " for task " << task << " (oldIndex=" << index
+          << ", offset=" << localTaskPositionOffset
+          << ", newSize=" << newTaskQueue.size() << ")\n";
+    return UNASSIGNED;
+  }
+  return relativeIndex;
 }
 
 vector<char> LNS::reachableSet(int source, const vector<vector<int>>& edgeList) {

@@ -5,6 +5,7 @@
 #include "plog/Initializers/ConsoleInitializer.h"
 
 #include <chrono>
+#include <cstdint>
 #include <boost/program_options.hpp>
 #include "common.hpp"
 #include "report_exporter.hpp"
@@ -366,9 +367,15 @@ int main(int argc, char** argv) {
   // Need to store the seed for debugging.
   unsigned int seed = vm["seed"].as<unsigned int>();
   if (seed == 0) {
-    seed = (unsigned int)std::chrono::high_resolution_clock::now()
-               .time_since_epoch()
-               .count();
+    std::uint64_t ticks = static_cast<std::uint64_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    // Mix entropy before narrowing to 32-bit to avoid low-quality truncation.
+    ticks ^= ticks >> 30;
+    ticks *= 0xbf58476d1ce4e5b9ULL;
+    ticks ^= ticks >> 27;
+    ticks *= 0x94d049bb133111ebULL;
+    ticks ^= ticks >> 31;
+    seed = static_cast<unsigned int>(ticks ^ (ticks >> 32));
   }
   // Keep seed on stdout for easy script parsing.
   std::cout << "seed = " << seed << '\n';

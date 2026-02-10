@@ -61,12 +61,21 @@ struct Agent {
     if (this == &other) {
       return *this;
     }
+    const int oldId = id;
     id = other.id;
     path = other.path;
     taskPaths = other.taskPaths;
     taskAssignments = other.taskAssignments;
     intraPrecedenceConstraints = other.intraPrecedenceConstraints;
-    pathPlanner = clonePlanner(other.pathPlanner, other.id);
+    if (other.pathPlanner == nullptr) {
+      pathPlanner.reset();
+    } else if (pathPlanner != nullptr && oldId == other.id &&
+               pathPlanner->getName() == other.pathPlanner->getName()) {
+      // Reuse existing planner allocation when type/agent identity match.
+      pathPlanner->copyStateFrom(*other.pathPlanner);
+    } else {
+      pathPlanner = clonePlanner(other.pathPlanner, other.id);
+    }
     return *this;
   }
   Agent& operator=(Agent&&) noexcept = default;
@@ -352,7 +361,7 @@ struct FeasibleSolution {
   inline int getRowCoordinate(int id) const { return id / numOfCols; }
   inline int getColCoordinate(int id) const { return id % numOfCols; }
   inline pair<int, int> getCoordinate(int id) const {
-    return make_pair(getRowCoordinate(id), getColCoordinate(id));
+    return mapf_pc_lns::toCoordinate(id, numOfCols);
   }
 
   string toString() const {
@@ -526,7 +535,7 @@ struct RelatedTasks {
   double relatedness;
 
   RelatedTasks(int task, int agent, int taskPosition, int startTime,
-               int endTime, int distance, int relation)
+               int endTime, int distance, double relation)
       : task(task),
         agent(agent),
         taskPosition(taskPosition),
@@ -546,7 +555,8 @@ struct RelatedTasks {
 
   // Comparator for custom Related Tasks struct
   struct RelatedTasksComparator {
-    bool operator()(RelatedTasks task1, RelatedTasks task2) const {
+    bool operator()(const RelatedTasks& task1,
+                    const RelatedTasks& task2) const {
       return task1.task < task2.task;
     }
   };
@@ -795,9 +805,9 @@ class LNS {
                             vector<pair<int, int>>* precedenceConstraints,
                             bool findingNextTask = false);
 
-  int extractOldLocalTaskIndex(
-      int task, const vector<int>& oldTaskQueue,
-      const vector<int>& newTaskQueue = vector<int>());
+  int extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue);
+  int extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue,
+                               const vector<int>& newTaskQueue);
   vector<char> reachableSet(int source, const vector<vector<int>>& edgeList);
 
   bool computeRegret();

@@ -8,6 +8,8 @@ class ConstraintTable {
  protected:
   struct IntervalBucket {
     // Stored as sorted, merged [start, end) intervals after normalization.
+    // NOTE: const query APIs lazily normalize these buckets and therefore
+    // mutate this cache. ConstraintTable reads are not thread-safe.
     mutable vector<pair<int, int>> intervals;
     mutable bool normalized = true;
   };
@@ -17,6 +19,10 @@ class ConstraintTable {
 
   void normalizeIntervals(const IntervalBucket& bucket) const;
   inline size_t getEdgeIndex(size_t from, size_t to) const {
+    // Key-space invariant:
+    // vertex keys are [0, mapSize), edge keys are [mapSize, ...].
+    // Requires from/to to be valid vertex ids.
+    assert(from < mapSize && to < mapSize);
     return (1 + from) * mapSize + to;
   }
 

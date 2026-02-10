@@ -92,6 +92,9 @@ bool Instance::loadMap() {
       PLOGE << "Failed to read map row " << i << ".\n";
       return false;
     }
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
     if ((int)line.size() < numOfCols) {
       PLOGE << "Map row " << i << " is too short. Expected at least "
             << numOfCols << " cells, got " << line.size() << ".\n";
@@ -101,7 +104,6 @@ bool Instance::loadMap() {
       map_[linearizeCoordinate(i, j)] = (line[j] != '.');
     }
   }
-  file.close();
   return true;
 }
 
@@ -126,7 +128,13 @@ bool Instance::loadAgentsAndTasks() {
     PLOGE << "Invalid number of agents in agent/task file: " << line << "\n";
     return false;
   }
-  if (numOfAgents_ != inputNumAgents) {
+  if (inputNumAgents <= 0) {
+    PLOGE << "The number of agents should be larger than 0 in the input file.\n";
+    return false;
+  }
+  if (numOfAgents_ == 0) {
+    numOfAgents_ = inputNumAgents;
+  } else if (numOfAgents_ != inputNumAgents) {
     PLOGE << "The number of robots passed in command line and the agent file "
              "do not match.\n";
     return false;
@@ -134,11 +142,6 @@ bool Instance::loadAgentsAndTasks() {
 
   if (numOfAgents_ == 0) {
     PLOGE << "The number of agents should be larger than 0.\n";
-    return false;
-  }
-
-  if (numOfTasks_ == 0) {
-    PLOGE << "The number of tasks should be larger than 0.\n";
     return false;
   }
 
@@ -185,11 +188,19 @@ bool Instance::loadAgentsAndTasks() {
     PLOGE << "Invalid number of tasks in agent/task file: " << line << "\n";
     return false;
   }
-  if (numOfTasks_ != inputNumTasks) {
+  if (inputNumTasks <= 0) {
+    PLOGE << "The number of tasks should be larger than 0 in the input file.\n";
+    return false;
+  }
+  if (numOfTasks_ == 0) {
+    numOfTasks_ = inputNumTasks;
+  } else if (numOfTasks_ != inputNumTasks) {
     PLOGE << "The number of tasks passed in the command line and the agent "
              "file do not match.\n";
     return false;
   }
+  ancestors_.assign(numOfTasks_, {});
+  successors_.assign(numOfTasks_, {});
 
   // Reading the task goal locations
   taskLocations_.resize(numOfTasks_);
@@ -271,8 +282,6 @@ bool Instance::loadAgentsAndTasks() {
 
   PLOGD << "# Agents: " << numOfAgents_ << "\t # Tasks: " << numOfTasks_
         << "\t # Dependencies: " << numDependencies << "\n";
-
-  file.close();
 
   if (!topologicalSort(this, inputPrecedenceConstraints_, inputPlanningOrder_)) {
     PLOGE << "Input precedence constraints contain a cycle or are invalid.\n";

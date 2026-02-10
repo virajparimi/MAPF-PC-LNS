@@ -25,12 +25,8 @@ using boost::unordered_map;
 using boost::unordered_set;
 using boost::heap::compare;
 using boost::heap::pairing_heap;
-using std::cerr;
-using std::clock;
-using std::cout;
 using std::deque;
 using std::distance;
-using std::endl;
 using std::get;
 using std::hash;
 using std::list;
@@ -64,6 +60,11 @@ inline constexpr int kMaxCost = (INT_MAX / 2);
 inline constexpr int kMaxNodes = (INT_MAX / 2);
 inline constexpr int kUnassigned = -1;
 inline constexpr int kUndefined = -2;
+
+inline std::pair<int, int> toCoordinate(int id, int numCols) {
+  assert(numCols > 0);
+  return std::make_pair(id / numCols, id % numCols);
+}
 }  // namespace mapf_pc_lns
 
 // Transitional aliases to avoid a broad edit in one change. These are typed
@@ -106,7 +107,9 @@ struct Path {
   const PathEntry& back() const { return path.back(); }
   const PathEntry& front() const { return path.front(); }
   const PathEntry& at(int idx) const {
-    assert(idx >= 0 && idx < (int)path.size());
+    if (idx < 0 || idx >= (int)path.size()) {
+      throw std::out_of_range("Path::at index out of range");
+    }
     return path[idx];
   }
 
@@ -125,7 +128,7 @@ struct Path {
 
   Path() = default;
   explicit Path(int size) : path(vector<PathEntry>(size)) {}
-  virtual ~Path() = default;
+  ~Path() = default;
 };
 
 struct AgentTaskPath : public Path {
