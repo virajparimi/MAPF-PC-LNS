@@ -37,7 +37,7 @@ bool LNS::thresholdAcceptance() {
 
   bool accepted = false;
   // In this case we are worse than the previous solution but within some threshold so we can accept this one
-  if (solution_.utility - previousSolution_.utility < temperature_) {
+  if (solution_.utility - previousSolution_.utility <= temperature_) {
     accepted = true;
   } else {
     // Reject this solution
@@ -134,7 +134,14 @@ bool LNS::run() {
   ConflictMap oldNeighborhood;
 
   // Needed to maintain a running mean and standard deviation which can then be used to standardize the sum of costs and conflicts in accepting criteria functions
-  MovingMetrics metrics(numOfIterations_, lnsConflictWeight_, lnsCostWeight_,
+  // Decouple moving-metrics stability from run-loop bounds:
+  // when maxIterations is unbounded/unspecified (0), keep a reasonably sized
+  // window so utility doesn't collapse to zero and freeze TA acceptance.
+  constexpr int kDefaultMetricsWindowSize = 200;
+  const int metricsWindowSize =
+      (numOfIterations_ > 0) ? max(2, numOfIterations_)
+                             : kDefaultMetricsWindowSize;
+  MovingMetrics metrics(metricsWindowSize, lnsConflictWeight_, lnsCostWeight_,
                         (int)potentialNeighborhood.size(),
                         solution_.sumOfCosts);
   solution_.utility = metrics.computeMovingMetrics(
@@ -147,10 +154,14 @@ bool LNS::run() {
 
   previousSolution_ = solution_;
 
+  const int64_t iterationLimit =
+      (numOfIterations_ > 0)
+          ? static_cast<int64_t>(numOfIterations_) * 2
+          : std::numeric_limits<int64_t>::max();
+
   // LNS loop
   while (runtime < timeLimit_ &&
-         static_cast<int64_t>(iterationStats.size()) <
-             static_cast<int64_t>(numOfIterations_) * 2) {
+         static_cast<int64_t>(iterationStats.size()) < iterationLimit) {
     const int previousSocForIter = previousSolution_.sumOfCosts;
     int alnsHeuristicForIter = -1;
 

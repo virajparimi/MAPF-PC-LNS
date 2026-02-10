@@ -1,6 +1,7 @@
 #include "utils.hpp"
 #include <climits>
 #include <cmath>
+#include <queue>
 
 bool greedyTaskAssignment(const Instance* instance, Solution* solution) {
   if (instance == nullptr || solution == nullptr) {
@@ -240,6 +241,55 @@ bool topologicalSort(const Instance* instance,
   }
 
   assert((int)planningOrder.size() == numTasks);
+  return true;
+}
+
+bool isAcyclicPrecedenceConstraints(
+    const Instance* instance,
+    const vector<pair<int, int>>& precedenceConstraints) {
+  if (instance == nullptr) {
+    PLOGE << "isAcyclicPrecedenceConstraints: received null instance\n";
+    return false;
+  }
+  const int numTasks = instance->getTasksNum();
+  vector<vector<int>> successors(numTasks);
+  vector<int> indegree(numTasks, 0);
+
+  for (const auto& precedenceConstraint : precedenceConstraints) {
+    const int from = precedenceConstraint.first;
+    const int to = precedenceConstraint.second;
+    if (from < 0 || from >= numTasks || to < 0 || to >= numTasks) {
+      PLOGE << "isAcyclicPrecedenceConstraints: constraint index out of bounds ("
+            << from << " -> " << to << "), numTasks=" << numTasks << "\n";
+      return false;
+    }
+    successors[from].push_back(to);
+    indegree[to]++;
+  }
+
+  std::queue<int> q;
+  for (int task = 0; task < numTasks; task++) {
+    if (indegree[task] == 0) {
+      q.push(task);
+    }
+  }
+
+  int popped = 0;
+  while (!q.empty()) {
+    const int cur = q.front();
+    q.pop();
+    popped++;
+    for (int nxt : successors[cur]) {
+      indegree[nxt]--;
+      if (indegree[nxt] == 0) {
+        q.push(nxt);
+      }
+    }
+  }
+  if (popped != numTasks) {
+    PLOGE << "Detected a cycle while checking precedence constraints\n";
+    return false;
+  }
   return true;
 }
 

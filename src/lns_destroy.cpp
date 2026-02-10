@@ -1033,11 +1033,42 @@ void LNS::alnsRemoval(std::optional<ConflictMap> potentialNeighborhood) {
     }
     adaptiveLNS_.alnsCounter = 0;
   }
-  // Sample the destroy heuristic and extract the neighborhood
-  std::discrete_distribution<> distribution(adaptiveLNS_.weights.begin(),
-                                            adaptiveLNS_.weights.end());
+  // Sample the destroy heuristic and extract the neighborhood.
+  // When market heuristics are disabled, exclude marketTatonnementRemoval from
+  // ALNS sampling entirely.
+  vector<int> eligibleHeuristics;
+  eligibleHeuristics.reserve(adaptiveLNS_.numDestroyHeuristics);
+  vector<double> eligibleWeights;
+  eligibleWeights.reserve(adaptiveLNS_.numDestroyHeuristics);
+  for (int i = 0; i < adaptiveLNS_.numDestroyHeuristics; i++) {
+    if (!market_.heuristics &&
+        i == DestroyHeuristic::marketTatonnementRemoval) {
+      continue;
+    }
+    eligibleHeuristics.push_back(i);
+    eligibleWeights.push_back(max(0.0, adaptiveLNS_.weights[i]));
+  }
+  if (eligibleHeuristics.empty()) {
+    PLOGE << "ALNS has no eligible destroy heuristics to sample\n";
+    assert(false);
+    return;
+  }
 
-  int sampledDestroyHeuristic = distribution(rng_);
+  int sampledDestroyHeuristic = eligibleHeuristics.front();
+  double weightSum = 0.0;
+  for (double w : eligibleWeights) {
+    weightSum += w;
+  }
+  if (weightSum <= std::numeric_limits<double>::epsilon()) {
+    std::uniform_int_distribution<int> distribution(
+        0, (int)eligibleHeuristics.size() - 1);
+    sampledDestroyHeuristic = eligibleHeuristics[distribution(rng_)];
+  } else {
+    std::discrete_distribution<> distribution(eligibleWeights.begin(),
+                                              eligibleWeights.end());
+    sampledDestroyHeuristic =
+        eligibleHeuristics[distribution(rng_)];
+  }
   adaptiveLNS_.recentDestroyHeuristic = sampledDestroyHeuristic;
   switch (sampledDestroyHeuristic) {
     case DestroyHeuristic::randomRemoval:  // RANDOM

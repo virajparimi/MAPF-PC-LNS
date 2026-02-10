@@ -10,6 +10,12 @@ bool topologicalSort(const Instance* instance,
                      const vector<pair<int, int>>& precedenceConstraints,
                      vector<int>& planningOrder);
 
+// Faster boolean-only DAG check for precedence constraints.
+// Use this in hot paths when the explicit topological order is not needed.
+bool isAcyclicPrecedenceConstraints(
+    const Instance* instance,
+    const vector<pair<int, int>>& precedenceConstraints);
+
 ConflictMap extractNConflicts(int size, const ConflictMap& conflicts);
 
 struct MovingMetrics {

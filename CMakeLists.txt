@@ -60,3 +60,69 @@ target_link_libraries(mapf_pc_lns PRIVATE
   Threads::Threads
   plog::plog
 )
+
+set(PLANNER_ISOLATION_SOURCES
+  src/planner_isolation.cpp
+  src/astar.cpp
+  src/constrainttable.cpp
+  src/instance.cpp
+  src/instance_generic.cpp
+  src/instance_kiva.cpp
+  src/mlastar.cpp
+  src/sipps_helpers.cpp
+  src/sipps.cpp
+  src/utils.cpp
+)
+
+add_executable(planner_isolation ${PLANNER_ISOLATION_SOURCES})
+target_include_directories(planner_isolation PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_options(planner_isolation PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/W4>
+  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic>
+)
+target_link_libraries(planner_isolation PRIVATE
+  Boost::program_options
+  Boost::system
+  Boost::filesystem
+  Boost::thread
+  Threads::Threads
+  plog::plog
+)
+
+enable_testing()
+
+set(TEST_MAP_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/sample_input/benchmark/maps/maze-32-32-4.map")
+set(TEST_SCEN_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/sample_input/benchmark/scenarios/scen-even/maze-32-32-4-even-1.scen")
+set(TEST_AGENT_COUNT 6)
+set(TEST_ARTIFACT_DIR "${CMAKE_CURRENT_BINARY_DIR}/test_artifacts")
+
+add_test(
+  NAME planner_correctness_mlastar
+  COMMAND
+    bash
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_planner_from_scen.sh"
+    "$<TARGET_FILE:mapf_pc_lns>"
+    "${TEST_MAP_FILE}"
+    "${TEST_SCEN_FILE}"
+    "${TEST_AGENT_COUNT}"
+    "mlastar"
+    "${TEST_ARTIFACT_DIR}"
+)
+
+add_test(
+  NAME planner_correctness_sipps
+  COMMAND
+    bash
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_planner_from_scen.sh"
+    "$<TARGET_FILE:mapf_pc_lns>"
+    "${TEST_MAP_FILE}"
+    "${TEST_SCEN_FILE}"
+    "${TEST_AGENT_COUNT}"
+    "sipps"
+    "${TEST_ARTIFACT_DIR}"
+)
+
+set_tests_properties(planner_correctness_mlastar PROPERTIES TIMEOUT 120)
+set_tests_properties(planner_correctness_sipps PROPERTIES TIMEOUT 120)

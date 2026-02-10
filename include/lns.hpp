@@ -841,7 +841,8 @@ class LNS {
       TaskRegretPacket regretPacket,
       vector<vector<AgentTaskPath>>* agentTaskPaths,
       vector<vector<int>>* agentTaskAssignments,
-      vector<pair<int, int>>* precedenceConstraints);
+      vector<pair<int, int>>* precedenceConstraints,
+      SingleAgentSolver* reusablePlanner = nullptr);
   bool insertBestRegretTask(TaskRegretPacket bestRegretPacket);
 
   const Solution& getSolution() const { return solution_; }

@@ -254,9 +254,18 @@ Solution& Solution::operator=(const Solution& other) {
   this->numOfAgents = other.numOfAgents;
   this->sumOfCosts = other.sumOfCosts;
   this->utility = other.utility;
-
-  this->agents = other.agents;
   this->taskAgentMap = other.taskAgentMap;
+  if (this->agents.size() != other.agents.size()) {
+    // Fallback for unexpected shape mismatch; preserves old behavior.
+    this->agents = other.agents;
+    return *this;
+  }
+  // Hot-path snapshot copies happen every LNS iteration. Use Agent::operator=
+  // so planner state (goalLocations/heuristics/timeout) stays in sync with
+  // taskAssignments and taskPaths.
+  for (int i = 0; i < (int)this->agents.size(); i++) {
+    this->agents[i] = other.agents[i];
+  }
 
   return *this;
 }
