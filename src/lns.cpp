@@ -167,6 +167,8 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   acceptanceCriteria = parameters.core.acceptanceCriteria;
   regretType = parameters.core.regretType;
   regretCandidateTopK_ = std::max(0, parameters.core.regretCandidateTopK);
+  repairIncludeNonAncestorAgents_ =
+      parameters.core.repairIncludeNonAncestorAgents;
   if (parameters.lowLevel.planner == "sipps") {
     lowLevelPlannerType_ = LowLevelPlannerType::sipps;
   } else {

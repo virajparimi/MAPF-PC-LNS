@@ -634,6 +634,10 @@ struct LNSParams {
     string acceptanceCriteria;
     string regretType;
     bool incrementalRegret = false;
+    // Add occupancy constraints from non-ancestor agents during repair
+    // planning. This reduces collision-heavy candidates at the cost of extra
+    // low-level constraint processing.
+    bool repairIncludeNonAncestorAgents = true;
     // Candidate insertion budget per (task, agent) regret evaluation.
     // 0 means evaluate all candidate positions.
     int regretCandidateTopK = 0;
@@ -779,6 +783,7 @@ class LNS {
   ALNS adaptiveLNS_;
   int neighborSize_;
   int regretCandidateTopK_ = 0;
+  bool repairIncludeNonAncestorAgents_ = true;
   Neighbor lnsNeighborhood_;
   const Instance& instance_;
   unsigned int seed_ = 0;
@@ -853,8 +858,6 @@ class LNS {
       TaskRegretPacket regretPacket, vector<vector<int>>* agentTaskAssignments,
       vector<vector<AgentTaskPath>>* agentTaskPaths,
       vector<pair<int, int>>* precedenceConstraints,
-      const vector<vector<int>>& baseAncestors,
-      const vector<char>& baseTaskPresent,
       const TaskBaselineMetrics& baselineMetrics,
       pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes);
 
@@ -880,7 +883,8 @@ class LNS {
       vector<vector<int>>* agentTaskAssignments,
       vector<pair<int, int>>* precedenceConstraints,
       const TaskBaselineMetrics* baselineMetrics = nullptr,
-      SingleAgentSolver* reusablePlanner = nullptr);
+      SingleAgentSolver* reusablePlanner = nullptr,
+      bool rollbackAfter = false);
   bool insertBestRegretTask(TaskRegretPacket bestRegretPacket);
 
   const Solution& getSolution() const { return solution_; }

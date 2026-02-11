@@ -201,10 +201,20 @@ bool LNS::run() {
       (int)potentialNeighborhood.size(), solution_.sumOfCosts);
 
   constexpr double kMinTemperature = 1e-9;
-  temperature_ = solution_.utility * (tolerance_ / 100.0);
+  const double toleranceScale = tolerance_ / 100.0;
+  temperature_ = std::abs(solution_.utility) * toleranceScale;
   if (!std::isfinite(temperature_) || temperature_ <= kMinTemperature) {
-    const double utilityScale = max(std::abs(solution_.utility), 1.0);
-    temperature_ = max(kMinTemperature, utilityScale * (tolerance_ / 100.0));
+    // Moving utility can be ~0 at initialization when the rolling window is
+    // prefilled with the same initial sample. Use a scale-aware fallback so
+    // TA/SA are not effectively frozen from the first iteration.
+    const double conflictScale = max(
+        1.0, std::abs(static_cast<double>(potentialNeighborhood.size())));
+    const double costScale =
+        max(1.0, std::abs(static_cast<double>(solution_.sumOfCosts)));
+    const double blendedScale =
+        lnsConflictWeight_ * conflictScale + lnsCostWeight_ * costScale;
+    const double fallbackScale = max(1.0, blendedScale);
+    temperature_ = max(kMinTemperature, fallbackScale * toleranceScale);
   }
   if (acceptanceCriteria == "SA") {
     temperature_ /= log(2);

@@ -1113,20 +1113,41 @@ void LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
   // ALNS sampling entirely.
   vector<int> eligibleHeuristics;
   eligibleHeuristics.reserve(adaptiveLNS_.numDestroyHeuristics);
-  vector<double> eligibleWeights;
-  eligibleWeights.reserve(adaptiveLNS_.numDestroyHeuristics);
   for (int i = 0; i < adaptiveLNS_.numDestroyHeuristics; i++) {
     if (!market_.heuristics &&
         i == DestroyHeuristic::marketTatonnementRemoval) {
       continue;
     }
     eligibleHeuristics.push_back(i);
-    eligibleWeights.push_back(max(0.0, adaptiveLNS_.weights[i]));
   }
   if (eligibleHeuristics.empty()) {
     PLOGE << "ALNS has no eligible destroy heuristics to sample\n";
     assert(false);
     return;
+  }
+
+  constexpr double kSuccessEpsilon = 1e-12;
+  constexpr double kMinUsedBeforeSuppression = 8.0;
+  bool hasPositiveRecentSuccess = false;
+  for (int i : eligibleHeuristics) {
+    if (adaptiveLNS_.success[i] > kSuccessEpsilon) {
+      hasPositiveRecentSuccess = true;
+      break;
+    }
+  }
+
+  vector<double> eligibleWeights;
+  eligibleWeights.reserve(eligibleHeuristics.size());
+  for (int i : eligibleHeuristics) {
+    double effectiveWeight = max(0.0, adaptiveLNS_.weights[i]);
+    const bool suppressZeroSuccessHeuristic =
+        hasPositiveRecentSuccess &&
+        adaptiveLNS_.used[i] >= kMinUsedBeforeSuppression &&
+        adaptiveLNS_.success[i] <= kSuccessEpsilon;
+    if (suppressZeroSuccessHeuristic) {
+      effectiveWeight = 0.0;
+    }
+    eligibleWeights.push_back(effectiveWeight);
   }
 
   int sampledDestroyHeuristic = eligibleHeuristics.front();
@@ -1135,9 +1156,20 @@ void LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
     weightSum += w;
   }
   if (weightSum <= std::numeric_limits<double>::epsilon()) {
+    vector<int> fallbackHeuristics;
+    if (hasPositiveRecentSuccess) {
+      for (int i : eligibleHeuristics) {
+        if (adaptiveLNS_.success[i] > kSuccessEpsilon) {
+          fallbackHeuristics.push_back(i);
+        }
+      }
+    }
+    if (fallbackHeuristics.empty()) {
+      fallbackHeuristics = eligibleHeuristics;
+    }
     std::uniform_int_distribution<int> distribution(
-        0, (int)eligibleHeuristics.size() - 1);
-    sampledDestroyHeuristic = eligibleHeuristics[distribution(rng_)];
+        0, (int)fallbackHeuristics.size() - 1);
+    sampledDestroyHeuristic = fallbackHeuristics[distribution(rng_)];
   } else {
     std::discrete_distribution<> distribution(eligibleWeights.begin(),
                                               eligibleWeights.end());

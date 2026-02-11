@@ -48,6 +48,10 @@ int main(int argc, char** argv) {
       po::value<int>()->default_value(0),
       "Top-K insertion positions per (task,agent) during regret evaluation "
       "(0 = evaluate all positions)");
+  desc.add_options()(
+      "repairIncludeNonAncestorAgents",
+      po::value<bool>()->default_value(true),
+      "Include non-ancestor agent paths in repair constraint tables");
   desc.add_options()("severity,d", po::value<int>()->default_value(0),
                      "Debugging level");
   desc.add_options()("initialSolution,s",
@@ -388,6 +392,8 @@ int main(int argc, char** argv) {
   const int neighborSize = vm["neighborSize"].as<int>();
   const int maxIterations = vm["maxIterations"].as<int>();
   const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
+  const bool repairIncludeNonAncestorAgents =
+      vm["repairIncludeNonAncestorAgents"].as<bool>();
   if (agentNum < 0) {
     PLOGE << "agentNum must be non-negative (0 means all agents from file)\n";
     return 1;
@@ -476,6 +482,8 @@ int main(int argc, char** argv) {
   parameters.core.regretType = regretType;
   parameters.core.incrementalRegret = incrementalRegret;
   parameters.core.regretCandidateTopK = regretCandidateTopK;
+  parameters.core.repairIncludeNonAncestorAgents =
+      repairIncludeNonAncestorAgents;
   parameters.core.incrementalRegretMode = incrementalRegretMode;
   parameters.core.seed = seed;
 
