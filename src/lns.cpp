@@ -127,6 +127,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
   regretType = parameters.core.regretType;
+  regretCandidateTopK_ = std::max(0, parameters.core.regretCandidateTopK);
   if (parameters.lowLevel.planner == "sipps") {
     lowLevelPlannerType_ = LowLevelPlannerType::sipps;
   } else {
@@ -386,6 +387,7 @@ int LNS::computeTaskPrecedenceWaitFromState(
     int task, int taskLocation, const vector<vector<int>>& agentTaskAssignments,
     const vector<vector<AgentTaskPath>>& agentTaskPaths,
     const vector<pair<int, int>>& precedenceConstraints) const {
+  (void)precedenceConstraints;
   if (task < 0 || task >= instance_.getTasksNum()) {
     return 0;
   }
@@ -447,15 +449,11 @@ int LNS::computeTaskPrecedenceWaitFromState(
     }
   }
 
-  // Include additional dynamic predecessors (e.g., intra-agent constraints)
-  // when present in the state-specific precedence list.
-  if (precedenceConstraints.size() >
-      instance_.getInputPrecedenceConstraintsRef().size()) {
-    for (const auto& prec : precedenceConstraints) {
-      if (prec.second == task) {
-        consumePredecessor(prec.first);
-      }
-    }
+  // Dynamic intra-agent predecessor in the current assignment state.
+  if (taskPos > 0 && taskAgent >= 0 &&
+      taskAgent < (int)agentTaskAssignments.size() &&
+      taskPos - 1 < (int)agentTaskAssignments[taskAgent].size()) {
+    consumePredecessor(agentTaskAssignments[taskAgent][taskPos - 1]);
   }
 
   return max(0, release - arrive);

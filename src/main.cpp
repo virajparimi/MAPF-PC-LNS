@@ -38,6 +38,11 @@ int main(int argc, char** argv) {
                      "Size of the neighborhood");
   desc.add_options()("maxIterations,i", po::value<int>()->default_value(0),
                      "Maximum number of iterations");
+  desc.add_options()(
+      "regretCandidateTopK",
+      po::value<int>()->default_value(0),
+      "Top-K insertion positions per (task,agent) during regret evaluation "
+      "(0 = evaluate all positions)");
   desc.add_options()("severity,d", po::value<int>()->default_value(0),
                      "Debugging level");
   desc.add_options()("initialSolution,s",
@@ -347,6 +352,7 @@ int main(int argc, char** argv) {
   const int taskNum = vm["taskNum"].as<int>();
   const int neighborSize = vm["neighborSize"].as<int>();
   const int maxIterations = vm["maxIterations"].as<int>();
+  const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
   if (agentNum < 0) {
     PLOGE << "agentNum must be non-negative (0 means all agents from file)\n";
     return 1;
@@ -361,6 +367,10 @@ int main(int argc, char** argv) {
   }
   if (maxIterations < 0) {
     PLOGE << "maxIterations must be non-negative\n";
+    return 1;
+  }
+  if (regretCandidateTopK < 0) {
+    PLOGE << "regretCandidateTopK must be non-negative (0 means all positions)\n";
     return 1;
   }
 
@@ -421,6 +431,7 @@ int main(int argc, char** argv) {
   parameters.core.acceptanceCriteria = acceptanceCriteria;
   parameters.core.regretType = regretType;
   parameters.core.incrementalRegret = incrementalRegret;
+  parameters.core.regretCandidateTopK = regretCandidateTopK;
   parameters.core.incrementalRegretMode = incrementalRegretMode;
   parameters.core.seed = seed;
 

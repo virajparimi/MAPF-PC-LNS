@@ -615,6 +615,9 @@ struct LNSParams {
     string acceptanceCriteria;
     string regretType;
     bool incrementalRegret = false;
+    // Candidate insertion budget per (task, agent) regret evaluation.
+    // 0 means evaluate all candidate positions.
+    int regretCandidateTopK = 0;
     // Supported: "descendants", "descendants+agent".
     string incrementalRegretMode = "descendants+agent";
     unsigned int seed = 0;
@@ -751,6 +754,7 @@ class LNS {
  protected:
   ALNS adaptiveLNS_;
   int neighborSize_;
+  int regretCandidateTopK_ = 0;
   Neighbor lnsNeighborhood_;
   const Instance& instance_;
   unsigned int seed_ = 0;
@@ -819,6 +823,8 @@ class LNS {
       TaskRegretPacket regretPacket, vector<vector<int>>* agentTaskAssignments,
       vector<vector<AgentTaskPath>>* agentTaskPaths,
       vector<pair<int, int>>* precedenceConstraints,
+      const vector<vector<int>>& baseAncestors,
+      const vector<char>& baseTaskPresent,
       pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes);
 
   bool recomputeRegretsForTasks(const vector<int>& tasks);
