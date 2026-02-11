@@ -1,6 +1,30 @@
 #include "lns.hpp"
 #include "utils.hpp"
 
+namespace {
+vector<int> buildTaskPositionIndexByMappedAgent(const Solution& solution,
+                                                int taskCount) {
+  vector<int> taskToPosition(taskCount, UNASSIGNED);
+  for (int agent = 0; agent < solution.numOfAgents; agent++) {
+    const auto& assignments = solution.agents[agent].taskAssignments;
+    for (int pos = 0; pos < (int)assignments.size(); pos++) {
+      const int task = assignments[pos];
+      if (task < 0 || task >= taskCount) {
+        continue;
+      }
+      if (task >= (int)solution.taskAgentMap.size() ||
+          solution.taskAgentMap[task] != agent) {
+        continue;
+      }
+      if (taskToPosition[task] == UNASSIGNED) {
+        taskToPosition[task] = pos;
+      }
+    }
+  }
+  return taskToPosition;
+}
+}  // namespace
+
 void LNS::addConflictingTask(int agent, int timestep, ConflictMap* out) const {
   if (out == nullptr || agent < 0 || agent >= instance_.getAgentNum()) {
     return;
@@ -34,11 +58,14 @@ void LNS::addConflictingTask(int agent, int timestep, ConflictMap* out) const {
 bool LNS::validateSolution(ConflictMap* conflictedTasks) {
 
   bool result = true;
+  const int taskCount = instance_.getTasksNum();
+  const vector<int> taskToPosition =
+      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
 
   vector<pair<int, int>> precedenceConstraints =
       buildFullPrecedenceConstraints();
 
-  for (int task = 0; task < instance_.getTasksNum(); task++) {
+  for (int task = 0; task < taskCount; task++) {
     const int taskAgent =
         (task >= 0 && task < (int)solution_.taskAgentMap.size())
             ? solution_.taskAgentMap[task]
@@ -48,7 +75,9 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
             << task << "\n";
       return false;
     }
-    int taskPosition = solution_.getLocalTaskIndex(taskAgent, task);
+    int taskPosition = (task >= 0 && task < (int)taskToPosition.size())
+                           ? taskToPosition[task]
+                           : UNASSIGNED;
     if (taskPosition < 0 ||
         taskPosition >= (int)solution_.agents[taskAgent].taskPaths.size()) {
       PLOGE << "validateSolution: invalid local index " << taskPosition
@@ -75,10 +104,14 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
             << precedenceConstraint.second << ")\n";
       return false;
     }
-    int taskPositionA =
-            solution_.getLocalTaskIndex(agentA, precedenceConstraint.first),
-        taskPositionB =
-            solution_.getLocalTaskIndex(agentB, precedenceConstraint.second);
+    int taskPositionA = (precedenceConstraint.first >= 0 &&
+                         precedenceConstraint.first < (int)taskToPosition.size())
+                            ? taskToPosition[precedenceConstraint.first]
+                            : UNASSIGNED,
+        taskPositionB = (precedenceConstraint.second >= 0 &&
+                         precedenceConstraint.second < (int)taskToPosition.size())
+                            ? taskToPosition[precedenceConstraint.second]
+                            : UNASSIGNED;
     if (taskPositionA < 0 || taskPositionB < 0 ||
         taskPositionA >= (int)solution_.agents[agentA].path.timeStamps.size() ||
         taskPositionB >= (int)solution_.agents[agentB].path.timeStamps.size()) {
@@ -133,10 +166,14 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
            static_cast<uint32_t>(to);
   };
 
+  unordered_map<int, vector<int>> occupancy;
+  occupancy.reserve(activeAgents.size() * 2);
+  unordered_map<uint64_t, int> directedEdgeOwner;
+  directedEdgeOwner.reserve(activeAgents.size() * 2);
+
   for (int timestep = 0; timestep < maxPathLength; timestep++) {
     // Vertex collisions at timestep.
-    unordered_map<int, vector<int>> occupancy;
-    occupancy.reserve(activeAgents.size() * 2);
+    occupancy.clear();
     for (int agent : activeAgents) {
       const int location = getLocationAt(agent, timestep);
       if (location == UNDEFINED) {
@@ -172,8 +209,7 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
     if (timestep + 1 >= maxPathLength) {
       continue;
     }
-    unordered_map<uint64_t, int> directedEdgeOwner;
-    directedEdgeOwner.reserve(activeAgents.size() * 2);
+    directedEdgeOwner.clear();
     for (int agent : activeAgents) {
       const int from = getLocationAt(agent, timestep);
       const int to = getLocationAt(agent, timestep + 1);

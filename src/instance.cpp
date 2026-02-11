@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include "internal/parse_helpers.hpp"
 #include "utils.hpp"
 
@@ -46,11 +47,13 @@ bool detectKivaMapFormat(const std::string& mapPath) {
 }  // namespace
 
 Instance::Instance(const string& mapFname, const string& agentTaskFname,
-                   int numOfAgents, int numOfTasks)
+                   int numOfAgents, int numOfTasks,
+                   bool strictKivaTaskIndices)
     : mapFname_(mapFname),
       agentTaskFname_(agentTaskFname),
       numOfAgents_(numOfAgents),
-      numOfTasks_(numOfTasks) {
+      numOfTasks_(numOfTasks),
+      strictKivaTaskIndices_(strictKivaTaskIndices) {
   const bool kivaFormat = detectKivaMapFormat(mapFname_);
   bool succ = false;
   if (kivaFormat) {
@@ -115,10 +118,19 @@ void Instance::preComputeNeighbors() {
 void Instance::preComputeHeuristics() {
   heuristics_.clear();
   heuristics_.resize(numOfTasks_);
+  std::unordered_map<int, int> rootToFirstTask;
+  rootToFirstTask.reserve(numOfTasks_);
 
   for (int i = 0; i < numOfTasks_; i++) {
-    heuristics_[i].resize(mapSize, MAX_TIMESTEP);
     const int root = taskLocations_[i];
+    const auto reused = rootToFirstTask.find(root);
+    if (reused != rootToFirstTask.end()) {
+      heuristics_[i] = heuristics_[reused->second];
+      continue;
+    }
+    rootToFirstTask.emplace(root, i);
+
+    heuristics_[i].resize(mapSize, MAX_TIMESTEP);
     heuristics_[i][taskLocations_[i]] = 0;
     deque<int> frontier;
     frontier.push_back(root);

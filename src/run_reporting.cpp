@@ -16,9 +16,6 @@ string formatDouble(double value, int precision = 4) {
   if (std::isinf(value)) {
     return std::signbit(value) ? "-inf" : "inf";
   }
-  if (!std::isfinite(value)) {
-    return "inf";
-  }
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(precision) << value;
   return oss.str();

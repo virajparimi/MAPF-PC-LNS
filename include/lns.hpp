@@ -101,10 +101,19 @@ struct Agent {
            taskAssignments.end());
     assert(std::find(taskAssignments.begin(), taskAssignments.end(), taskB) !=
            taskAssignments.end());
-    intraPrecedenceConstraints.emplace_back(taskA, taskB);
+    const auto edge = std::make_pair(taskA, taskB);
+    if (std::find(intraPrecedenceConstraints.begin(),
+                  intraPrecedenceConstraints.end(),
+                  edge) == intraPrecedenceConstraints.end()) {
+      intraPrecedenceConstraints.push_back(edge);
+    }
   }
 
-  // This function inserts a precedence constraint when adding a new task into the agent task queue. This would involve removing the existing precedence constraint between the task before it and after it and then adding two new precedence constraints
+  // Inserts intra-agent precedence edges around a newly inserted task.
+  // Precondition: `taskAssignments[taskPosition] == task` and taskPosition is
+  // the position in the current (already-updated) assignment order.
+  // Effect: if neighbors exist, replaces previousTask->nextTask with
+  // previousTask->task and task->nextTask.
   void insertIntraAgentPrecedenceConstraint(int task, int taskPosition) {
     const int assignmentSize = (int)taskAssignments.size();
     if (taskPosition < 0 || taskPosition >= assignmentSize) {
@@ -173,15 +182,19 @@ struct Agent {
       }
     }
 
-    intraPrecedenceConstraints.erase(
-        std::remove_if(intraPrecedenceConstraints.begin(),
-                       intraPrecedenceConstraints.end(),
-                       [task, previousTask, nextTask](pair<int, int> x) {
-                         return (
-                             (x.first == previousTask && x.second == task) ||
-                             (x.first == task && x.second == nextTask));
-                       }),
-        intraPrecedenceConstraints.end());
+    if (previousTask >= 0 || nextTask >= 0) {
+      intraPrecedenceConstraints.erase(
+          std::remove_if(intraPrecedenceConstraints.begin(),
+                         intraPrecedenceConstraints.end(),
+                         [task, previousTask, nextTask](pair<int, int> x) {
+                           return (
+                               (previousTask >= 0 && x.first == previousTask &&
+                                x.second == task) ||
+                               (nextTask >= 0 && x.first == task &&
+                                x.second == nextTask));
+                         }),
+          intraPrecedenceConstraints.end());
+    }
 
     if (previousTask >= 0 && nextTask >= 0) {
       insertPrecedenceConstraint(previousTask, nextTask);
@@ -328,6 +341,12 @@ struct Regret {
 
 struct TaskRegretPacket {
   int task, agent, taskPosition, earliestTimestep;
+};
+
+struct TaskBaselineMetrics {
+  double oldExposure = 0.0;
+  int oldWait = 0;
+  bool valid = false;
 };
 
 struct Conflicts {
@@ -547,8 +566,8 @@ struct RelatedTasks {
   // Priority queue for relatedness
   struct RelationCompare {
     // Mininimum heap comparator
-    bool operator()(const pair<int, RelatedTasks>& task1,
-                    const pair<int, RelatedTasks>& task2) {
+    bool operator()(const pair<double, RelatedTasks>& task1,
+                    const pair<double, RelatedTasks>& task2) {
       return task1.first > task2.first;
     }
   };
@@ -562,8 +581,8 @@ struct RelatedTasks {
   };
 };
 
-using pqRelatedTasks = std::priority_queue<pair<int, RelatedTasks>,
-                                           vector<pair<int, RelatedTasks>>,
+using pqRelatedTasks = std::priority_queue<pair<double, RelatedTasks>,
+                                           vector<pair<double, RelatedTasks>>,
                                            RelatedTasks::RelationCompare>;
 
 struct ALNS {
@@ -707,8 +726,8 @@ class LNS {
   struct MarketState : LNSParams::Market {
     // Runtime-only market state. Configuration fields are inherited from
     // LNSParams::Market to avoid duplicated declarations.
-    int acceptedCounter = 0;
-    int updateCounter = 0;
+    int64_t acceptedCounter = 0;
+    int64_t updateCounter = 0;
     double bestPressure = std::numeric_limits<double>::infinity();
     double bestWait = std::numeric_limits<double>::infinity();
 
@@ -746,6 +765,11 @@ class LNS {
 
   vector<pair<int, int>> buildFullPrecedenceConstraints(
       bool includeIntraConstraints = true) const;
+  void computeTaskScheduleMetricsFromIndex(
+      const vector<int>& taskPosByTask, vector<TaskScheduleMetrics>& perTask,
+      vector<double>* blockedWaitSum = nullptr) const;
+  double computeSolutionPrecedenceWaitFromIndex(
+      const vector<int>& taskPosByTask) const;
   AgentTaskPath runLowLevelSearch(SingleAgentSolver& solver,
                                   ConstraintTable& constraintTable,
                                   int startTime, int stage, int lowerBound);
@@ -765,6 +789,9 @@ class LNS {
   uint64_t lowLevelCalls_ = 0;
   uint64_t lowLevelExpanded_ = 0;
   uint64_t lowLevelGenerated_ = 0;
+  double initialTemperature_ = 0.0;
+  double maxTemperature_ = std::numeric_limits<double>::infinity();
+  double greatDelugeDecay_ = 0.0;
   double timeLimit_, initialSolutionRuntime_ = 0, temperature_ = 100,
                      coolingCoefficient_ = 0.99975,
                      heatingCoefficient_ = 1.00025, tolerance_ = 5,
@@ -791,7 +818,7 @@ class LNS {
   bool buildGreedySolutionPrecedenceOnly();
   bool buildGreedySolutionWithMAPFPC(const string& variant);
 
-  void prepareNextIteration();
+  bool prepareNextIteration();
   void markResolved(int globalTask);
   // Patches the task paths of an agent such that the begin times and end times match up
   void patchAgentTaskPaths(int agent, int taskPosition);
@@ -801,6 +828,9 @@ class LNS {
   void addConflictingTask(int agent, int timestep, ConflictMap* out) const;
 
   void buildConstraintTable(ConstraintTable& constraintTable, int task);
+  void buildConstraintTable(
+      ConstraintTable& constraintTable, int task,
+      const vector<pair<int, int>>& precedenceConstraints);
 
   void buildConstraintTable(ConstraintTable& constraintTable,
                             TaskRegretPacket taskPacket, int taskLocation,
@@ -825,6 +855,7 @@ class LNS {
       vector<pair<int, int>>* precedenceConstraints,
       const vector<vector<int>>& baseAncestors,
       const vector<char>& baseTaskPresent,
+      const TaskBaselineMetrics& baselineMetrics,
       pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes);
 
   bool recomputeRegretsForTasks(const vector<int>& tasks);
@@ -848,6 +879,7 @@ class LNS {
       vector<vector<AgentTaskPath>>* agentTaskPaths,
       vector<vector<int>>* agentTaskAssignments,
       vector<pair<int, int>>* precedenceConstraints,
+      const TaskBaselineMetrics* baselineMetrics = nullptr,
       SingleAgentSolver* reusablePlanner = nullptr);
   bool insertBestRegretTask(TaskRegretPacket bestRegretPacket);
 
@@ -881,15 +913,14 @@ class LNS {
 
   void randomRemoval();
   void worstRemoval();
-  void conflictRemoval(std::optional<ConflictMap> potentialNeighborhood);
+  void conflictRemoval(const ConflictMap* potentialNeighborhood);
   void shawRemoval(int prioritySize);
   void precedenceWaitRemoval(
-      std::optional<ConflictMap> potentialNeighborhood = std::nullopt);
-  void lowSlackRemoval(
-      std::optional<ConflictMap> potentialNeighborhood = std::nullopt);
+      const ConflictMap* potentialNeighborhood = nullptr);
+  void lowSlackRemoval(const ConflictMap* potentialNeighborhood = nullptr);
   void marketTatonnementRemoval(
-      std::optional<ConflictMap> potentialNeighborhood = std::nullopt);
-  void alnsRemoval(std::optional<ConflictMap> potentialNeighborhood);
+      const ConflictMap* potentialNeighborhood = nullptr);
+  void alnsRemoval(const ConflictMap* potentialNeighborhood);
 
   bool simulatedAnnealing();
   bool thresholdAcceptance();

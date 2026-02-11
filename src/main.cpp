@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cmath>
 #include <boost/program_options.hpp>
 #include "common.hpp"
 #include "report_exporter.hpp"
@@ -21,7 +22,7 @@ int main(int argc, char** argv) {
 
   namespace po = boost::program_options;
   po::options_description desc("Allowed options");
-  desc.add_options()("help", "Produce help message");
+  desc.add_options()("help,h", "Produce help message");
   desc.add_options()("map,m", po::value<string>()->required(),
                      "Input file for map");
   desc.add_options()("agents,a", po::value<string>()->required(),
@@ -34,6 +35,10 @@ int main(int argc, char** argv) {
                      "Number of agents to plan for");
   desc.add_options()("taskNum,l", po::value<int>()->default_value(0),
                      "Number of tasks to plan for");
+  desc.add_options()(
+      "kivaStrictTaskIndices", po::bool_switch()->default_value(false),
+      "Reject out-of-range Kiva task endpoint indices instead of modulo"
+      " wrapping");
   desc.add_options()("neighborSize,n", po::value<int>()->default_value(8),
                      "Size of the neighborhood");
   desc.add_options()("maxIterations,i", po::value<int>()->default_value(0),
@@ -49,7 +54,7 @@ int main(int argc, char** argv) {
                      po::value<string>()->default_value("greedy"),
                      "Strategy for the initial solution");
   desc.add_options()(
-      "destroyHeuristic,h", po::value<string>()->default_value("conflict"),
+      "destroyHeuristic,H", po::value<string>()->default_value("conflict"),
       "Destroy heuristic to use for creating the LNS neighborhood");
   desc.add_options()("acceptanceCriteria,c",
                      po::value<string>()->default_value("SA"),
@@ -187,9 +192,34 @@ int main(int argc, char** argv) {
                        spec.description);
   }
 
+  // Backward compatibility: historically "-h <heuristic>" was used for
+  // destroy heuristic. We now reserve -h for help and remap legacy usage.
+  std::vector<std::string> normalizedArgs;
+  normalizedArgs.reserve((size_t)std::max(0, argc - 1));
+  for (int i = 1; i < argc; ++i) {
+    normalizedArgs.emplace_back(argv[i]);
+  }
+  bool usedLegacyDestroyHeuristicFlag = false;
+  for (size_t i = 0; i + 1 < normalizedArgs.size(); ++i) {
+    if (normalizedArgs[i] == "-h" && !normalizedArgs[i + 1].empty() &&
+        normalizedArgs[i + 1][0] != '-') {
+      normalizedArgs[i] = "--destroyHeuristic";
+      usedLegacyDestroyHeuristicFlag = true;
+    }
+  }
+
+  std::vector<const char*> parsedArgv;
+  parsedArgv.reserve(normalizedArgs.size() + 1);
+  parsedArgv.push_back(argv[0]);
+  for (const auto& arg : normalizedArgs) {
+    parsedArgv.push_back(arg.c_str());
+  }
+
   po::variables_map vm;
   try {
-    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::store(
+        po::parse_command_line((int)parsedArgv.size(), parsedArgv.data(), desc),
+        vm);
   } catch (const std::exception& e) {
     PLOGE << e.what() << "\n" << desc << "\n";
     return 1;
@@ -199,6 +229,10 @@ int main(int argc, char** argv) {
     plog::get()->setMaxSeverity(plog::debug);
     PLOGD << desc << "\n";
     return 0;
+  }
+  if (usedLegacyDestroyHeuristicFlag) {
+    PLOGW << "Using deprecated '-h <heuristic>' syntax for destroy heuristic. "
+             "Use '--destroyHeuristic' (or '-H') and reserve '-h' for help.\n";
   }
 
   try {
@@ -350,6 +384,7 @@ int main(int argc, char** argv) {
 
   const int agentNum = vm["agentNum"].as<int>();
   const int taskNum = vm["taskNum"].as<int>();
+  const bool kivaStrictTaskIndices = vm["kivaStrictTaskIndices"].as<bool>();
   const int neighborSize = vm["neighborSize"].as<int>();
   const int maxIterations = vm["maxIterations"].as<int>();
   const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
@@ -374,6 +409,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  const double cutoffTime = vm["cutoffTime"].as<double>();
+  if (!std::isfinite(cutoffTime) || cutoffTime < 0.0) {
+    PLOGE << "cutoffTime must be finite and non-negative\n";
+    return 1;
+  }
+  if (cutoffTime == 0.0) {
+    PLOGW << "cutoffTime is 0: planner will stop immediately after start\n";
+  }
+
   // Need to store the seed for debugging.
   unsigned int seed = vm["seed"].as<unsigned int>();
   if (seed == 0) {
@@ -393,7 +437,7 @@ int main(int argc, char** argv) {
   try {
     instancePtr = std::make_unique<Instance>(
         vm["map"].as<string>(), vm["agents"].as<string>(),
-        agentNum, taskNum);
+        agentNum, taskNum, kivaStrictTaskIndices);
   } catch (const std::exception& e) {
     PLOGE << "Initialization failed: " << e.what() << "\n";
     return 1;
@@ -425,7 +469,7 @@ int main(int argc, char** argv) {
 
   LNSParams parameters{};
   parameters.core.neighborhoodSize = neighborSize;
-  parameters.core.timeLimit = vm["cutoffTime"].as<double>();
+  parameters.core.timeLimit = cutoffTime;
   parameters.core.initialSolutionStrategy = initialSolutionStrategy;
   parameters.core.destroyHeuristic = destroyHeuristic;
   parameters.core.acceptanceCriteria = acceptanceCriteria;

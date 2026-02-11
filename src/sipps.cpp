@@ -187,7 +187,8 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
 
   auto emplaceNode = [&](SIPPSNode* parent, int location, int intervalId,
                          int timestep, int gVal) -> SIPPSNode* {
-    int hVal = max((*heuristic[stage])[location], holdingTime - timestep);
+    int hVal = max(getStageGoalDistance(stage, location),
+                   holdingTime - timestep);
     auto node = std::make_unique<SIPPSNode>();
     node->parent = parent;
     node->location = location;
@@ -220,6 +221,11 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     if (openHead->getFVal() > minFVal) {
       const int newMinFVal = openHead->getFVal();
       const int newLowerBound = max(lowerBound, newMinFVal);
+      if (newLowerBound == lowerBound) {
+        // No expansion of the focal bound; no node can become newly focal.
+        minFVal = newMinFVal;
+        return;
+      }
       for (SIPPSNode* node : openList) {
         if (!node->inFocal && node->inOpenlist &&
             node->getFVal() > lowerBound &&

@@ -3,23 +3,62 @@
 #include <cmath>
 #include <limits>
 
+namespace {
+vector<int> buildTaskPositionIndexByMappedAgent(const Solution& solution,
+                                                int taskCount) {
+  vector<int> taskToPosition(taskCount, UNASSIGNED);
+  for (int agent = 0; agent < solution.numOfAgents; agent++) {
+    const auto& assignments = solution.agents[agent].taskAssignments;
+    for (int pos = 0; pos < (int)assignments.size(); pos++) {
+      const int task = assignments[pos];
+      if (task < 0 || task >= taskCount) {
+        continue;
+      }
+      if (task >= (int)solution.taskAgentMap.size() ||
+          solution.taskAgentMap[task] != agent) {
+        continue;
+      }
+      if (taskToPosition[task] == UNASSIGNED) {
+        taskToPosition[task] = pos;
+      }
+    }
+  }
+  return taskToPosition;
+}
+}  // namespace
+
 bool LNS::simulatedAnnealing() {
 
   bool accepted = false;
   // Guard against degenerate temperatures to avoid NaN/inf behavior.
   if (!std::isfinite(temperature_) ||
       temperature_ <= std::numeric_limits<double>::epsilon()) {
+    constexpr double kMinTemperature = 1e-9;
+    const double fallbackTemperature =
+        max(kMinTemperature, max(initialTemperature_, 1.0));
+    temperature_ = fallbackTemperature;
     accepted = solution_.utility <= previousSolution_.utility;
     if (!accepted) {
       solution_ = previousSolution_;
       PLOGD << "Rejecting this solution!\n";
     }
+    temperature_ = max(kMinTemperature, temperature_ * coolingCoefficient_);
+    return accepted;
+  }
+
+  // Better (or equal) utility is always accepted.
+  const double utilityDelta = solution_.utility - previousSolution_.utility;
+  if (utilityDelta <= 0.0) {
+    accepted = true;
     temperature_ *= coolingCoefficient_;
     return accepted;
   }
 
-  const double acceptanceProb =
-      exp((previousSolution_.utility - solution_.utility) / temperature_);
+  // For worse moves, compute exp(delta/T) with a clamp to avoid under/overflow.
+  const double exponent = (previousSolution_.utility - solution_.utility) /
+                          temperature_;  // strictly negative here
+  constexpr double kMinExpArg = -700.0;
+  const double acceptanceProb = std::exp(std::max(exponent, kMinExpArg));
   std::uniform_real_distribution<double> unit01(0.0, 1.0);
   if (unit01(rng_) < acceptanceProb) {
     // Use simulated annealing to potentially accept worse solutions!
@@ -58,7 +97,8 @@ bool LNS::oldBachelorsAcceptance() {
   } else {
     // Reject this solution and increase the temperature
     solution_ = previousSolution_;
-    temperature_ *= heatingCoefficient_;
+    const double reheated = temperature_ * heatingCoefficient_;
+    temperature_ = std::min(reheated, maxTemperature_);
     PLOGD << "Rejecting this solution\n";
   }
   return accepted;
@@ -68,9 +108,9 @@ bool LNS::greatDelugeAlgorithm() {
 
   bool accepted = false;
   if (solution_.utility - previousSolution_.utility < temperature_) {
-    // This temperature acts as a water level and we want to accept solutions that fall within some water level and corresponding increase it further for future iterations
-    // Since we are effectively doing a minimization problem we need to decrease the temperature ONLY if we accept
-    temperature_ *= coolingCoefficient_;
+    // Additive water-level decay (canonical Great Deluge shape) keeps cooling
+    // progression stable across runtime and avoids multiplicative stalls.
+    temperature_ = max(0.0, temperature_ - greatDelugeDecay_);
     accepted = true;
   } else {
     // Reject this solution but dont change the temperature'
@@ -126,10 +166,23 @@ bool LNS::run() {
     }
   }
 
-  iterationStats.emplace_back(initialSolutionRuntime_, initialSolutionStrategy,
-                              instance_.getAgentNum(), instance_.getTasksNum(),
-                              solution_.sumOfCosts, feasibleSolutionUpdated,
-                              bestSolutionYet);
+  constexpr size_t kMaxStoredIterationStatsUnbounded = 200000;
+  auto appendIterationStat = [&](const IterationStats& stat) {
+    if (numOfIterations_ <= 0 &&
+        iterationStats.size() >= kMaxStoredIterationStatsUnbounded &&
+        !iterationStats.empty()) {
+      // Bound memory in unbounded-iteration mode while preserving
+      // "latest-iteration" semantics used by ALNS updates.
+      iterationStats.back() = stat;
+      return;
+    }
+    iterationStats.push_back(stat);
+  };
+
+  appendIterationStat(IterationStats(
+      initialSolutionRuntime_, initialSolutionStrategy, instance_.getAgentNum(),
+      instance_.getTasksNum(), solution_.sumOfCosts, feasibleSolutionUpdated,
+      bestSolutionYet));
 
   ConflictMap oldNeighborhood;
 
@@ -147,9 +200,24 @@ bool LNS::run() {
   solution_.utility = metrics.computeMovingMetrics(
       (int)potentialNeighborhood.size(), solution_.sumOfCosts);
 
-  temperature_ = solution_.utility * (tolerance_ / 100);
+  constexpr double kMinTemperature = 1e-9;
+  temperature_ = solution_.utility * (tolerance_ / 100.0);
+  if (!std::isfinite(temperature_) || temperature_ <= kMinTemperature) {
+    const double utilityScale = max(std::abs(solution_.utility), 1.0);
+    temperature_ = max(kMinTemperature, utilityScale * (tolerance_ / 100.0));
+  }
   if (acceptanceCriteria == "SA") {
     temperature_ /= log(2);
+  }
+  initialTemperature_ = temperature_;
+  maxTemperature_ = max(initialTemperature_, 1.0) * 1000.0;
+  if (numOfIterations_ > 0) {
+    greatDelugeDecay_ = initialTemperature_ / max(1, numOfIterations_);
+  } else {
+    greatDelugeDecay_ = initialTemperature_ / 1000.0;
+  }
+  if (!std::isfinite(greatDelugeDecay_) || greatDelugeDecay_ < 0.0) {
+    greatDelugeDecay_ = 0.0;
   }
 
   previousSolution_ = solution_;
@@ -167,7 +235,7 @@ bool LNS::run() {
 
     // These functions populate the LNS neighborhoods' removedTask parameter
     if (destroyHeuristic == "conflict") {
-      conflictRemoval(std::make_optional(potentialNeighborhood));
+      conflictRemoval(&potentialNeighborhood);
     } else if (destroyHeuristic == "worst") {
       worstRemoval();
     } else if (destroyHeuristic == "random") {
@@ -175,13 +243,13 @@ bool LNS::run() {
     } else if (destroyHeuristic == "shaw") {
       shawRemoval(neighborSize_ * 3);
     } else if (destroyHeuristic == "precedence_wait") {
-      precedenceWaitRemoval(std::make_optional(potentialNeighborhood));
+      precedenceWaitRemoval(&potentialNeighborhood);
     } else if (destroyHeuristic == "low_slack") {
-      lowSlackRemoval(std::make_optional(potentialNeighborhood));
+      lowSlackRemoval(&potentialNeighborhood);
     } else if (destroyHeuristic == "market_tatonnement") {
-      marketTatonnementRemoval(std::make_optional(potentialNeighborhood));
+      marketTatonnementRemoval(&potentialNeighborhood);
     } else if (destroyHeuristic == "alns") {
-      alnsRemoval(std::make_optional(potentialNeighborhood));
+      alnsRemoval(&potentialNeighborhood);
       alnsHeuristicForIter = adaptiveLNS_.recentDestroyHeuristic;
       if (alnsHeuristicForIter >= 0 &&
           alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
@@ -193,6 +261,7 @@ bool LNS::run() {
     }
 
     oldNeighborhood = lnsNeighborhood_.removedTasks;
+    IterationQuality quality = IterationQuality::none;
 
     PLOGD << "Printing neighborhood conflict tasks\n";
     PLOGD << "Size: " << lnsNeighborhood_.removedTasks.size() << "\n";
@@ -200,7 +269,21 @@ bool LNS::run() {
       PLOGD << "Conflicted Task : " << conflictTask.task << "\n";
     }
 
-    prepareNextIteration();
+    if (!prepareNextIteration()) {
+      if (alnsHeuristicForIter >= 0 &&
+          alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
+        adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
+      }
+      solution_ = previousSolution_;
+      feasibleSolutionUpdated = false;
+      quality = IterationQuality::couldNotFind;
+      runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
+      appendIterationStat(IterationStats(
+          runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
+          solution_.sumOfCosts, feasibleSolutionUpdated, quality));
+      maybeUpdateMarketState(false);
+      continue;
+    }
 
     // This needs to happen after prepare iteration since we updated the conflictedTasks variable in the prepare next iteration function
     for (const auto& [_, conflictedTask] : lnsNeighborhood_.removedTasks) {
@@ -216,6 +299,10 @@ bool LNS::run() {
     // Default behavior recomputes regrets from scratch every commit.
     // Optional incremental mode recomputes regrets only for a dirty subset.
     lnsNeighborhood_.regretMaxHeap.clear();
+    std::fill(regretBestOption_.begin(), regretBestOption_.end(),
+              std::make_pair(UNASSIGNED, -1));
+    std::fill(regretSecondBestOption_.begin(), regretSecondBestOption_.end(),
+              std::make_pair(UNASSIGNED, -1));
     bool repairFailed = false;
     regretEvalStatsCurrent_.reset();
     {
@@ -328,8 +415,6 @@ bool LNS::run() {
       // Stats are collected and printed in a dedicated summary section.
     }
 
-    IterationQuality quality = IterationQuality::none;
-
     // If we could not successfully compute the regrets and commit to all the tasks in the neighborhood then we need to reset this neighborhood!
     if (repairFailed || !lnsNeighborhood_.removedTasks.empty()) {
       if (alnsHeuristicForIter >= 0 &&
@@ -341,9 +426,9 @@ bool LNS::run() {
       feasibleSolutionUpdated = false;
       quality = IterationQuality::couldNotFind;
       runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
-      iterationStats.emplace_back(runtime, "LNS", instance_.getAgentNum(),
-                                  instance_.getTasksNum(), solution_.sumOfCosts,
-                                  feasibleSolutionUpdated, quality);
+      appendIterationStat(IterationStats(
+          runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
+          solution_.sumOfCosts, feasibleSolutionUpdated, quality));
       // Skip everything after this statement
       PLOGD << "Could not find paths for the neighborhood! Attempting a new "
                "neighborhood computation\n";
@@ -418,17 +503,29 @@ bool LNS::run() {
       feasibleSolutionUpdated = false;
       quality = IterationQuality::couldNotFind;
       runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
-      iterationStats.emplace_back(runtime, "LNS", instance_.getAgentNum(),
-                                  instance_.getTasksNum(), solution_.sumOfCosts,
-                                  feasibleSolutionUpdated, quality);
+      appendIterationStat(IterationStats(
+          runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
+          solution_.sumOfCosts, feasibleSolutionUpdated, quality));
       maybeUpdateMarketState(false);
       continue;
     }
 
     // Compute the updated sum of costs
-    solution_.sumOfCosts = 0;
+    long long recomputedSoc = 0;
     for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-      solution_.sumOfCosts += solution_.agents[agent].path.endTimeOrZero();
+      recomputedSoc +=
+          static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
+    }
+    if (recomputedSoc > std::numeric_limits<int>::max()) {
+      PLOGW << "LNS::run: sum of costs overflowed int during recomputation;"
+               " clamping to INT_MAX\n";
+      solution_.sumOfCosts = std::numeric_limits<int>::max();
+    } else if (recomputedSoc < std::numeric_limits<int>::min()) {
+      PLOGW << "LNS::run: sum of costs underflowed int during recomputation;"
+               " clamping to INT_MIN\n";
+      solution_.sumOfCosts = std::numeric_limits<int>::min();
+    } else {
+      solution_.sumOfCosts = static_cast<int>(recomputedSoc);
     }
 
     PLOGD << "Old sum of costs = " << previousSolution_.sumOfCosts << "\n";
@@ -471,11 +568,22 @@ bool LNS::run() {
         market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
     bool accepted = false;
     bool guardRejected = false;
+    auto advanceTemperatureOnGuardReject = [&]() {
+      if (acceptanceCriteria == "SA" || acceptanceCriteria == "TA") {
+        temperature_ *= coolingCoefficient_;
+      } else if (acceptanceCriteria == "OBA") {
+        const double reheated = temperature_ * heatingCoefficient_;
+        temperature_ = std::min(reheated, maxTemperature_);
+      } else if (acceptanceCriteria == "GDA") {
+        temperature_ = max(0.0, temperature_ - greatDelugeDecay_);
+      }
+    };
     if (market_.heuristics && market_.acceptanceGuards &&
         !passMarketAcceptanceGuards(candidatePressure, candidateWait)) {
       solution_ = previousSolution_;
       accepted = false;
       guardRejected = true;
+      advanceTemperatureOnGuardReject();
       PLOGD << "Rejecting this solution due to market acceptance guards\n";
     } else {
       if (acceptanceCriteria == "SA") {
@@ -542,17 +650,21 @@ bool LNS::run() {
     runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
     double costToLog = (feasibleSolutionUpdated) ? incumbentSolution_.sumOfCosts
                                                  : solution_.sumOfCosts;
-    iterationStats.emplace_back(runtime, "LNS", instance_.getAgentNum(),
-                                instance_.getTasksNum(), costToLog,
-                                feasibleSolutionUpdated, quality);
+    appendIterationStat(IterationStats(
+        runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
+        costToLog, feasibleSolutionUpdated, quality));
   }
 
   // printPaths();
   return !incumbentSolution_.agentPaths.empty();
 }
 
-void LNS::prepareNextIteration() {
+bool LNS::prepareNextIteration() {
   PLOGI << "Preparing the solution object for the next iteration\n";
+
+  const int taskCount = instance_.getTasksNum();
+  const vector<int> taskToPositionBefore =
+      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
 
   // Find the tasks that are following the earliest conflicting task as their paths need to be invalidated
   const auto& successors = instance_.getSuccessorsRef();
@@ -564,17 +676,17 @@ void LNS::prepareNextIteration() {
   for (const auto& [_, conflict] : lnsNeighborhood_.removedTasks) {
     originalRemovedTasks.push_back(conflict);
   }
-  vector<char> visitedSuccessor(instance_.getTasksNum(), 0);
+  vector<char> visitedSuccessor(taskCount, 0);
   stack<int> successorStack;
   for (const Conflicts& conflictTask : originalRemovedTasks) {
-    if (conflictTask.task >= 0 && conflictTask.task < instance_.getTasksNum()) {
+    if (conflictTask.task >= 0 && conflictTask.task < taskCount) {
       successorStack.push(conflictTask.task);
     }
   }
   while (!successorStack.empty()) {
     const int successorTask = successorStack.top();
     successorStack.pop();
-    if (successorTask < 0 || successorTask >= instance_.getTasksNum() ||
+    if (successorTask < 0 || successorTask >= taskCount ||
         visitedSuccessor[successorTask]) {
       continue;
     }
@@ -587,7 +699,10 @@ void LNS::prepareNextIteration() {
             : UNASSIGNED;
     if (successorAgent != UNASSIGNED) {
       const int successorTaskPosition =
-          solution_.getLocalTaskIndex(successorAgent, successorTask);
+          (successorTask >= 0 &&
+           successorTask < (int)taskToPositionBefore.size())
+              ? taskToPositionBefore[successorTask]
+              : UNASSIGNED;
       if (successorTaskPosition != UNASSIGNED) {
         lnsNeighborhood_.removedTasks.emplace(
             successorTask,
@@ -596,7 +711,7 @@ void LNS::prepareNextIteration() {
     }
 
     for (int nextTask : successors[successorTask]) {
-      if (nextTask >= 0 && nextTask < instance_.getTasksNum() &&
+      if (nextTask >= 0 && nextTask < taskCount &&
           !visitedSuccessor[nextTask]) {
         successorStack.push(nextTask);
       }
@@ -677,6 +792,9 @@ void LNS::prepareNextIteration() {
     solution_.agents[affAgent].pathPlanner->setGoalLocations(taskLocations);
   }
 
+  const vector<int> taskToPositionAfter =
+      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+
   lnsNeighborhood_.patchedTasks = tasksToFix;
 
   // Find the paths for the tasks whose previous tasks were removed
@@ -689,15 +807,17 @@ void LNS::prepareNextIteration() {
       if (agent == UNASSIGNED) {
         PLOGE << "prepareNextIteration: patched task " << task
               << " is not assigned to any agent\n";
-        continue;
+        return false;
       }
-      int taskPosition = solution_.getLocalTaskIndex(agent, task);
+      int taskPosition = (task >= 0 && task < (int)taskToPositionAfter.size())
+                             ? taskToPositionAfter[task]
+                             : UNASSIGNED;
       const auto& agentTasks = solution_.getAgentGlobalTasks(agent);
       if (taskPosition < 0 || taskPosition >= (int)agentTasks.size() ||
           taskPosition >= (int)solution_.agents[agent].taskPaths.size()) {
         PLOGE << "prepareNextIteration: invalid task position " << taskPosition
               << " for task " << task << " (agent " << agent << ")\n";
-        continue;
+        return false;
       }
 
       if (taskPosition != 0) {
@@ -715,7 +835,7 @@ void LNS::prepareNextIteration() {
         PLOGE << "prepareNextIteration: path finding failed for patched task "
               << task << " (agent " << agent << ", position " << taskPosition
               << ")\n";
-        continue;
+        return false;
       }
       assert(!path.empty());
       solution_.agents[agent].taskPaths[taskPosition] = path;
@@ -724,4 +844,5 @@ void LNS::prepareNextIteration() {
       patchAgentTaskPaths(agent, taskPosition);
     }
   }
+  return true;
 }

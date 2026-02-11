@@ -25,8 +25,11 @@ inline bool parseNextInt(Iter& it, const Iter& end, int& out) {
     return false;
   }
   const std::string token = *it;
+  if (!parseIntStrict(token, out)) {
+    return false;
+  }
   ++it;
-  return parseIntStrict(token, out);
+  return true;
 }
 
 }  // namespace parse_helpers

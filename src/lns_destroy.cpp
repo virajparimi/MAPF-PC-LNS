@@ -1,6 +1,30 @@
 #include "lns.hpp"
 #include "utils.hpp"
 
+namespace {
+vector<int> buildTaskPositionIndexByMappedAgent(const Solution& solution,
+                                                int taskCount) {
+  vector<int> taskToPosition(taskCount, UNASSIGNED);
+  for (int agent = 0; agent < solution.numOfAgents; agent++) {
+    const auto& assignments = solution.agents[agent].taskAssignments;
+    for (int pos = 0; pos < (int)assignments.size(); pos++) {
+      const int task = assignments[pos];
+      if (task < 0 || task >= taskCount) {
+        continue;
+      }
+      if (task >= (int)solution.taskAgentMap.size() ||
+          solution.taskAgentMap[task] != agent) {
+        continue;
+      }
+      if (taskToPosition[task] == UNASSIGNED) {
+        taskToPosition[task] = pos;
+      }
+    }
+  }
+  return taskToPosition;
+}
+}  // namespace
+
 void LNS::clearNeighborhood() {
   lnsNeighborhood_.patchedTasks.clear();
   lnsNeighborhood_.regretMaxHeap.clear();
@@ -10,8 +34,7 @@ void LNS::clearNeighborhood() {
   lnsNeighborhood_.immutableRemovedTasks.clear();
 }
 
-void LNS::marketTatonnementRemoval(
-    std::optional<ConflictMap> potentialNeighborhood) {
+void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
   PLOGD << "Using market tatonnement removal\n";
 
   clearNeighborhood();
@@ -100,11 +123,11 @@ void LNS::marketTatonnementRemoval(
     return true;
   };
 
-  if (potentialNeighborhood.has_value() && !potentialNeighborhood->empty() &&
+  if (potentialNeighborhood != nullptr && !potentialNeighborhood->empty() &&
       incumbentSolution_.agentPaths.empty()) {
     const int quota = max(1, cappedNeighborSize / 2);
     const ConflictMap conflictSeeds =
-        extractNConflicts(quota, potentialNeighborhood.value());
+        extractNConflicts(quota, *potentialNeighborhood);
     for (const auto& [_, conflict] : conflictSeeds) {
       if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
         break;
@@ -246,6 +269,8 @@ void LNS::randomRemoval() {
   // Sample tasks uniformly without replacement (partial Fisher-Yates),
   // avoiding repeated draws/duplicate checks.
   const int taskCount = instance_.getTasksNum();
+  const vector<int> taskToPosition =
+      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   const int numToRemove = (neighborSize_ < taskCount) ? neighborSize_ : taskCount;
   vector<int> taskIds(taskCount);
   std::iota(taskIds.begin(), taskIds.end(), 0);
@@ -263,7 +288,9 @@ void LNS::randomRemoval() {
       continue;
     }
     const int randomTaskPosition =
-        solution_.getLocalTaskIndex(randomTaskAgent, randomTask);
+        (randomTask >= 0 && randomTask < (int)taskToPosition.size())
+            ? taskToPosition[randomTask]
+            : UNASSIGNED;
     if (randomTaskPosition == UNASSIGNED) {
       continue;
     }
@@ -273,7 +300,7 @@ void LNS::randomRemoval() {
   }
 }
 
-void LNS::conflictRemoval(std::optional<ConflictMap> potentialNeighborhood) {
+void LNS::conflictRemoval(const ConflictMap* potentialNeighborhood) {
 
   PLOGD << "Using conflict-based removal\n";
 
@@ -281,42 +308,61 @@ void LNS::conflictRemoval(std::optional<ConflictMap> potentialNeighborhood) {
   // thing that any removal operator must do!
   clearNeighborhood();
 
-  // Conflict removal operator should always be sent this argument!
-  assert(potentialNeighborhood.has_value());
+  if (potentialNeighborhood == nullptr) {
+    PLOGE << "conflictRemoval requires a non-null conflict neighborhood\n";
+    return;
+  }
 
   // Extract N conflicts first. This can return N tasks where N <= neighborhood size
   lnsNeighborhood_.removedTasks =
-      extractNConflicts(neighborSize_, potentialNeighborhood.value());
+      extractNConflicts(neighborSize_, *potentialNeighborhood);
 
   const int taskCount = instance_.getTasksNum();
+  const vector<int> taskToPosition =
+      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   const int cappedNeighborSize = min(neighborSize_, taskCount);
   if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
-    // In this case we have less conflicts than the neighborhood size of the LNS
-    // so we need to augment this list with more tasks using random removal.
-    if (taskCount <= 0) {
-      return;
-    }
-    std::uniform_int_distribution<int> distribution(0, taskCount - 1);
-    while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
-      const int randomTask = distribution(rng_);
-      if (lnsNeighborhood_.removedTasks.count(randomTask) != 0) {
+    // Augment conflicts without unbounded rejection-sampling loops.
+    vector<int> candidates;
+    candidates.reserve(taskCount);
+    for (int task = 0; task < taskCount; task++) {
+      if (lnsNeighborhood_.removedTasks.count(task) != 0) {
         continue;
       }
-      const int randomTaskAgent =
-          (randomTask >= 0 && randomTask < (int)solution_.taskAgentMap.size())
-              ? solution_.taskAgentMap[randomTask]
+      const int taskAgent =
+          (task >= 0 && task < (int)solution_.taskAgentMap.size())
+              ? solution_.taskAgentMap[task]
               : UNASSIGNED;
-      if (randomTaskAgent == UNASSIGNED) {
+      if (taskAgent == UNASSIGNED) {
         continue;
       }
-      const int randomTaskPosition =
-          solution_.getLocalTaskIndex(randomTaskAgent, randomTask);
-      if (randomTaskPosition == UNASSIGNED) {
+      const int taskPosition =
+          (task >= 0 && task < (int)taskToPosition.size()) ? taskToPosition[task]
+                                                           : UNASSIGNED;
+      if (taskPosition == UNASSIGNED) {
         continue;
       }
-      lnsNeighborhood_.removedTasks.emplace(
-          randomTask,
-          Conflicts(randomTask, randomTaskAgent, randomTaskPosition));
+      candidates.push_back(task);
+    }
+    std::shuffle(candidates.begin(), candidates.end(), rng_);
+    for (int task : candidates) {
+      if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
+        break;
+      }
+      const int taskAgent = solution_.taskAgentMap[task];
+      const int taskPosition =
+          (task >= 0 && task < (int)taskToPosition.size()) ? taskToPosition[task]
+                                                           : UNASSIGNED;
+      if (taskPosition == UNASSIGNED) {
+        continue;
+      }
+      lnsNeighborhood_.removedTasks.emplace(task,
+                                            Conflicts(task, taskAgent, taskPosition));
+    }
+    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+      PLOGW << "conflictRemoval: could only remove "
+            << lnsNeighborhood_.removedTasks.size() << " out of requested "
+            << cappedNeighborSize << " tasks\n";
     }
   }
   // The else case should not happen since the 'extractNConflict' will never return more than neighborhood size set
@@ -331,6 +377,8 @@ void LNS::worstRemoval() {
   clearNeighborhood();
 
   const int taskCount = instance_.getTasksNum();
+  const vector<int> taskToPosition =
+      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   const int cappedNeighborSize = min(neighborSize_, taskCount);
   // Maintain a priority queue of (key, value) where key is the path length of a task and the value is the task. We need to do a reverse way to avoid making our own comparator
   ppq worstTasksOrder;
@@ -342,7 +390,9 @@ void LNS::worstRemoval() {
     if (taskAgent == UNASSIGNED) {
       continue;
     }
-    int taskPosition = solution_.getLocalTaskIndex(taskAgent, task);
+    int taskPosition = (task >= 0 && task < (int)taskToPosition.size())
+                           ? taskToPosition[task]
+                           : UNASSIGNED;
     if (taskPosition == UNASSIGNED) {
       continue;
     }
@@ -363,8 +413,10 @@ void LNS::worstRemoval() {
       worstTasksOrder.pop();
       continue;
     }
-    int worstTaskPosition =
-        solution_.getLocalTaskIndex(worstTaskAgent, worstTask);
+    int worstTaskPosition = (worstTask >= 0 &&
+                             worstTask < (int)taskToPosition.size())
+                                ? taskToPosition[worstTask]
+                                : UNASSIGNED;
     if (worstTaskPosition == UNASSIGNED) {
       worstTasksOrder.pop();
       continue;
@@ -398,6 +450,8 @@ void LNS::shawRemoval(int prioritySize) {
                                                   instance_.getTasksNum() - 1);
 
   const int taskCount = instance_.getTasksNum();
+  const vector<int> taskToPosition =
+      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   // Sample a random task and remove it!
   int randomTask = -1;
   int randomTaskAgent = UNASSIGNED;
@@ -414,7 +468,9 @@ void LNS::shawRemoval(int prioritySize) {
     randomTask = candidate;
     randomTaskAgent = candidateAgent;
     randomTaskPosition =
-        solution_.getLocalTaskIndex(randomTaskAgent, randomTask);
+        (randomTask >= 0 && randomTask < (int)taskToPosition.size())
+            ? taskToPosition[randomTask]
+            : UNASSIGNED;
     if (randomTaskPosition == UNASSIGNED) {
       randomTask = -1;
       continue;
@@ -462,7 +518,9 @@ void LNS::shawRemoval(int prioritySize) {
       return;
     }
     const int relatedTaskPosition =
-        solution_.getLocalTaskIndex(relatedTaskAgent, relatedTask);
+        (relatedTask >= 0 && relatedTask < (int)taskToPosition.size())
+            ? taskToPosition[relatedTask]
+            : UNASSIGNED;
     if (relatedTaskPosition == UNASSIGNED) {
       return;
     }
@@ -483,9 +541,9 @@ void LNS::shawRemoval(int prioritySize) {
     // Compute the relatedness (smaller => more related).
     const int temporalDiff =
         abs(randomTaskST - relatedTaskST) + abs(randomTaskET - relatedTaskET);
-    const int relatedness =
-        (int)(shawDistanceWeight_ * relatedManhattanDistance +
-              shawTemporalWeight_ * temporalDiff);
+    const double relatedness =
+        shawDistanceWeight_ * relatedManhattanDistance +
+        shawTemporalWeight_ * temporalDiff;
 
     // Store information
     RelatedTasks relatedToRandomTask(relatedTask, relatedTaskAgent,
@@ -550,7 +608,9 @@ void LNS::shawRemoval(int prioritySize) {
     if (agent == UNASSIGNED) {
       continue;
     }
-    const int pos = solution_.getLocalTaskIndex(agent, t);
+    const int pos = (t >= 0 && t < (int)taskToPosition.size())
+                        ? taskToPosition[t]
+                        : UNASSIGNED;
     if (pos == UNASSIGNED) {
       continue;
     }
@@ -571,7 +631,9 @@ void LNS::shawRemoval(int prioritySize) {
       if (agent == UNASSIGNED) {
         continue;
       }
-      const int pos = solution_.getLocalTaskIndex(agent, task);
+      const int pos = (task >= 0 && task < (int)taskToPosition.size())
+                          ? taskToPosition[task]
+                          : UNASSIGNED;
       if (pos == UNASSIGNED) {
         continue;
       }
@@ -584,8 +646,7 @@ void LNS::shawRemoval(int prioritySize) {
   }
 }
 
-void LNS::precedenceWaitRemoval(
-    std::optional<ConflictMap> potentialNeighborhood) {
+void LNS::precedenceWaitRemoval(const ConflictMap* potentialNeighborhood) {
   PLOGD << "Using precedence-wait removal\n";
 
   // Clear old information about the LNS neighborhood. This should be the
@@ -722,14 +783,14 @@ void LNS::precedenceWaitRemoval(
   // If the current solution is infeasible, keep a conflict-focused anchor so
   // this operator can still drive towards feasibility instead of only
   // precedence reshaping.
-  if (potentialNeighborhood.has_value() && !potentialNeighborhood->empty()) {
+  if (potentialNeighborhood != nullptr && !potentialNeighborhood->empty()) {
     // Bootstrap phase: until we find the first feasible incumbent, prioritize
     // conflict-driven neighborhoods to quickly recover feasibility.
     const bool noFeasibleIncumbent = incumbentSolution_.agentPaths.empty();
     const int conflictQuota =
         noFeasibleIncumbent ? cappedNeighborSize : max(1, cappedNeighborSize / 2);
     const ConflictMap conflictSeeds =
-        extractNConflicts(conflictQuota, potentialNeighborhood.value());
+        extractNConflicts(conflictQuota, *potentialNeighborhood);
     for (const auto& [_, conflict] : conflictSeeds) {
       if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
         break;
@@ -791,14 +852,21 @@ void LNS::precedenceWaitRemoval(
     addTask(task);
   }
 
-  // Pass 3: fallback random fill (defensive; should almost never trigger).
-  std::uniform_int_distribution<int> distribution(0, taskCount - 1);
-  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
-    addTask(distribution(rng_));
+  // Pass 3: deterministic finite fill.
+  for (int task = 0;
+       task < taskCount &&
+       (int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize;
+       task++) {
+    addTask(task);
+  }
+  if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    PLOGW << "precedenceWaitRemoval: could only remove "
+          << lnsNeighborhood_.removedTasks.size() << " out of requested "
+          << cappedNeighborSize << " tasks\n";
   }
 }
 
-void LNS::lowSlackRemoval(std::optional<ConflictMap> potentialNeighborhood) {
+void LNS::lowSlackRemoval(const ConflictMap* potentialNeighborhood) {
   PLOGD << "Using low-slack removal\n";
 
   // Clear old information about the LNS neighborhood. This should be the
@@ -915,10 +983,10 @@ void LNS::lowSlackRemoval(std::optional<ConflictMap> potentialNeighborhood) {
 
   // If the current solution is infeasible, keep a conflict-focused anchor so
   // this operator can recover feasibility.
-  if (potentialNeighborhood.has_value() && !potentialNeighborhood->empty()) {
+  if (potentialNeighborhood != nullptr && !potentialNeighborhood->empty()) {
     const int conflictQuota = max(1, cappedNeighborSize / 2);
     const ConflictMap conflictSeeds =
-        extractNConflicts(conflictQuota, potentialNeighborhood.value());
+        extractNConflicts(conflictQuota, *potentialNeighborhood);
     for (const auto& [_, conflict] : conflictSeeds) {
       if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
         break;
@@ -980,14 +1048,21 @@ void LNS::lowSlackRemoval(std::optional<ConflictMap> potentialNeighborhood) {
     addTask(task);
   }
 
-  // Pass 3: random fallback to guarantee neighborhood size.
-  std::uniform_int_distribution<int> distribution(0, taskCount - 1);
-  while ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
-    addTask(distribution(rng_));
+  // Pass 3: deterministic finite fill.
+  for (int task = 0;
+       task < taskCount &&
+       (int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize;
+       task++) {
+    addTask(task);
+  }
+  if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
+    PLOGW << "lowSlackRemoval: could only remove "
+          << lnsNeighborhood_.removedTasks.size() << " out of requested "
+          << cappedNeighborSize << " tasks\n";
   }
 }
 
-void LNS::alnsRemoval(std::optional<ConflictMap> potentialNeighborhood) {
+void LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
 
   // Clear old information about the LNS neighborhood. This should be the first
   // thing that any removal operator must do!
@@ -1078,19 +1153,19 @@ void LNS::alnsRemoval(std::optional<ConflictMap> potentialNeighborhood) {
       worstRemoval();
       break;
     case DestroyHeuristic::conflictRemoval:  // CONFLICT
-      conflictRemoval(std::move(potentialNeighborhood));
+      conflictRemoval(potentialNeighborhood);
       break;
     case DestroyHeuristic::shawRemoval:  // SHAW
       shawRemoval(neighborSize_ * 3);
       break;
     case DestroyHeuristic::precedenceWaitRemoval:  // PRECEDENCE WAIT
-      precedenceWaitRemoval(std::move(potentialNeighborhood));
+      precedenceWaitRemoval(potentialNeighborhood);
       break;
     case DestroyHeuristic::lowSlackRemoval:  // LOW SLACK
-      lowSlackRemoval(std::move(potentialNeighborhood));
+      lowSlackRemoval(potentialNeighborhood);
       break;
     case DestroyHeuristic::marketTatonnementRemoval:  // MARKET TATONNEMENT
-      marketTatonnementRemoval(std::move(potentialNeighborhood));
+      marketTatonnementRemoval(potentialNeighborhood);
       break;
     default:
       PLOGE << "Sampled a non-existent destroy heuristic: "

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <plog/Log.h>
 #include <memory>
 #include "astar.hpp"
@@ -59,6 +60,7 @@ class MultiLabelAStarNode : public LLNode {
 
 class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
  private:
+  int agent_ = UNASSIGNED;
   pairing_heap<MultiLabelAStarNode*,
                compare<MultiLabelAStarNode::OpenCompareNode>>
       openList_;
@@ -71,7 +73,7 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
   unordered_set<MultiLabelAStarNode*, MultiLabelAStarNode::NodeHasher,
                 MultiLabelAStarNode::CompareNode>
       allNodesTable_;
-  vector<std::unique_ptr<MultiLabelAStarNode>> allNodesStorage_;
+  std::deque<MultiLabelAStarNode> allNodesStorage_;
 
   void releaseNodes();
   void updateFocalList();
@@ -84,11 +86,15 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
  public:
   MultiLabelSpaceTimeAStar(const Instance& instance, int agent,
                            bool initializeHeuristics = true)
-      : SingleAgentSolver(instance, agent, initializeHeuristics) {}
+      : SingleAgentSolver(instance, agent, initializeHeuristics), agent_(agent) {}
   std::shared_ptr<SingleAgentSolver> cloneForAgent(int agent) const override {
     auto cloned =
         std::make_shared<MultiLabelSpaceTimeAStar>(instance, agent, false);
     copyPlannerStateTo(*cloned);
+    if (agent != agent_) {
+      // Cross-agent clone should keep the target agent's own goal model.
+      cloned->setGoalLocations(instance.getTaskLocationsRef());
+    }
     return cloned;
   }
   string getName() const override { return "MLAStar"; }

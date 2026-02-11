@@ -68,6 +68,8 @@ bool greedyTaskAssignment(const Instance* instance, Solution* solution) {
   }
 
   int taskCounter = 0;
+  bool warnedUnreachableTasks = false;
+  bool warnedOverflowTasks = false;
   while (taskCounter < numTasks) {
     int timestep, agent;
     tie(timestep, agent) = q.top();
@@ -85,9 +87,29 @@ bool greedyTaskAssignment(const Instance* instance, Solution* solution) {
 
     int bestTaskToService = -1, bestTaskToServiceTimestep = INT_MAX;
     for (int task : readyTasks) {
+      const int heuristicDistance = heuristics[task][lastLocationOfAgent];
+      if (heuristicDistance >= MAX_TIMESTEP) {
+        if (!warnedUnreachableTasks) {
+          PLOGW << "greedyTaskAssignment: encountered unreachable tasks"
+                   " (distance >= MAX_TIMESTEP); skipping those candidates.\n";
+          warnedUnreachableTasks = true;
+        }
+        continue;
+      }
       // Earliest completion for this task by this agent under current state.
-      const int earliestArrival =
-          agentLastTimesteps[agent] + heuristics[task][lastLocationOfAgent];
+      const long long earliestArrivalLL =
+          static_cast<long long>(agentLastTimesteps[agent]) +
+          static_cast<long long>(heuristicDistance);
+      if (earliestArrivalLL > static_cast<long long>(INT_MAX)) {
+        if (!warnedOverflowTasks) {
+          PLOGW << "greedyTaskAssignment: timestamp overflow risk detected"
+                   " while evaluating candidate tasks; skipping overflowing"
+                   " candidates.\n";
+          warnedOverflowTasks = true;
+        }
+        continue;
+      }
+      const int earliestArrival = static_cast<int>(earliestArrivalLL);
       const int taskTimestep = max(earliestArrival, releaseTime[task]);
       if (taskTimestep < bestTaskToServiceTimestep) {
         bestTaskToService = task;
@@ -96,8 +118,8 @@ bool greedyTaskAssignment(const Instance* instance, Solution* solution) {
     }
 
     if (bestTaskToService == -1) {
-      PLOGE << "greedyTaskAssignment: no feasible task found (cycle or invalid "
-               "dependencies?)\n";
+      PLOGE << "greedyTaskAssignment: no feasible task found among ready tasks"
+               " (possible cycle, unreachable tasks, or timestamp overflow)\n";
       return false;
     }
 

@@ -20,6 +20,9 @@ void MultiLabelSpaceTimeAStar::pushNode(MultiLabelAStarNode* node) {
 }
 
 MultiLabelAStarNode* MultiLabelSpaceTimeAStar::popNode() {
+  if (focalList_.empty()) {
+    return nullptr;
+  }
   numExpanded++;
   MultiLabelAStarNode* node = focalList_.top();
   focalList_.pop();
@@ -38,6 +41,11 @@ void MultiLabelSpaceTimeAStar::updateFocalList() {
     int newMinFVal = (int)openHead->getFVal();
     int newLowerBound = max(lowerBound_, newMinFVal);
     const bool repopulatingFromEmpty = focalList_.empty();
+    if (!repopulatingFromEmpty && newLowerBound == lowerBound_) {
+      // No f-range expansion; nothing can become newly focal.
+      minFVal_ = newMinFVal;
+      return;
+    }
     for (MultiLabelAStarNode* node : openList_) {
       const int fVal = node->getFVal();
       const bool newlyEligible =
@@ -92,11 +100,11 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
 
   // Use the precomputed grid heuristic (exact shortest-path distances) rather
   // than Manhattan distance to improve pruning while remaining admissible.
-  allNodesStorage_.push_back(std::make_unique<MultiLabelAStarNode>(
+  allNodesStorage_.emplace_back(
       nullptr, location, 0,
-      max((*heuristic[stage])[location], holdingTime - startTime),
-      startTime, 0, stage));
-  auto* start = allNodesStorage_.back().get();
+      max(getStageGoalDistance(stage, location), holdingTime - startTime),
+      startTime, 0, stage);
+  auto* start = &allNodesStorage_.back();
 
   // Ensure that the constraint table is built before we call this
   numGenerated++;
@@ -122,6 +130,12 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
     }
     updateFocalList();
     MultiLabelAStarNode* current = popNode();
+    if (current == nullptr) {
+      // Defensive guard: do not dereference an empty focal heap.
+      PLOGE << "MLA*: focal list empty while open list non-empty\n";
+      releaseNodes();
+      return path;
+    }
 
     if (current->location == goalLocations[stage] &&
         current->timestep >= holdingTime) {
@@ -153,14 +167,15 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
 
       const unsigned int currentStage = current->stage;
       const int successorGVal = current->gVal + 1;
-      const int successorHVal = max((*heuristic[currentStage])[successor],
-                                    holdingTime - nextTimestep);
+      const int successorHVal =
+          max(getStageGoalDistance(currentStage, successor),
+              holdingTime - nextTimestep);
       const int successorInternalConflicts = current->numOfConflicts;
       MultiLabelAStarNode probe(current, successor, successorGVal,
                                 successorHVal, nextTimestep,
                                 successorInternalConflicts, currentStage);
       probe.secondaryKey = -successorGVal;
-      probe.distanceToNext = (*heuristic[currentStage])[successor];
+      probe.distanceToNext = getStageGoalDistance(currentStage, successor);
 
       if (probe.stage == goalLocations.size() - 1 &&
           successor == goalLocations.back() &&
@@ -171,10 +186,10 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
 
       auto it = allNodesTable_.find(&probe);
       if (it == allNodesTable_.end()) {
-        allNodesStorage_.push_back(std::make_unique<MultiLabelAStarNode>(
+        allNodesStorage_.emplace_back(
             current, successor, successorGVal, successorHVal, nextTimestep,
-            successorInternalConflicts, currentStage));
-        auto* next = allNodesStorage_.back().get();
+            successorInternalConflicts, currentStage);
+        auto* next = &allNodesStorage_.back();
         next->waitAtGoal = probe.waitAtGoal;
         next->refreshTieBreaker();
         pushNode(next);
@@ -185,10 +200,26 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
       if ((*it)->getFVal() > probe.getFVal() ||
           ((*it)->getFVal() == probe.getFVal() &&
            LLNode::FocalCompareNode()((*it), &probe))) {
+        // allNodesTable_ hashes by (location,timestep,stage,waitAtGoal).
+        // Keep this key invariant unchanged for in-place updates.
+        assert((*it)->location == probe.location);
+        assert((*it)->timestep == probe.timestep);
+        assert((*it)->stage == probe.stage);
+        assert((*it)->waitAtGoal == probe.waitAtGoal);
         probe.inOpenlist = (*it)->inOpenlist;
         if (!(*it)->inOpenlist) {
-          static_cast<LLNode&>(*(*it)) = probe;
-          pushNode(*it);
+          // Do not mutate already-expanded nodes in-place; descendants may
+          // still reference the old parent chain. Replace the table entry with
+          // a fresh node for this state and re-open that node.
+          allNodesStorage_.emplace_back(
+              current, successor, successorGVal, successorHVal, nextTimestep,
+              successorInternalConflicts, currentStage);
+          auto* reopened = &allNodesStorage_.back();
+          reopened->waitAtGoal = probe.waitAtGoal;
+          reopened->refreshTieBreaker();
+          allNodesTable_.erase(it);
+          allNodesTable_.insert(reopened);
+          pushNode(reopened);
         } else {
           bool addToFocal = false, updateInFocal = false, updateOpen = false;
           const int oldFVal = (*it)->getFVal();
@@ -203,7 +234,7 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
           if (oldFVal > newFVal) {
             updateOpen = true;
           }
-          static_cast<LLNode&>(*(*it)) = probe;
+          (*it)->overwriteSearchStateFrom(probe);
           if (updateOpen) {
             openList_.increase((*it)->openHandle);
           }

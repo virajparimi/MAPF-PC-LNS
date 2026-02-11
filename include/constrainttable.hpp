@@ -7,23 +7,21 @@ class ConstraintTable {
 
  protected:
   struct IntervalBucket {
-    // Stored as sorted, merged [start, end) intervals after normalization.
-    // NOTE: const query APIs lazily normalize these buckets and therefore
-    // mutate this cache. ConstraintTable reads are not thread-safe.
-    mutable vector<pair<int, int>> intervals;
-    mutable bool normalized = true;
+    // Stored as sorted, merged [start, end) intervals.
+    vector<pair<int, int>> intervals;
   };
 
-  unordered_map<size_t, IntervalBucket>
+  unordered_map<uint64_t, IntervalBucket>
       constraintTable_;  // (key, value) - (location/edge key, occupied time intervals)
 
-  void normalizeIntervals(const IntervalBucket& bucket) const;
-  inline size_t getEdgeIndex(size_t from, size_t to) const {
+  void normalizeIntervals(IntervalBucket& bucket);
+  void insertMergedInterval(IntervalBucket& bucket, int tMin, int tMax);
+  inline uint64_t getEdgeIndex(size_t from, size_t to) const {
     // Key-space invariant:
     // vertex keys are [0, mapSize), edge keys are [mapSize, ...].
     // Requires from/to to be valid vertex ids.
     assert(from < mapSize && to < mapSize);
-    return (1 + from) * mapSize + to;
+    return (uint64_t)(1 + from) * (uint64_t)mapSize + (uint64_t)to;
   }
 
  public:
@@ -50,12 +48,16 @@ class ConstraintTable {
 
   // Safer overloads for callers that use signed vertex IDs.
   inline bool constrained(int location, int timestep) const {
-    assert(location >= 0);
+    if (location < 0) {
+      return true;
+    }
     return constrained((size_t)location, timestep);
   }
   inline bool constrained(int currentLocation, int nextLocation,
                           int nextTimestep) const {
-    assert(currentLocation >= 0 && nextLocation >= 0);
+    if (currentLocation < 0 || nextLocation < 0) {
+      return true;
+    }
     return constrained((size_t)currentLocation, (size_t)nextLocation,
                        nextTimestep);
   }
@@ -64,25 +66,30 @@ class ConstraintTable {
   void insert2CT(size_t from, size_t to, int tMin, int tMax);
 
   inline void insert2CT(int location, int tMin, int tMax) {
-    assert(location >= 0);
+    if (location < 0) {
+      return;
+    }
     insert2CT((size_t)location, tMin, tMax);
   }
   inline void insert2CT(int from, int to, int tMin, int tMax) {
-    assert(from >= 0 && to >= 0);
+    if (from < 0 || to < 0) {
+      return;
+    }
     insert2CT((size_t)from, (size_t)to, tMin, tMax);
   }
 
   void addPath(const Path& path, bool waitAtGoal);
   const vector<pair<int, int>>* getConstraintIntervals(size_t key) const {
-    const auto it = constraintTable_.find(key);
+    const auto it = constraintTable_.find((uint64_t)key);
     if (it == constraintTable_.end()) {
       return nullptr;
     }
-    normalizeIntervals(it->second);
     return &it->second.intervals;
   }
   const vector<pair<int, int>>* getConstraintIntervals(int key) const {
-    assert(key >= 0);
+    if (key < 0) {
+      return nullptr;
+    }
     return getConstraintIntervals((size_t)key);
   }
   const vector<pair<int, int>>* getEdgeConstraintIntervals(size_t from,

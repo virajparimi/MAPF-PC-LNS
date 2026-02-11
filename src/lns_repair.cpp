@@ -236,10 +236,8 @@ bool LNS::computeRegretForTask(
   // The task has to start after the earliest time step but needs to finish before the latest time step. However we cannot give any guarantee on the latest timestep so we only work with the earliest timestep
   int earliestTimestep = 0;
 
-  vector<pair<int, int>> precedenceConstraints = fullPrecedenceConstraints;
-
   vector<vector<int>> ancestors(instance_.getTasksNum());
-  for (const auto& precConstraint : precedenceConstraints) {
+  for (const auto& precConstraint : fullPrecedenceConstraints) {
     if (precConstraint.first < 0 || precConstraint.second < 0 ||
         precConstraint.first >= instance_.getTasksNum() ||
         precConstraint.second >= instance_.getTasksNum()) {
@@ -315,6 +313,7 @@ bool LNS::computeRegretForTask(
     }
   }
 
+  vector<pair<int, int>> precedenceConstraints;
   const auto& inputPrecedenceConstraints =
       instance_.getInputPrecedenceConstraintsRef();
   precedenceConstraints.assign(inputPrecedenceConstraints.begin(),
@@ -462,15 +461,7 @@ bool LNS::computeRegretForTask(
                                    1);
   }
 
-  vector<vector<int>> baseAncestors(instance_.getTasksNum());
-  for (const auto& precConstraint : precedenceConstraints) {
-    if (precConstraint.first < 0 || precConstraint.second < 0 ||
-        precConstraint.first >= instance_.getTasksNum() ||
-        precConstraint.second >= instance_.getTasksNum()) {
-      continue;
-    }
-    baseAncestors[precConstraint.second].push_back(precConstraint.first);
-  }
+  const vector<vector<int>>& baseAncestors = ancestors;
 
   vector<char> baseTaskPresent(instance_.getTasksNum(), 0);
   for (const auto& assignments : agentTaskAssignments) {
@@ -484,12 +475,20 @@ bool LNS::computeRegretForTask(
     baseTaskPresent[task] = 1;
   }
 
+  TaskBaselineMetrics baselineMetrics;
+  if (market_.repairTieBreak || market_.repairBlend) {
+    baselineMetrics.oldExposure = computeTaskMarketExposure(task, true);
+    baselineMetrics.oldWait = computeTaskPrecedenceWaitInCurrentSolution(task);
+    baselineMetrics.valid = true;
+  }
+
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
 
     TaskRegretPacket regretPacket = {task, agent, -1, earliestTimestep};
     computeRegretForTaskWithAgent(regretPacket, &agentTaskAssignments,
                                   &agentTaskPaths, &precedenceConstraints,
                                   baseAncestors, baseTaskPresent,
+                                  baselineMetrics,
                                   &serviceTimes);
   }
 
@@ -526,6 +525,7 @@ void LNS::computeRegretForTaskWithAgent(
     vector<pair<int, int>>* precedenceConstraints,
     const vector<vector<int>>& baseAncestors,
     const vector<char>& baseTaskPresent,
+    const TaskBaselineMetrics& baselineMetrics,
     pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes) {
 
   regretEvalStatsCurrent_.agentEvaluations++;
@@ -551,28 +551,28 @@ void LNS::computeRegretForTaskWithAgent(
   vector<char> ancestorsMaskScratch(instance_.getTasksNum(), 0);
   vector<int> frontierScratch;
   frontierScratch.reserve(instance_.getTasksNum());
-  vector<int> affectedAgents;
-  affectedAgents.reserve(instance_.getAgentNum());
+  std::unordered_map<int, vector<int>> affectedAgentsByNextTask;
+  affectedAgentsByNextTask.reserve(
+      (*agentTaskAssignments)[regretPacket.agent].size() + 1);
 
-  auto collectAffectedAgentsForCandidate =
-      [&](int candidateTaskPosition, vector<int>* out) {
-    out->clear();
+  auto getAffectedAgentsForNextTask = [&](int nextTask) -> const vector<int>& {
+    const auto cached = affectedAgentsByNextTask.find(nextTask);
+    if (cached != affectedAgentsByNextTask.end()) {
+      return cached->second;
+    }
+
+    vector<int> computed;
+    computed.reserve(instance_.getAgentNum());
     std::fill(affectedAgentMask.begin(), affectedAgentMask.end(), 0);
     if (regretPacket.agent >= 0 && regretPacket.agent < instance_.getAgentNum()) {
       affectedAgentMask[regretPacket.agent] = 1;
     }
 
-    const auto& agentAssignments = (*agentTaskAssignments)[regretPacket.agent];
-    if (candidateTaskPosition < 0 ||
-        candidateTaskPosition >= (int)agentAssignments.size()) {
-      out->push_back(regretPacket.agent);
-      return;
-    }
-
-    const int nextTask = agentAssignments[candidateTaskPosition];
     if (nextTask < 0 || nextTask >= instance_.getTasksNum()) {
-      out->push_back(regretPacket.agent);
-      return;
+      computed.push_back(regretPacket.agent);
+      auto [it, _] =
+          affectedAgentsByNextTask.emplace(nextTask, std::move(computed));
+      return it->second;
     }
 
     std::fill(ancestorsMaskScratch.begin(), ancestorsMaskScratch.end(), 0);
@@ -617,12 +617,16 @@ void LNS::computeRegretForTaskWithAgent(
 
     for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
       if (affectedAgentMask[agent]) {
-        out->push_back(agent);
+        computed.push_back(agent);
       }
     }
-    if (out->empty()) {
-      out->push_back(regretPacket.agent);
+    if (computed.empty()) {
+      computed.push_back(regretPacket.agent);
     }
+
+    auto [it, _] =
+        affectedAgentsByNextTask.emplace(nextTask, std::move(computed));
+    return it->second;
   };
 
   const auto originalConflictIt =
@@ -708,7 +712,13 @@ void LNS::computeRegretForTaskWithAgent(
     }
     regretPacket.taskPosition = j;
 
-    collectAffectedAgentsForCandidate(j, &affectedAgents);
+    const auto& agentAssignments =
+        (*agentTaskAssignments)[regretPacket.agent];
+    const int nextTaskForCandidate =
+        (j >= 0 && j < (int)agentAssignments.size()) ? agentAssignments[j]
+                                                     : UNASSIGNED;
+    const vector<int>& affectedAgents =
+        getAffectedAgentsForNextTask(nextTaskForCandidate);
     assignmentsBackup.clear();
     taskPathsBackup.clear();
     assignmentsBackup.reserve(affectedAgents.size());
@@ -720,7 +730,8 @@ void LNS::computeRegretForTaskWithAgent(
 
     std::variant<bool, Utility> insertCulmination =
         insertTask(regretPacket, agentTaskPaths, agentTaskAssignments,
-                   precedenceConstraints, candidatePlanner.get());
+                   precedenceConstraints, &baselineMetrics,
+                   candidatePlanner.get());
     if (std::holds_alternative<Utility>(insertCulmination)) {
       regretEvalStatsCurrent_.candidateInsertionsFeasible++;
       regretEvalStatsTotal_.candidateInsertionsFeasible++;
@@ -741,6 +752,7 @@ std::variant<bool, Utility> LNS::insertTask(
     vector<vector<AgentTaskPath>>* agentTaskPaths,
     vector<vector<int>>* agentTaskAssignments,
     vector<pair<int, int>>* precedenceConstraints,
+    const TaskBaselineMetrics* baselineMetrics,
     SingleAgentSolver* reusablePlanner) {
 
   double pathSizeChange = 0;
@@ -750,19 +762,21 @@ std::variant<bool, Utility> LNS::insertTask(
   // The task paths are all the task paths when we dont commit but if we commit they will be agent specific task paths
   vector<vector<AgentTaskPath>>& agentTaskPathsRef = *agentTaskPaths;
   vector<vector<int>>& agentTaskAssignmentsRef = *agentTaskAssignments;
-  (void)precedenceConstraints;
+  const int taskCount = instance_.getTasksNum();
+  const auto& staticSuccessors = instance_.getSuccessorsRef();
+  vector<int> bfsVisitStamp(taskCount, 0);
+  int bfsStamp = 0;
+  std::deque<int> bfsFrontier;
+  vector<int> inDegreeScratch(taskCount, 0);
+  std::deque<int> topoQueue;
 
   auto isAcyclicAfterLocalInsertion =
-      [&](int insertedTask, int predecessorTask,
+      [&](const AssignmentLookup& assignmentLookup, int insertedTask,
+          int predecessorTask,
           int successorTask) -> bool {
-    const int taskCount = instance_.getTasksNum();
     if (insertedTask < 0 || insertedTask >= taskCount) {
       return false;
     }
-
-    const AssignmentLookup assignmentLookup =
-        buildAssignmentLookup(agentTaskAssignmentsRef, taskCount);
-    const auto& staticSuccessors = instance_.getSuccessorsRef();
 
     auto hasPath = [&](int source, int target, int skipFrom,
                        int skipTo) -> bool {
@@ -774,14 +788,17 @@ std::variant<bool, Utility> LNS::insertTask(
         return true;
       }
 
-      vector<char> visited(taskCount, 0);
-      std::deque<int> frontier;
-      frontier.push_back(source);
-      visited[source] = 1;
+      if (++bfsStamp == std::numeric_limits<int>::max()) {
+        std::fill(bfsVisitStamp.begin(), bfsVisitStamp.end(), 0);
+        bfsStamp = 1;
+      }
+      bfsFrontier.clear();
+      bfsFrontier.push_back(source);
+      bfsVisitStamp[source] = bfsStamp;
 
-      while (!frontier.empty()) {
-        const int current = frontier.front();
-        frontier.pop_front();
+      while (!bfsFrontier.empty()) {
+        const int current = bfsFrontier.front();
+        bfsFrontier.pop_front();
 
         if (current < 0 || current >= taskCount) {
           continue;
@@ -791,14 +808,15 @@ std::variant<bool, Utility> LNS::insertTask(
           if (current == skipFrom && succ == skipTo) {
             continue;
           }
-          if (succ < 0 || succ >= taskCount || visited[succ]) {
+          if (succ < 0 || succ >= taskCount ||
+              bfsVisitStamp[succ] == bfsStamp) {
             continue;
           }
           if (succ == target) {
             return true;
           }
-          visited[succ] = 1;
-          frontier.push_back(succ);
+          bfsVisitStamp[succ] = bfsStamp;
+          bfsFrontier.push_back(succ);
         }
 
         const int owner = assignmentLookup.owner[current];
@@ -808,12 +826,13 @@ std::variant<bool, Utility> LNS::insertTask(
             pos + 1 < (int)agentTaskAssignmentsRef[owner].size()) {
           const int succ = agentTaskAssignmentsRef[owner][pos + 1];
           if (!(current == skipFrom && succ == skipTo) &&
-              succ >= 0 && succ < taskCount && !visited[succ]) {
+              succ >= 0 && succ < taskCount &&
+              bfsVisitStamp[succ] != bfsStamp) {
             if (succ == target) {
               return true;
             }
-            visited[succ] = 1;
-            frontier.push_back(succ);
+            bfsVisitStamp[succ] = bfsStamp;
+            bfsFrontier.push_back(succ);
           }
         }
       }
@@ -835,54 +854,63 @@ std::variant<bool, Utility> LNS::insertTask(
     return true;
   };
 
-  auto isAcyclicAssignmentState = [&]() -> bool {
-    const int taskCount = instance_.getTasksNum();
-    const auto& staticSuccessors = instance_.getSuccessorsRef();
-    vector<vector<int>> successors(taskCount);
-    vector<int> inDegree(taskCount, 0);
-
+  auto isAcyclicAssignmentState = [&](const AssignmentLookup& assignmentLookup)
+      -> bool {
+    std::fill(inDegreeScratch.begin(), inDegreeScratch.end(), 0);
     for (int task = 0; task < taskCount; task++) {
-      if (task < 0 || task >= (int)staticSuccessors.size()) {
-        continue;
-      }
       for (int succ : staticSuccessors[task]) {
         if (succ < 0 || succ >= taskCount) {
           continue;
         }
-        successors[task].push_back(succ);
-        inDegree[succ]++;
+        inDegreeScratch[succ]++;
       }
     }
 
     for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
       const auto& assignments = agentTaskAssignmentsRef[agent];
       for (int pos = 1; pos < (int)assignments.size(); pos++) {
-        const int pred = assignments[pos - 1];
         const int succ = assignments[pos];
-        if (pred < 0 || pred >= taskCount || succ < 0 || succ >= taskCount) {
+        if (succ < 0 || succ >= taskCount) {
           continue;
         }
-        successors[pred].push_back(succ);
-        inDegree[succ]++;
+        inDegreeScratch[succ]++;
       }
     }
 
-    std::deque<int> queue;
+    topoQueue.clear();
     for (int task = 0; task < taskCount; task++) {
-      if (inDegree[task] == 0) {
-        queue.push_back(task);
+      if (inDegreeScratch[task] == 0) {
+        topoQueue.push_back(task);
       }
     }
 
     int visited = 0;
-    while (!queue.empty()) {
-      const int task = queue.front();
-      queue.pop_front();
+    while (!topoQueue.empty()) {
+      const int task = topoQueue.front();
+      topoQueue.pop_front();
       visited++;
-      for (int succ : successors[task]) {
-        inDegree[succ]--;
-        if (inDegree[succ] == 0) {
-          queue.push_back(succ);
+
+      for (int succ : staticSuccessors[task]) {
+        if (succ < 0 || succ >= taskCount) {
+          continue;
+        }
+        inDegreeScratch[succ]--;
+        if (inDegreeScratch[succ] == 0) {
+          topoQueue.push_back(succ);
+        }
+      }
+
+      const int owner = assignmentLookup.owner[task];
+      const int pos = assignmentLookup.pos[task];
+      if (owner != UNASSIGNED && owner >= 0 &&
+          owner < (int)agentTaskAssignmentsRef.size() && pos >= 0 &&
+          pos + 1 < (int)agentTaskAssignmentsRef[owner].size()) {
+        const int succ = agentTaskAssignmentsRef[owner][pos + 1];
+        if (succ >= 0 && succ < taskCount) {
+          inDegreeScratch[succ]--;
+          if (inDegreeScratch[succ] == 0) {
+            topoQueue.push_back(succ);
+          }
         }
       }
     }
@@ -1076,12 +1104,14 @@ std::variant<bool, Utility> LNS::insertTask(
       }
     }
     if (injectedPendingAncestor) {
-      if (!isAcyclicAssignmentState()) {
+      const AssignmentLookup refreshedLookup =
+          buildAssignmentLookup(agentTaskAssignmentsRef, taskCount);
+      if (!isAcyclicAssignmentState(refreshedLookup)) {
         return false;
       }
     } else {
-      if (!isAcyclicAfterLocalInsertion(regretPacket.task, previousTask,
-                                        nextTask)) {
+      if (!isAcyclicAfterLocalInsertion(assignmentLookup, regretPacket.task,
+                                        previousTask, nextTask)) {
         return false;
       }
     }
@@ -1235,8 +1265,10 @@ std::variant<bool, Utility> LNS::insertTask(
     agentTaskPathsRef[regretPacket.agent][nextTaskPosition] = nextPath;
     value += nextPath.size();
   } else {
-    if (!isAcyclicAfterLocalInsertion(regretPacket.task, previousTask,
-                                      UNDEFINED)) {
+    const AssignmentLookup assignmentLookup =
+        buildAssignmentLookup(agentTaskAssignmentsRef, taskCount);
+    if (!isAcyclicAfterLocalInsertion(assignmentLookup, regretPacket.task,
+                                      previousTask, UNDEFINED)) {
       return false;
     }
 
@@ -1285,8 +1317,14 @@ std::variant<bool, Utility> LNS::insertTask(
   if (market_.repairTieBreak || market_.repairBlend) {
     const int task = regretPacket.task;
     const int taskLocation = instance_.getTaskLocations(task);
-    const double oldExposure = computeTaskMarketExposure(task, true);
-    const int oldWait = computeTaskPrecedenceWaitInCurrentSolution(task);
+    const double oldExposure =
+        (baselineMetrics != nullptr && baselineMetrics->valid)
+            ? baselineMetrics->oldExposure
+            : computeTaskMarketExposure(task, true);
+    const int oldWait =
+        (baselineMetrics != nullptr && baselineMetrics->valid)
+            ? baselineMetrics->oldWait
+            : computeTaskPrecedenceWaitInCurrentSolution(task);
 
     if (insertedTaskPosition >= 0 &&
         insertedTaskPosition < (int)agentTaskPathsRef[regretPacket.agent].size()) {
@@ -1416,6 +1454,8 @@ bool LNS::commitAncestorTaskOf(
     }
   }
 
+  const vector<pair<int, int>> committedPrecedenceConstraints =
+      buildFullPrecedenceConstraints(iterationStats.size() > 1);
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     for (int localTask = 0;
          localTask < (int)solution_.agents[agent].taskAssignments.size();
@@ -1465,9 +1505,9 @@ bool LNS::commitAncestorTaskOf(
               solution_.agents[agent].taskPaths[localTask - 1].endTime();
         }
         ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
-        buildConstraintTable(
-            constraintTable,
-            solution_.agents[agent].taskAssignments[localTask]);
+        buildConstraintTable(constraintTable,
+                             solution_.agents[agent].taskAssignments[localTask],
+                             committedPrecedenceConstraints);
         AgentTaskPath path = runLowLevelSearch(
             *solution_.agents[agent].pathPlanner, constraintTable, startTime,
             localTask, 0);
@@ -1638,13 +1678,39 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
         goalLocations);
 
     // Need to recompute this task position as we may have added tasks in the agent's task queue when trying to account for the next task parents
-    int taskPosition =
+    const auto taskIt =
         find(solution_.agents[bestRegretPacket.agent].taskAssignments.begin(),
              solution_.agents[bestRegretPacket.agent].taskAssignments.end(),
-             bestRegretPacket.task) -
-        solution_.agents[bestRegretPacket.agent].taskAssignments.begin();
+             bestRegretPacket.task);
+    if (taskIt ==
+        solution_.agents[bestRegretPacket.agent].taskAssignments.end()) {
+      PLOGE << "insertBestRegretTask: committed task "
+            << bestRegretPacket.task
+            << " missing from agent assignments after ancestor injection\n";
+      return false;
+    }
+    const int taskPosition =
+        (int)(taskIt -
+              solution_.agents[bestRegretPacket.agent].taskAssignments.begin());
+    if (taskPosition < 0 ||
+        taskPosition >=
+            (int)solution_.agents[bestRegretPacket.agent].taskPaths.size()) {
+      PLOGE << "insertBestRegretTask: invalid task position " << taskPosition
+            << " for task " << bestRegretPacket.task << " (agent "
+            << bestRegretPacket.agent << ")\n";
+      return false;
+    }
 
-    buildConstraintTable(constraintTable, bestRegretPacket.task);
+    // Ancestor injection may shift task positions and therefore invalidate the
+    // precomputed start time. Recompute from the current predecessor path.
+    startTime = (taskPosition > 0)
+                    ? solution_.agents[bestRegretPacket.agent]
+                          .taskPaths[taskPosition - 1]
+                          .endTime()
+                    : 0;
+
+    buildConstraintTable(constraintTable, bestRegretPacket.task,
+                         precedenceConstraints);
     AgentTaskPath path = runLowLevelSearch(
         *solution_.agents[bestRegretPacket.agent].pathPlanner, constraintTable,
         startTime, taskPosition, 0);
@@ -1662,13 +1728,28 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
                                               taskPosition);
     solution_.taskAgentMap[bestRegretPacket.task] = bestRegretPacket.agent;
 
-    buildConstraintTable(constraintTable, nextTask);
-    int nextTaskPosition =
+    buildConstraintTable(constraintTable, nextTask, precedenceConstraints);
+    const auto nextTaskIt =
         find(solution_.agents[bestRegretPacket.agent].taskAssignments.begin(),
              solution_.agents[bestRegretPacket.agent].taskAssignments.end(),
-             nextTask) -
-        solution_.agents[bestRegretPacket.agent].taskAssignments.begin();
-    assert(nextTaskPosition - 1 >= 0);
+             nextTask);
+    if (nextTaskIt ==
+        solution_.agents[bestRegretPacket.agent].taskAssignments.end()) {
+      PLOGE << "insertBestRegretTask: next task " << nextTask
+            << " missing from assignments after commit\n";
+      return false;
+    }
+    const int nextTaskPosition =
+        (int)(nextTaskIt -
+              solution_.agents[bestRegretPacket.agent].taskAssignments.begin());
+    if (nextTaskPosition <= 0 ||
+        nextTaskPosition >=
+            (int)solution_.agents[bestRegretPacket.agent].taskPaths.size()) {
+      PLOGE << "insertBestRegretTask: invalid next task position "
+            << nextTaskPosition << " for task " << nextTask << " (agent "
+            << bestRegretPacket.agent << ")\n";
+      return false;
+    }
     startTime = solution_.agents[bestRegretPacket.agent]
                     .taskPaths[nextTaskPosition - 1]
                     .endTime();
@@ -1694,7 +1775,8 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
     solution_.agents[bestRegretPacket.agent].pathPlanner->setGoalLocations(
         goalLocations);
 
-    buildConstraintTable(constraintTable, bestRegretPacket.task);
+    buildConstraintTable(constraintTable, bestRegretPacket.task,
+                         precedenceConstraints);
     AgentTaskPath path = runLowLevelSearch(
         *solution_.agents[bestRegretPacket.agent].pathPlanner, constraintTable,
         startTime, bestRegretPacket.taskPosition, 0);
@@ -1727,13 +1809,24 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable,
 
   vector<vector<AgentTaskPath>>& agentTaskPathsRef = *agentTaskPaths;
   vector<vector<int>>& agentTaskAssignmentsRef = *agentTaskAssignments;
-  (void)precedenceConstraints;
   const AssignmentLookup assignmentLookup =
       buildAssignmentLookup(agentTaskAssignmentsRef, instance_.getTasksNum());
 
   constraintTable.goalLocation = taskLocation;
 
-  vector<vector<int>> ancestors(instance_.getAncestorsRef());
+  vector<vector<int>> ancestors(instance_.getTasksNum());
+  if (precedenceConstraints != nullptr && !precedenceConstraints->empty()) {
+    for (const auto& edge : *precedenceConstraints) {
+      if (edge.first < 0 || edge.second < 0 ||
+          edge.first >= instance_.getTasksNum() ||
+          edge.second >= instance_.getTasksNum()) {
+        continue;
+      }
+      ancestors[edge.second].push_back(edge.first);
+    }
+  } else {
+    ancestors = instance_.getAncestorsRef();
+  }
   // Dynamic intra-agent precedence induced by current assignment state.
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     const auto& assignments = agentTaskAssignmentsRef[agent];
@@ -1838,11 +1931,15 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable,
 }
 
 void LNS::buildConstraintTable(ConstraintTable& constraintTable, int task) {
-
-  constraintTable.goalLocation = instance_.getTaskLocations(task);
-
-  vector<pair<int, int>> precedenceConstraints =
+  const vector<pair<int, int>> precedenceConstraints =
       buildFullPrecedenceConstraints(iterationStats.size() > 1);
+  buildConstraintTable(constraintTable, task, precedenceConstraints);
+}
+
+void LNS::buildConstraintTable(
+    ConstraintTable& constraintTable, int task,
+    const vector<pair<int, int>>& precedenceConstraints) {
+  constraintTable.goalLocation = instance_.getTaskLocations(task);
 
   vector<vector<int>> ancestors(instance_.getTasksNum());
   for (const auto& precConstraint : precedenceConstraints) {

@@ -2,6 +2,7 @@
 
 #include <plog/Log.h>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include "common.hpp"
 #include "constrainttable.hpp"
@@ -91,10 +92,11 @@ class LLNode {
   // parent pointers into another search's storage.
   LLNode(const LLNode& old) = delete;
 
-  LLNode& operator=(const LLNode& old) {
-    if (this == &old) {
-      return *this;
-    }
+  // Disallow general assignment. In-place node updates during search should use
+  // overwriteSearchStateFrom(...) to make intent explicit.
+  LLNode& operator=(const LLNode& old) = delete;
+
+  void overwriteSearchStateFrom(const LLNode& old) {
     secondaryKey = old.secondaryKey;
     inOpenlist = old.inOpenlist;
     parent = old.parent;
@@ -107,10 +109,18 @@ class LLNode {
     stage = old.stage;
     distanceToNext = old.distanceToNext;
     tieBreaker = old.tieBreaker;
-    return *this;
   }
 
-  inline int getFVal() const { return gVal + hVal; }
+  inline int getFVal() const {
+    const long long fVal = (long long)gVal + (long long)hVal;
+    if (fVal > std::numeric_limits<int>::max()) {
+      return std::numeric_limits<int>::max();
+    }
+    if (fVal < std::numeric_limits<int>::min()) {
+      return std::numeric_limits<int>::min();
+    }
+    return (int)fVal;
+  }
 };
 
 class SingleAgentSolver {
@@ -124,13 +134,34 @@ class SingleAgentSolver {
   vector<int> goalLocations;
   vector<int> heuristicLandmarks;
 
-  // For each stage, points to the precomputed heuristic vector for that global task.
-  // Owned by Instance; valid for the lifetime of `instance`.
-  vector<const vector<int>*> heuristic;
+  // For each stage, stores the global task index used to access
+  // instance.heuristics_. This avoids storing raw pointers into Instance-owned
+  // vectors.
+  vector<int> heuristicTaskIdx;
 
   void computeHeuristics();
+  int getStageGoalDistance(int stage, int location) const {
+    if (stage < 0 || stage >= (int)heuristicTaskIdx.size()) {
+      assert(false);
+      return MAX_TIMESTEP;
+    }
+    const int globalTask = heuristicTaskIdx[stage];
+    if (globalTask < 0 || globalTask >= (int)instance.heuristics_.size()) {
+      assert(false);
+      return MAX_TIMESTEP;
+    }
+    if (location < 0 || location >= (int)instance.heuristics_[globalTask].size()) {
+      assert(false);
+      return MAX_TIMESTEP;
+    }
+    return instance.heuristics_[globalTask][location];
+  }
   int getHeuristic(int stage, int location) const {
-    return (*heuristic[stage])[location] + heuristicLandmarks[stage];
+    if (stage < 0 || stage >= (int)heuristicLandmarks.size()) {
+      assert(false);
+      return MAX_TIMESTEP;
+    }
+    return getStageGoalDistance(stage, location) + heuristicLandmarks[stage];
   }
   inline void setGoalLocations(vector<int> goals) {
     goalLocations = std::move(goals);
@@ -151,7 +182,7 @@ class SingleAgentSolver {
     segmentTimeoutSec = other.segmentTimeoutSec;
     goalLocations = other.goalLocations;
     heuristicLandmarks = other.heuristicLandmarks;
-    heuristic = other.heuristic;
+    heuristicTaskIdx = other.heuristicTaskIdx;
   }
 
   virtual string getName() const = 0;
@@ -183,6 +214,6 @@ class SingleAgentSolver {
     target.segmentTimeoutSec = segmentTimeoutSec;
     target.goalLocations = goalLocations;
     target.heuristicLandmarks = heuristicLandmarks;
-    target.heuristic = heuristic;
+    target.heuristicTaskIdx = heuristicTaskIdx;
   }
 };

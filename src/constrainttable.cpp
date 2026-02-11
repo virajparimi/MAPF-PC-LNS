@@ -1,9 +1,8 @@
 #include "constrainttable.hpp"
 
-void ConstraintTable::normalizeIntervals(const IntervalBucket& bucket) const {
+void ConstraintTable::normalizeIntervals(IntervalBucket& bucket) {
   auto& intervals = bucket.intervals;
-  if (bucket.normalized || intervals.size() <= 1) {
-    bucket.normalized = true;
+  if (intervals.size() <= 1) {
     return;
   }
 
@@ -26,13 +25,51 @@ void ConstraintTable::normalizeIntervals(const IntervalBucket& bucket) const {
     }
   }
   intervals.resize(write + 1);
-  bucket.normalized = true;
+}
+
+void ConstraintTable::insertMergedInterval(IntervalBucket& bucket, int tMin,
+                                           int tMax) {
+  auto& intervals = bucket.intervals;
+  if (intervals.empty()) {
+    intervals.emplace_back(tMin, tMax);
+    return;
+  }
+
+  vector<pair<int, int>> merged;
+  merged.reserve(intervals.size() + 1);
+
+  int newStart = tMin;
+  int newEnd = tMax;
+  bool inserted = false;
+
+  for (const auto& interval : intervals) {
+    if (interval.second < newStart) {
+      merged.push_back(interval);
+      continue;
+    }
+    if (newEnd < interval.first) {
+      if (!inserted) {
+        merged.emplace_back(newStart, newEnd);
+        inserted = true;
+      }
+      merged.push_back(interval);
+      continue;
+    }
+
+    newStart = min(newStart, interval.first);
+    newEnd = max(newEnd, interval.second);
+  }
+
+  if (!inserted) {
+    merged.emplace_back(newStart, newEnd);
+  }
+  intervals.swap(merged);
 }
 
 int ConstraintTable::getHoldingTime() const {
   int holdingTime = lengthMin;
   if (goalLocation >= 0) {
-    auto it = constraintTable_.find((size_t)goalLocation);
+    auto it = constraintTable_.find((uint64_t)goalLocation);
     if (it != constraintTable_.end()) {
       // No normalization is required here: holding time depends only on the
       // maximum interval end, which is unchanged by sorting/merging.
@@ -46,11 +83,10 @@ int ConstraintTable::getHoldingTime() const {
 
 bool ConstraintTable::constrained(size_t location, int timestep) const {
   assert(timestep >= 0);
-  const auto it = constraintTable_.find(location);
+  const auto it = constraintTable_.find((uint64_t)location);
   if (it == constraintTable_.end()) {
     return false;
   }
-  normalizeIntervals(it->second);
   const auto& intervals = it->second.intervals;
   if (intervals.empty()) {
     return false;
@@ -74,9 +110,8 @@ bool ConstraintTable::constrained(size_t currentLocation, size_t nextLocation,
 
 void ConstraintTable::insert2CT(size_t location, int tMin, int tMax) {
   assert(tMin >= 0 && tMax > tMin);
-  auto& bucket = constraintTable_[location];
-  bucket.intervals.emplace_back(tMin, tMax);
-  bucket.normalized = false;
+  auto& bucket = constraintTable_[(uint64_t)location];
+  insertMergedInterval(bucket, tMin, tMax);
   if (tMax < MAX_TIMESTEP && tMax > latestTimestep) {
     latestTimestep = tMax;
   } else if (tMax == MAX_TIMESTEP && tMin > latestTimestep) {

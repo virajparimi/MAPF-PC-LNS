@@ -188,8 +188,8 @@ bool Instance::loadAgentsAndTasks() {
     PLOGE << "Invalid number of tasks in agent/task file: " << line << "\n";
     return false;
   }
-  if (inputNumTasks <= 0) {
-    PLOGE << "The number of tasks should be larger than 0 in the input file.\n";
+  if (inputNumTasks < 0) {
+    PLOGE << "The number of tasks should be non-negative in the input file.\n";
     return false;
   }
   if (numOfTasks_ == 0) {

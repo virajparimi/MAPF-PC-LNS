@@ -175,6 +175,12 @@ void reconstructPath(const SIPPSNode* goal, int goalArrivalTime,
   assert(finalG >= 0);
   outPath.path.resize(finalG + 1);
   int pathIndex = 0;
+  if (pathIndex >= (int)outPath.size()) {
+    PLOGE << "reconstructPath: invalid initial path index " << pathIndex
+          << " for path size " << outPath.size() << "\n";
+    outPath.path.clear();
+    return;
+  }
   outPath[pathIndex].location = nodesReversed[0]->location;
 
   for (int i = 1; i < (int)nodesReversed.size(); i++) {
@@ -192,15 +198,33 @@ void reconstructPath(const SIPPSNode* goal, int goalArrivalTime,
 
     for (int wait = 1; wait < delta; wait++) {
       pathIndex++;
+      if (pathIndex >= (int)outPath.size()) {
+        PLOGE << "reconstructPath: wait write index " << pathIndex
+              << " out of bounds for path size " << outPath.size() << "\n";
+        outPath.path.clear();
+        return;
+      }
       outPath[pathIndex].location = parent->location;
     }
 
     pathIndex++;
+    if (pathIndex >= (int)outPath.size()) {
+      PLOGE << "reconstructPath: move write index " << pathIndex
+            << " out of bounds for path size " << outPath.size() << "\n";
+      outPath.path.clear();
+      return;
+    }
     outPath[pathIndex].location = child->location;
   }
 
   while (pathIndex < finalG) {
     pathIndex++;
+    if (pathIndex >= (int)outPath.size()) {
+      PLOGE << "reconstructPath: goal-fill write index " << pathIndex
+            << " out of bounds for path size " << outPath.size() << "\n";
+      outPath.path.clear();
+      return;
+    }
     outPath[pathIndex].location = goal->location;
   }
 
@@ -338,4 +362,4 @@ string compactPathSummary(const AgentTaskPath& path) {
          std::to_string(path.back().location);
 }
 
-}  // namespace
+}  // namespace sipps_internal

@@ -11,6 +11,7 @@
 #define MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL 0
 #endif
 #include <cmath>
+#include <limits>
 #include <filesystem>
 #include <numeric>
 #include <optional>
@@ -25,20 +26,45 @@ struct TaskAssignmentIndex {
   vector<int> pos;
 };
 
+int clampSocToInt(long long soc, const char* context) {
+  if (soc > std::numeric_limits<int>::max()) {
+    PLOGW << context << ": sum of costs overflowed int; clamping to INT_MAX\n";
+    return std::numeric_limits<int>::max();
+  }
+  if (soc < std::numeric_limits<int>::min()) {
+    PLOGW << context << ": sum of costs underflowed int; clamping to INT_MIN\n";
+    return std::numeric_limits<int>::min();
+  }
+  return static_cast<int>(soc);
+}
+
 TaskAssignmentIndex buildTaskAssignmentIndex(
     const vector<vector<int>>& assignments, int numTasks) {
   TaskAssignmentIndex index;
   index.owner.assign(numTasks, UNASSIGNED);
   index.pos.assign(numTasks, -1);
+  int duplicateTaskOwners = 0;
   for (int agent = 0; agent < (int)assignments.size(); agent++) {
     for (int p = 0; p < (int)assignments[agent].size(); p++) {
       const int task = assignments[agent][p];
       if (task < 0 || task >= numTasks) {
         continue;
       }
+      if (index.owner[task] != UNASSIGNED) {
+        duplicateTaskOwners++;
+        if (duplicateTaskOwners <= 5) {
+          PLOGE << "Duplicate task ownership detected while building assignment index"
+                << " for task " << task << " (existing agent="
+                << index.owner[task] << ", new agent=" << agent << ")\n";
+        }
+      }
       index.owner[task] = agent;
       index.pos[task] = p;
     }
+  }
+  if (duplicateTaskOwners > 5) {
+    PLOGE << "Duplicate task ownership detected for " << duplicateTaskOwners
+          << " tasks while building assignment index.\n";
   }
   return index;
 }
@@ -48,6 +74,7 @@ TaskAssignmentIndex buildCurrentTaskAssignmentIndex(const Solution& solution,
   TaskAssignmentIndex index;
   index.owner.assign(numTasks, UNASSIGNED);
   index.pos.assign(numTasks, -1);
+  int duplicateTaskOwners = 0;
   for (int agent = 0; agent < solution.numOfAgents; agent++) {
     const auto& assignments = solution.agents[agent].taskAssignments;
     for (int p = 0; p < (int)assignments.size(); p++) {
@@ -55,9 +82,21 @@ TaskAssignmentIndex buildCurrentTaskAssignmentIndex(const Solution& solution,
       if (task < 0 || task >= numTasks) {
         continue;
       }
+      if (index.owner[task] != UNASSIGNED) {
+        duplicateTaskOwners++;
+        if (duplicateTaskOwners <= 5) {
+          PLOGE << "Duplicate task ownership detected in current solution for task "
+                << task << " (existing agent=" << index.owner[task]
+                << ", new agent=" << agent << ")\n";
+        }
+      }
       index.owner[task] = agent;
       index.pos[task] = p;
     }
+  }
+  if (duplicateTaskOwners > 5) {
+    PLOGE << "Duplicate task ownership detected for " << duplicateTaskOwners
+          << " tasks in current solution assignment index.\n";
   }
   return index;
 }
@@ -206,12 +245,13 @@ std::unique_ptr<SingleAgentSolver> LNS::createLocalPlanner(int agent) const {
   std::unique_ptr<SingleAgentSolver> planner;
   switch (lowLevelPlannerType_) {
     case LowLevelPlannerType::sipps:
+      // Local repair planners always set explicit goals before search.
       planner = std::make_unique<MultiLabelSIPPS>(
-          instance_, agent, plannerParityCheck_, plannerParityMaxLogs_);
+          instance_, agent, plannerParityCheck_, plannerParityMaxLogs_, false);
       break;
     case LowLevelPlannerType::mlastar:
     default:
-      planner = std::make_unique<MultiLabelSpaceTimeAStar>(instance_, agent);
+      planner = std::make_unique<MultiLabelSpaceTimeAStar>(instance_, agent, false);
       break;
   }
   planner->setSegmentTimeout(lowLevelSegmentTimeout_);
@@ -234,24 +274,22 @@ uint64_t LNS::makeMarketVertexKey(int location, int bucket) const {
 }
 
 uint64_t LNS::makeMarketEdgeKey(int from, int to, int bucket) const {
-  uint64_t x = 0;
-  x ^= (uint64_t)(uint32_t)from;
-  x ^= ((uint64_t)(uint32_t)to) << 21;
-  x ^= ((uint64_t)(uint32_t)bucket) << 42;
-  x ^= 0xD1B54A32D192ED03ULL;
-  return LLNode::mix64(x);
+  uint64_t x = 0xD1B54A32D192ED03ULL;
+  x = LLNode::mix64(x ^ ((uint64_t)(uint32_t)from + 0x9E3779B97F4A7C15ULL));
+  x = LLNode::mix64(x ^ ((uint64_t)(uint32_t)to + 0xC2B2AE3D27D4EB4FULL));
+  x = LLNode::mix64(x ^ ((uint64_t)(uint32_t)bucket + 0x165667B19E3779F9ULL));
+  return x;
 }
 
-void LNS::computeTaskScheduleMetrics(vector<TaskScheduleMetrics>& perTask,
-                                     vector<double>* blockedWaitSum) const {
+void LNS::computeTaskScheduleMetricsFromIndex(
+    const vector<int>& taskPosByTask, vector<TaskScheduleMetrics>& perTask,
+    vector<double>* blockedWaitSum) const {
   const int taskCount = instance_.getTasksNum();
   perTask.assign(taskCount, TaskScheduleMetrics());
   if (blockedWaitSum != nullptr) {
     blockedWaitSum->assign(taskCount, 0.0);
   }
   const auto& predecessors = instance_.getAncestorsRef();
-  const TaskAssignmentIndex currentIndex =
-      buildCurrentTaskAssignmentIndex(solution_, taskCount);
 
   for (int task = 0; task < taskCount; task++) {
     const int agent =
@@ -261,7 +299,9 @@ void LNS::computeTaskScheduleMetrics(vector<TaskScheduleMetrics>& perTask,
     if (agent == UNASSIGNED) {
       continue;
     }
-    const int pos = (task >= 0 && task < taskCount) ? currentIndex.pos[task] : -1;
+    const int pos = (task >= 0 && task < (int)taskPosByTask.size())
+                        ? taskPosByTask[task]
+                        : -1;
     if (pos < 0) {
       continue;
     }
@@ -297,8 +337,9 @@ void LNS::computeTaskScheduleMetrics(vector<TaskScheduleMetrics>& perTask,
         if (predAgent == UNASSIGNED) {
           continue;
         }
-        const int predPos =
-            (pred >= 0 && pred < taskCount) ? currentIndex.pos[pred] : -1;
+        const int predPos = (pred >= 0 && pred < (int)taskPosByTask.size())
+                                ? taskPosByTask[pred]
+                                : -1;
         if (predPos < 0) {
           continue;
         }
@@ -324,6 +365,13 @@ void LNS::computeTaskScheduleMetrics(vector<TaskScheduleMetrics>& perTask,
       (*blockedWaitSum)[metric.blocker] += metric.waitPrec;
     }
   }
+}
+
+void LNS::computeTaskScheduleMetrics(vector<TaskScheduleMetrics>& perTask,
+                                     vector<double>* blockedWaitSum) const {
+  const TaskAssignmentIndex currentIndex =
+      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
+  computeTaskScheduleMetricsFromIndex(currentIndex.pos, perTask, blockedWaitSum);
 }
 
 double LNS::computeTaskMarketExposure(int task, bool normalized) const {
@@ -555,9 +603,10 @@ double LNS::computeSolutionMarketPressure() const {
   return pressure;
 }
 
-double LNS::computeSolutionPrecedenceWait() const {
+double LNS::computeSolutionPrecedenceWaitFromIndex(
+    const vector<int>& taskPosByTask) const {
   vector<TaskScheduleMetrics> perTask;
-  computeTaskScheduleMetrics(perTask, nullptr);
+  computeTaskScheduleMetricsFromIndex(taskPosByTask, perTask, nullptr);
   double totalWait = 0.0;
   for (const TaskScheduleMetrics& metric : perTask) {
     if (!metric.valid) {
@@ -566,6 +615,12 @@ double LNS::computeSolutionPrecedenceWait() const {
     totalWait += metric.waitPrec;
   }
   return totalWait;
+}
+
+double LNS::computeSolutionPrecedenceWait() const {
+  const TaskAssignmentIndex currentIndex =
+      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
+  return computeSolutionPrecedenceWaitFromIndex(currentIndex.pos);
 }
 
 bool LNS::passMarketAcceptanceGuards(double candidatePressure,
@@ -702,8 +757,10 @@ void LNS::updateMarketStateFromCurrentSolution() {
     topPriceMassFrac = topMass / totalPriceMass;
   }
 
+  const TaskAssignmentIndex currentIndex =
+      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
   vector<TaskScheduleMetrics> perTask;
-  computeTaskScheduleMetrics(perTask, nullptr);
+  computeTaskScheduleMetricsFromIndex(currentIndex.pos, perTask, nullptr);
   double totalWait = 0.0;
   double maxWait = 0.0;
   for (const TaskScheduleMetrics& metric : perTask) {
@@ -814,6 +871,17 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
 
   int agent = -1;
   string line;
+  auto parseAgentHeader = [](const std::string& s) -> bool {
+    // Expected format: "Agent <id>"
+    // Avoid matching unrelated stderr/log lines that merely contain "Agent".
+    std::istringstream iss(s);
+    std::string tag;
+    int id = -1;
+    if (!(iss >> tag >> id)) {
+      return false;
+    }
+    return tag == "Agent";
+  };
   while (std::getline(inputStream, line)) {
     if (line.empty()) {
       continue;
@@ -842,7 +910,7 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
     }
 
     // Use the Agent # to increment the agent variable
-    if (line.find("Agent") != string::npos) {
+    if (parseAgentHeader(line)) {
       agent++;
     }
     // Otherwise if we are supposed to read the task assignments then we split that line using ',' as the delimiter and extract the tokens one by one
@@ -914,10 +982,19 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
           PathEntry pEntry = {false, *loc};
 
           if (taskIndex > 0) {
-            const int previousLocation = solution_.agents[agent]
-                                             .taskPaths[taskIndex - 1]
-                                             .back()
-                                             .location;
+            if (taskIndex - 1 >=
+                    (int)solution_.agents[agent].taskPaths.size() ||
+                solution_.agents[agent].taskPaths[taskIndex - 1].empty()) {
+              PLOGE << "buildGreedySolutionWithMAPFPC: previous task path "
+                       "missing/empty for agent "
+                    << agent << ", taskIndex " << taskIndex << "\n";
+              ok = false;
+              return;
+            }
+            const int previousLocation =
+                solution_.agents[agent].taskPaths[taskIndex - 1]
+                    .back()
+                    .location;
             taskPath.path.push_back(PathEntry{false, previousLocation});
           }
           taskPath.path.push_back(pEntry);
@@ -1003,11 +1080,13 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
   }
 
   // Gather the information
-  int initialSumOfCosts = 0;
+  long long initialSumOfCosts = 0;
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    initialSumOfCosts += solution_.agents[agent].path.endTimeOrZero();
+    initialSumOfCosts +=
+        static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
   }
-  solution_.sumOfCosts = initialSumOfCosts;
+  solution_.sumOfCosts =
+      clampSocToInt(initialSumOfCosts, "buildGreedySolutionWithMAPFPC");
   return true;
 }
 
@@ -1075,6 +1154,8 @@ bool LNS::buildGreedySolution() {
   }
 
   // Following the topological order we find the paths for each task
+  const TaskAssignmentIndex assignmentIndex =
+      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
   initialPaths_.resize(instance_.getTasksNum(), AgentTaskPath());
   vector<char> plannedTasks(instance_.getTasksNum(), 0);
   for (int id : planningOrder) {
@@ -1087,7 +1168,9 @@ bool LNS::buildGreedySolution() {
             << " is not assigned to any agent\n";
       return false;
     }
-    const int taskPosition = solution_.getLocalTaskIndex(agent, task);
+    const int taskPosition = (task >= 0 && task < (int)assignmentIndex.pos.size())
+                                 ? assignmentIndex.pos[task]
+                                 : UNASSIGNED;
     if (taskPosition < 0 ||
         taskPosition >= (int)solution_.agents[agent].taskAssignments.size() ||
         taskPosition >= (int)solution_.agents[agent].taskPaths.size()) {
@@ -1125,7 +1208,9 @@ bool LNS::buildGreedySolution() {
         continue;
       }
       const int plannedTaskPos =
-          solution_.getLocalTaskIndex(plannedAgent, plannedTask);
+          (plannedTask >= 0 && plannedTask < (int)assignmentIndex.pos.size())
+              ? assignmentIndex.pos[plannedTask]
+              : UNASSIGNED;
       if (plannedTaskPos == UNASSIGNED ||
           plannedTaskPos >=
               (int)solution_.agents[plannedAgent].taskPaths.size()) {
@@ -1163,11 +1248,12 @@ bool LNS::buildGreedySolution() {
   }
 
   // Gather the information
-  int initialSumOfCosts = 0;
+  long long initialSumOfCosts = 0;
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    initialSumOfCosts += solution_.agents[agent].path.endTimeOrZero();
+    initialSumOfCosts +=
+        static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
   }
-  solution_.sumOfCosts = initialSumOfCosts;
+  solution_.sumOfCosts = clampSocToInt(initialSumOfCosts, "buildGreedySolution");
   return true;
 }
 
@@ -1230,6 +1316,8 @@ bool LNS::buildGreedySolutionPrecedenceOnly() {
     PLOGE << "Topological sorting failed\n";
     return false;
   }
+  const TaskAssignmentIndex assignmentIndex =
+      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
 
   // Build predecessor adjacency to enforce precedence via earliest goal times.
   vector<vector<int>> predecessors(instance_.getTasksNum());
@@ -1247,7 +1335,9 @@ bool LNS::buildGreedySolutionPrecedenceOnly() {
             << " is not assigned to any agent\n";
       return false;
     }
-    const int taskPosition = solution_.getLocalTaskIndex(agent, task);
+    const int taskPosition = (task >= 0 && task < (int)assignmentIndex.pos.size())
+                                 ? assignmentIndex.pos[task]
+                                 : UNASSIGNED;
     if (taskPosition < 0 ||
         taskPosition >= (int)solution_.agents[agent].taskAssignments.size() ||
         taskPosition >= (int)solution_.agents[agent].taskPaths.size()) {
@@ -1307,13 +1397,15 @@ bool LNS::buildGreedySolutionPrecedenceOnly() {
   }
 
   // Gather the information.
-  int initialSumOfCosts = 0;
+  long long initialSumOfCosts = 0;
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     if (!solution_.agents[agent].taskAssignments.empty()) {
-      initialSumOfCosts += solution_.agents[agent].path.endTimeOrZero();
+      initialSumOfCosts +=
+          static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
     }
   }
-  solution_.sumOfCosts = initialSumOfCosts;
+  solution_.sumOfCosts =
+      clampSocToInt(initialSumOfCosts, "buildGreedySolutionPrecedenceOnly");
   return true;
 }
 

@@ -17,6 +17,7 @@ class Instance {
   unordered_map<int, int> taskLocationToGlobalTask_;
   vector<vector<int>> ancestors_, successors_;
   vector<pair<int, int>> inputPrecedenceConstraints_;
+  bool strictKivaTaskIndices_ = false;
 
   bool loadMap();
   bool loadKivaMap();
@@ -39,7 +40,8 @@ class Instance {
 
   Instance() = default;
   Instance(const string& mapFname, const string& agentTaskFname,
-           int numOfAgents = 0, int numOfTasks = 0);
+           int numOfAgents = 0, int numOfTasks = 0,
+           bool strictKivaTaskIndices = false);
 
   inline int getTaskLocations(int task) const {
     validateTaskIndex(task, "Instance::getTaskLocations");
@@ -88,8 +90,20 @@ class Instance {
   inline int linearizeCoordinate(int row, int col) const {
     return (this->numOfCols * row + col);
   }
-  inline int getRowCoordinate(int id) const { return id / this->numOfCols; }
-  inline int getColCoordinate(int id) const { return id % this->numOfCols; }
+  inline int getRowCoordinate(int id) const {
+    if (this->numOfCols <= 0) {
+      throw std::logic_error(
+          "Instance::getRowCoordinate called with invalid numOfCols");
+    }
+    return id / this->numOfCols;
+  }
+  inline int getColCoordinate(int id) const {
+    if (this->numOfCols <= 0) {
+      throw std::logic_error(
+          "Instance::getColCoordinate called with invalid numOfCols");
+    }
+    return id % this->numOfCols;
+  }
   inline pair<int, int> getCoordinate(int id) const {
     return make_pair(getRowCoordinate(id), getColCoordinate(id));
   }

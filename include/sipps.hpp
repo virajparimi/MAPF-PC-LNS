@@ -16,6 +16,10 @@ class MultiLabelSIPPS : public SingleAgentSolver {
     auto cloned = std::make_shared<MultiLabelSIPPS>(
         instance, agent, plannerParityCheck_, plannerParityMaxLogs_, false);
     copyPlannerStateTo(*cloned);
+    if (agent != agent_) {
+      // Cross-agent clone should keep the target agent's own goal model.
+      cloned->setGoalLocations(instance.getTaskLocationsRef());
+    }
     cloned->setPlannerParityLogsEmitted(plannerParityLogsEmitted_);
     return cloned;
   }

@@ -31,6 +31,17 @@ bool Instance::loadKivaMap() {
     PLOGE << "Malformed Kiva map header (expected rows,cols): " << line << "\n";
     return false;
   }
+  if (rows <= 0 || cols <= 0) {
+    PLOGE << "Invalid Kiva map dimensions in header: rows=" << rows
+          << ", cols=" << cols << "\n";
+    return false;
+  }
+  if (rows > std::numeric_limits<int>::max() - 2 ||
+      cols > std::numeric_limits<int>::max() - 2) {
+    PLOGE << "Kiva map dimensions overflow when adding border padding: rows="
+          << rows << ", cols=" << cols << "\n";
+    return false;
+  }
   numOfRows = rows + 2;  // Read the number of rows
   numOfCols = cols + 2;  // Read the number of columns
 
@@ -186,6 +197,7 @@ bool Instance::loadKivaTasks() {
   }
 
   bool warnedWrappedTaskIndex = false;
+  int wrappedTaskPairs = 0;
   for (int i = 0; i < numOfTasks_; i += 2) {
     int releaseTime, startTask, goalTask, timeOfStartTask, timeOfGoalTask;
     if (!getline(file, line)) {
@@ -200,12 +212,22 @@ bool Instance::loadKivaTasks() {
     (void)timeOfStartTask;
     (void)timeOfGoalTask;
 
-    if ((startTask < 0 || startTask >= (int)endPoints_.size() ||
-         goalTask < 0 || goalTask >= (int)endPoints_.size()) &&
-        !warnedWrappedTaskIndex) {
-      PLOGW << "Kiva task endpoint indices exceed endpoint count. Applying modulo"
-               " mapping to preserve legacy behavior.\n";
-      warnedWrappedTaskIndex = true;
+    const bool outOfRange =
+        (startTask < 0 || startTask >= (int)endPoints_.size() ||
+         goalTask < 0 || goalTask >= (int)endPoints_.size());
+    if (outOfRange) {
+      if (strictKivaTaskIndices_) {
+        PLOGE << "Kiva task endpoint index out of range in strict mode at pair "
+              << (i / 2) << ": start=" << startTask << ", goal=" << goalTask
+              << ", endpoints=" << endPoints_.size() << "\n";
+        return false;
+      }
+      wrappedTaskPairs++;
+      if (!warnedWrappedTaskIndex) {
+        PLOGW << "Kiva task endpoint indices exceed endpoint count. Applying modulo"
+                 " mapping to preserve legacy behavior.\n";
+        warnedWrappedTaskIndex = true;
+      }
     }
     const int endpointCount = (int)endPoints_.size();
     startTask = ((startTask % endpointCount) + endpointCount) % endpointCount;
@@ -219,6 +241,11 @@ bool Instance::loadKivaTasks() {
     assert(!isObstacle(taskLocations_[i + 1]));
 
     temporalDependencies.emplace_back(i, i + 1);
+  }
+  if (wrappedTaskPairs > 0) {
+    PLOGW << "Kiva task loader wrapped " << wrappedTaskPairs
+          << " task pairs by modulo. Use --kivaStrictTaskIndices to reject"
+             " out-of-range indices.\n";
   }
 
   for (const auto& dependency : temporalDependencies) {
