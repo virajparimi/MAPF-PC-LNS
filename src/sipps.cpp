@@ -1,5 +1,6 @@
 #include "internal/sipps_internal.hpp"
 #include "mlastar.hpp"
+#include <cstring>
 
 using namespace sipps_internal;
 
@@ -15,6 +16,28 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
 
   auto finalizeAndReturn = [&](const AgentTaskPath& sippsPath,
                                const char* exitReason) -> AgentTaskPath {
+    SearchOutcome outcome = SearchOutcome::unknown;
+    if (exitReason == nullptr) {
+      outcome = sippsPath.empty() ? SearchOutcome::search_exhausted
+                                  : SearchOutcome::found;
+    } else if (strcmp(exitReason, "timeout") == 0) {
+      outcome = SearchOutcome::timeout;
+    } else if (strcmp(exitReason, "goal_found") == 0 ||
+               strcmp(exitReason, "goal_wait") == 0 ||
+               strcmp(exitReason, "goal_at_start_virtual") == 0) {
+      outcome = SearchOutcome::found;
+    } else if (strcmp(exitReason, "invalid_stage") == 0 ||
+               strcmp(exitReason, "length_bounds") == 0 ||
+               strcmp(exitReason, "invalid_upper_exclusive") == 0) {
+      outcome = SearchOutcome::invalid_input;
+    } else if (strcmp(exitReason, "search_exhausted") == 0) {
+      outcome = SearchOutcome::search_exhausted;
+    } else {
+      outcome = sippsPath.empty() ? SearchOutcome::search_exhausted
+                                  : SearchOutcome::found;
+    }
+    setLastSearchOutcome(outcome);
+
     if (!plannerParityCheck_ || stage < 0 || stage >= (int)goalLocations.size()) {
       return sippsPath;
     }

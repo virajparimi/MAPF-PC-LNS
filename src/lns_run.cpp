@@ -126,6 +126,10 @@ bool LNS::run() {
   if (initialSolutionStrategy == "greedy") {
     // Run the greedy task assignment and subsequent path finding algorithm
     success = buildGreedySolution();
+  } else if (initialSolutionStrategy == "prioritized") {
+    // Plan agent chains by fixed priority with reservations from already
+    // planned agents.
+    success = buildPrioritizedInitialSolution();
   } else if (initialSolutionStrategy == "greedy_precedence_only") {
     // Precedence-feasible, collision-infeasible warm start.
     success = buildGreedySolutionPrecedenceOnly();
@@ -135,7 +139,18 @@ bool LNS::run() {
   }
 
   if (!success && initialSolutionStrategy != "greedy") {
-    success = buildGreedySolution();
+    if (initialSolutionFallback == "greedy") {
+      PLOGW << "Initial solution strategy '" << initialSolutionStrategy
+            << "' failed; falling back to 'greedy'\n";
+      success = buildGreedySolution();
+    } else if (initialSolutionFallback == "none") {
+      PLOGW << "Initial solution strategy '" << initialSolutionStrategy
+            << "' failed; fallback disabled\n";
+    } else {
+      PLOGW << "Unknown initialSolutionFallback '" << initialSolutionFallback
+            << "'; defaulting to 'greedy'\n";
+      success = buildGreedySolution();
+    }
   }
 
   // If the initial solution strategy failed then we cannot do anything!
@@ -280,9 +295,14 @@ bool LNS::run() {
     }
 
     if (!prepareNextIteration()) {
+      const bool cascadeAbort = lastPrepareAbortedByCascade_;
       if (alnsHeuristicForIter >= 0 &&
           alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
-        adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
+        if (cascadeAbort) {
+          adaptiveLNS_.cascadeAborted[alnsHeuristicForIter]++;
+        } else {
+          adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
+        }
       }
       solution_ = previousSolution_;
       feasibleSolutionUpdated = false;
@@ -291,6 +311,9 @@ bool LNS::run() {
       appendIterationStat(IterationStats(
           runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
           solution_.sumOfCosts, feasibleSolutionUpdated, quality));
+      if (cascadeAbort) {
+        PLOGD << "prepareNextIteration aborted due to cascade budget\n";
+      }
       maybeUpdateMarketState(false);
       continue;
     }
@@ -330,6 +353,10 @@ bool LNS::run() {
       // Compute regret for each of the tasks that are in the conflicting set
       // Pick the best one and repeat the whole process again
       while (!lnsNeighborhood_.removedTasks.empty()) {
+        if (runtimeBudgetExhausted()) {
+          repairFailed = true;
+          break;
+        }
         bool enoughSpace = computeRegret();
         if (!enoughSpace) {
           // We could not compute enough regrets for each task so we need to try
@@ -356,7 +383,8 @@ bool LNS::run() {
     } else {
       // Initial regret computation for the neighborhood.
       incrementalRegretStatsCurrent_.reset();
-      if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
+      if (runtimeBudgetExhausted() ||
+          !recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
         repairFailed = true;
       }
 
@@ -365,6 +393,10 @@ bool LNS::run() {
       int64_t commitsSinceRefresh = 0;
 
       while (!repairFailed && !lnsNeighborhood_.removedTasks.empty()) {
+        if (runtimeBudgetExhausted()) {
+          repairFailed = true;
+          break;
+        }
         // If we are spending too much effort discarding stale heap entries,
         // do a full refresh of all remaining regrets.
         //
@@ -671,6 +703,10 @@ bool LNS::run() {
 
 bool LNS::prepareNextIteration() {
   PLOGI << "Preparing the solution object for the next iteration\n";
+  lastPrepareAbortedByCascade_ = false;
+  lastPrepareSeedTasks_ = 0;
+  lastPrepareClosureTasks_ = 0;
+  lastPrepareClosureAdded_ = 0;
 
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPositionBefore =
@@ -681,14 +717,16 @@ bool LNS::prepareNextIteration() {
 
   // Include all successors of the original conflicted tasks in one multi-source
   // traversal to avoid re-traversing shared descendant subgraphs.
-  vector<Conflicts> originalRemovedTasks;
-  originalRemovedTasks.reserve(lnsNeighborhood_.removedTasks.size());
-  for (const auto& [_, conflict] : lnsNeighborhood_.removedTasks) {
-    originalRemovedTasks.push_back(conflict);
+  const ConflictMap originalRemovedTasks = lnsNeighborhood_.removedTasks;
+  ConflictMap closureRemovedTasks = originalRemovedTasks;
+  vector<Conflicts> closureSeeds;
+  closureSeeds.reserve(originalRemovedTasks.size());
+  for (const auto& [_, conflict] : originalRemovedTasks) {
+    closureSeeds.push_back(conflict);
   }
   vector<char> visitedSuccessor(taskCount, 0);
   stack<int> successorStack;
-  for (const Conflicts& conflictTask : originalRemovedTasks) {
+  for (const Conflicts& conflictTask : closureSeeds) {
     if (conflictTask.task >= 0 && conflictTask.task < taskCount) {
       successorStack.push(conflictTask.task);
     }
@@ -714,7 +752,7 @@ bool LNS::prepareNextIteration() {
               ? taskToPositionBefore[successorTask]
               : UNASSIGNED;
       if (successorTaskPosition != UNASSIGNED) {
-        lnsNeighborhood_.removedTasks.emplace(
+        closureRemovedTasks.emplace(
             successorTask,
             Conflicts(successorTask, successorAgent, successorTaskPosition));
       }
@@ -727,6 +765,34 @@ bool LNS::prepareNextIteration() {
       }
     }
   }
+  const int closureSeedCount = (int)originalRemovedTasks.size();
+  const int closureTaskCount = (int)closureRemovedTasks.size();
+  const int closureAddedCount =
+      max(0, closureTaskCount - closureSeedCount);
+  lastPrepareSeedTasks_ = closureSeedCount;
+  lastPrepareClosureTasks_ = closureTaskCount;
+  lastPrepareClosureAdded_ = closureAddedCount;
+  cascadeStats_.prepareCalls++;
+  cascadeStats_.seedTasksSum += closureSeedCount;
+  cascadeStats_.closureTasksSum += closureTaskCount;
+  cascadeStats_.closureAddedSum += closureAddedCount;
+  cascadeStats_.closureTasksMax =
+      max(cascadeStats_.closureTasksMax, (int64_t)closureTaskCount);
+  cascadeStats_.closureAddedMax =
+      max(cascadeStats_.closureAddedMax, (int64_t)closureAddedCount);
+
+  const int cascadeBudget = cascadeTaskBudget();
+  if (closureAddedCount > cascadeBudget) {
+    lastPrepareAbortedByCascade_ = true;
+    cascadeStats_.budgetAborts++;
+    PLOGW << "prepareNextIteration: cascade budget exceeded (seed="
+          << closureSeedCount << ", closure_total=" << closureTaskCount
+          << ", closure_added=" << closureAddedCount
+          << ", budget=" << cascadeBudget << ")\n";
+    return false;
+  }
+
+  lnsNeighborhood_.removedTasks = std::move(closureRemovedTasks);
 
   // If t_id is deleted then t_id + 1 task needs to be fixed
   set<int> tasksToFix, affectedAgents;
@@ -809,6 +875,9 @@ bool LNS::prepareNextIteration() {
 
   // Find the paths for the tasks whose previous tasks were removed
   for (int task : instance_.getInputPlanningOrderRef()) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     if (tasksToFix.count(task) > 0) {
 
       PLOGD << "Going to find path for next task: " << task << "\n";

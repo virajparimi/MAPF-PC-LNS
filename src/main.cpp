@@ -49,6 +49,16 @@ int main(int argc, char** argv) {
       "Top-K insertion positions per (task,agent) during regret evaluation "
       "(0 = evaluate all positions)");
   desc.add_options()(
+      "maxCascadeFactor",
+      po::value<double>()->default_value(3.0),
+      "Multiplier for successor-closure cap in prepareNextIteration "
+      "(<=0 with maxCascadeTasks=0 disables cap)");
+  desc.add_options()(
+      "maxCascadeTasks",
+      po::value<int>()->default_value(0),
+      "Absolute cap for successor-closure added tasks in "
+      "prepareNextIteration (0 = use maxCascadeFactor formula)");
+  desc.add_options()(
       "repairIncludeNonAncestorAgents",
       po::value<bool>()->default_value(true),
       "Include non-ancestor agent paths in repair constraint tables");
@@ -57,6 +67,10 @@ int main(int argc, char** argv) {
   desc.add_options()("initialSolution,s",
                      po::value<string>()->default_value("greedy"),
                      "Strategy for the initial solution");
+  desc.add_options()(
+      "initialFallback",
+      po::value<string>()->default_value("greedy"),
+      "Fallback when initial solution fails: 'greedy' or 'none'");
   desc.add_options()(
       "destroyHeuristic,H", po::value<string>()->default_value("conflict"),
       "Destroy heuristic to use for creating the LNS neighborhood");
@@ -255,11 +269,20 @@ int main(int argc, char** argv) {
 
   string initialSolutionStrategy = vm["initialSolution"].as<string>();
   if (initialSolutionStrategy != "greedy" &&
+      initialSolutionStrategy != "prioritized" &&
       initialSolutionStrategy != "greedy_precedence_only" &&
       initialSolutionStrategy.find("sota") == string::npos) {
     PLOGE << "Incorrect initial solution strategy provided. Please choose from "
-             "'greedy', 'greedy_precedence_only', 'sota_cbs' or 'sota_pbs' options"
+             "'greedy', 'prioritized', 'greedy_precedence_only', 'sota_cbs' "
+             "or 'sota_pbs' options"
           << "\n";
+    return 1;
+  }
+  const string initialSolutionFallback = vm["initialFallback"].as<string>();
+  if (initialSolutionFallback != "greedy" &&
+      initialSolutionFallback != "none") {
+    PLOGE << "Incorrect initial fallback strategy provided. Please choose "
+             "from 'greedy' and 'none'\n";
     return 1;
   }
 
@@ -392,6 +415,8 @@ int main(int argc, char** argv) {
   const int neighborSize = vm["neighborSize"].as<int>();
   const int maxIterations = vm["maxIterations"].as<int>();
   const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
+  const double maxCascadeFactor = vm["maxCascadeFactor"].as<double>();
+  const int maxCascadeTasks = vm["maxCascadeTasks"].as<int>();
   const bool repairIncludeNonAncestorAgents =
       vm["repairIncludeNonAncestorAgents"].as<bool>();
   if (agentNum < 0) {
@@ -412,6 +437,14 @@ int main(int argc, char** argv) {
   }
   if (regretCandidateTopK < 0) {
     PLOGE << "regretCandidateTopK must be non-negative (0 means all positions)\n";
+    return 1;
+  }
+  if (!std::isfinite(maxCascadeFactor) || maxCascadeFactor < 0.0) {
+    PLOGE << "maxCascadeFactor must be finite and non-negative\n";
+    return 1;
+  }
+  if (maxCascadeTasks < 0) {
+    PLOGE << "maxCascadeTasks must be non-negative (0 uses factor formula)\n";
     return 1;
   }
 
@@ -477,11 +510,14 @@ int main(int argc, char** argv) {
   parameters.core.neighborhoodSize = neighborSize;
   parameters.core.timeLimit = cutoffTime;
   parameters.core.initialSolutionStrategy = initialSolutionStrategy;
+  parameters.core.initialSolutionFallback = initialSolutionFallback;
   parameters.core.destroyHeuristic = destroyHeuristic;
   parameters.core.acceptanceCriteria = acceptanceCriteria;
   parameters.core.regretType = regretType;
   parameters.core.incrementalRegret = incrementalRegret;
   parameters.core.regretCandidateTopK = regretCandidateTopK;
+  parameters.core.maxCascadeFactor = maxCascadeFactor;
+  parameters.core.maxCascadeTasks = maxCascadeTasks;
   parameters.core.repairIncludeNonAncestorAgents =
       repairIncludeNonAncestorAgents;
   parameters.core.incrementalRegretMode = incrementalRegretMode;

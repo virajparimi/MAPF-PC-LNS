@@ -125,6 +125,15 @@ class LLNode {
 
 class SingleAgentSolver {
  public:
+  enum class SearchOutcome {
+    unknown = 0,
+    found = 1,
+    timeout = 2,
+    search_exhausted = 3,
+    invalid_input = 4,
+    budget_exhausted = 5,
+  };
+
   uint64_t numExpanded = 0, numGenerated = 0;
   double segmentTimeoutSec = 600.0;
 
@@ -171,6 +180,32 @@ class SingleAgentSolver {
     segmentTimeoutSec = timeoutSec;
   }
   inline double getSegmentTimeout() const { return segmentTimeoutSec; }
+  inline void setLastSearchOutcome(SearchOutcome outcome) {
+    lastSearchOutcome_ = outcome;
+  }
+  inline SearchOutcome getLastSearchOutcome() const {
+    return lastSearchOutcome_;
+  }
+  static inline const char* searchOutcomeName(SearchOutcome outcome) {
+    switch (outcome) {
+      case SearchOutcome::found:
+        return "found";
+      case SearchOutcome::timeout:
+        return "timeout";
+      case SearchOutcome::search_exhausted:
+        return "search_exhausted";
+      case SearchOutcome::invalid_input:
+        return "invalid_input";
+      case SearchOutcome::budget_exhausted:
+        return "budget_exhausted";
+      case SearchOutcome::unknown:
+      default:
+        return "unknown";
+    }
+  }
+  inline const char* getLastSearchOutcomeName() const {
+    return searchOutcomeName(lastSearchOutcome_);
+  }
 
   virtual std::shared_ptr<SingleAgentSolver> cloneForAgent(int agent) const = 0;
   virtual void copyStateFrom(const SingleAgentSolver& other) {
@@ -180,6 +215,7 @@ class SingleAgentSolver {
     numExpanded = other.numExpanded;
     numGenerated = other.numGenerated;
     segmentTimeoutSec = other.segmentTimeoutSec;
+    lastSearchOutcome_ = other.lastSearchOutcome_;
     goalLocations = other.goalLocations;
     heuristicLandmarks = other.heuristicLandmarks;
     heuristicTaskIdx = other.heuristicTaskIdx;
@@ -212,8 +248,11 @@ class SingleAgentSolver {
     target.numExpanded = numExpanded;
     target.numGenerated = numGenerated;
     target.segmentTimeoutSec = segmentTimeoutSec;
+    target.lastSearchOutcome_ = lastSearchOutcome_;
     target.goalLocations = goalLocations;
     target.heuristicLandmarks = heuristicLandmarks;
     target.heuristicTaskIdx = heuristicTaskIdx;
   }
+
+  SearchOutcome lastSearchOutcome_ = SearchOutcome::unknown;
 };

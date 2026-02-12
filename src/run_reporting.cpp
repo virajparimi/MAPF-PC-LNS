@@ -203,9 +203,10 @@ void printAdaptiveLNSPerformance(const LNS& lns,
   std::cout << std::left << std::setw(18) << "Heuristic" << std::right
             << std::setw(9) << "Share%" << std::setw(10) << "Selected"
             << std::setw(10) << "Accept%" << std::setw(12) << "BestUpd%"
-            << std::setw(12) << "FailFind%" << std::setw(15)
-            << "AvgDelta(all)" << std::setw(15) << "AvgDelta(acc)" << '\n';
-  std::cout << std::string(101, '-') << '\n';
+            << std::setw(12) << "FailFind%" << std::setw(12) << "Cascade%"
+            << std::setw(15) << "AvgDelta(all)" << std::setw(15)
+            << "AvgDelta(acc)" << '\n';
+  std::cout << std::string(113, '-') << '\n';
 
   std::cout << std::fixed << std::setprecision(2);
   const double historySize =
@@ -217,12 +218,15 @@ void printAdaptiveLNSPerformance(const LNS& lns,
     const int64_t accepted = adaptiveLNS.accepted[i];
     const int64_t bestUpdates = adaptiveLNS.bestUpdates[i];
     const int64_t couldNotFind = adaptiveLNS.couldNotFind[i];
+    const int64_t cascadeAborted = adaptiveLNS.cascadeAborted[i];
     const double acceptRate =
         selected > 0 ? (double)accepted / (double)selected : 0.0;
     const double bestRate =
         selected > 0 ? (double)bestUpdates / (double)selected : 0.0;
     const double couldNotFindRate =
         selected > 0 ? (double)couldNotFind / (double)selected : 0.0;
+    const double cascadeAbortRate =
+        selected > 0 ? (double)cascadeAborted / (double)selected : 0.0;
     const double avgDeltaSocAll =
         selected > 0 ? adaptiveLNS.deltaSocAll[i] / (double)selected : 0.0;
     const double avgDeltaSocAccepted =
@@ -233,7 +237,8 @@ void printAdaptiveLNSPerformance(const LNS& lns,
               << std::setw(9) << (share * 100.0) << std::setw(10) << selected
               << std::setw(10) << (acceptRate * 100.0) << std::setw(12)
               << (bestRate * 100.0) << std::setw(12)
-              << (couldNotFindRate * 100.0) << std::setw(15) << avgDeltaSocAll
+              << (couldNotFindRate * 100.0) << std::setw(12)
+              << (cascadeAbortRate * 100.0) << std::setw(15) << avgDeltaSocAll
               << std::setw(15) << avgDeltaSocAccepted << '\n';
   }
   std::cout.flags(oldFlags);
@@ -289,6 +294,26 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
           ? static_cast<double>(lowLevelStats.generated) /
                 static_cast<double>(lowLevelStats.calls)
           : 0.0;
+  const double llFoundRate =
+      lowLevelStats.calls > 0
+          ? static_cast<double>(lowLevelStats.found) /
+                static_cast<double>(lowLevelStats.calls)
+          : 0.0;
+  const double llTimeoutRate =
+      lowLevelStats.calls > 0
+          ? static_cast<double>(lowLevelStats.timeout) /
+                static_cast<double>(lowLevelStats.calls)
+          : 0.0;
+  const double llExhaustedRate =
+      lowLevelStats.calls > 0
+          ? static_cast<double>(lowLevelStats.searchExhausted) /
+                static_cast<double>(lowLevelStats.calls)
+          : 0.0;
+  const double llBudgetExhaustedRate =
+      lowLevelStats.calls > 0
+          ? static_cast<double>(lowLevelStats.budgetExhausted) /
+                static_cast<double>(lowLevelStats.calls)
+          : 0.0;
 
   std::cout << "\n=== Run Summary ===\n";
   printMetric("Runtime (s)", lns.runtime);
@@ -316,6 +341,59 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Generated/sec", lowLevelGeneratedPerSec);
   printMetric("Expanded/call", expandedPerCall);
   printMetric("Generated/call", generatedPerCall);
+  printMetric("LL outcome found", static_cast<int64_t>(lowLevelStats.found));
+  printMetric("LL outcome timeout", static_cast<int64_t>(lowLevelStats.timeout));
+  printMetric("LL outcome exhausted",
+              static_cast<int64_t>(lowLevelStats.searchExhausted));
+  printMetric("LL outcome invalid-input",
+              static_cast<int64_t>(lowLevelStats.invalidInput));
+  printMetric("LL outcome budget-exhausted",
+              static_cast<int64_t>(lowLevelStats.budgetExhausted));
+  printMetric("LL outcome unknown", static_cast<int64_t>(lowLevelStats.unknown));
+  printMetric("LL found rate", llFoundRate);
+  printMetric("LL timeout rate", llTimeoutRate);
+  printMetric("LL exhausted rate", llExhaustedRate);
+  printMetric("LL budget-exhausted rate", llBudgetExhaustedRate);
+
+  const auto& cascadeStats = lns.getCascadeStatsRef();
+  const int totalTasks = lns.getInstance().getTasksNum();
+  const double cascadeAbortRate =
+      cascadeStats.prepareCalls > 0
+          ? (double)cascadeStats.budgetAborts /
+                (double)cascadeStats.prepareCalls
+          : 0.0;
+  const double avgSeedTasks =
+      cascadeStats.prepareCalls > 0
+          ? (double)cascadeStats.seedTasksSum /
+                (double)cascadeStats.prepareCalls
+          : 0.0;
+  const double avgClosureTasks =
+      cascadeStats.prepareCalls > 0
+          ? (double)cascadeStats.closureTasksSum /
+                (double)cascadeStats.prepareCalls
+          : 0.0;
+  const double avgClosureAdded =
+      cascadeStats.prepareCalls > 0
+          ? (double)cascadeStats.closureAddedSum /
+                (double)cascadeStats.prepareCalls
+          : 0.0;
+  const double avgClosureFracOfTasks =
+      (cascadeStats.prepareCalls > 0 && totalTasks > 0)
+          ? (double)cascadeStats.closureAddedSum /
+                ((double)cascadeStats.prepareCalls * (double)totalTasks)
+          : 0.0;
+
+  std::cout << "\n=== Cascade Stats ===\n";
+  printMetric("Cascade budget (added tasks)", lns.getCascadeTaskBudget());
+  printMetric("prepareNextIteration calls", cascadeStats.prepareCalls);
+  printMetric("Cascade budget aborts", cascadeStats.budgetAborts);
+  printMetric("Cascade abort rate", cascadeAbortRate);
+  printMetric("Avg seed removed tasks", avgSeedTasks);
+  printMetric("Avg closure removed tasks", avgClosureTasks);
+  printMetric("Avg closure added tasks", avgClosureAdded);
+  printMetric("Max closure removed tasks", cascadeStats.closureTasksMax);
+  printMetric("Max closure added tasks", cascadeStats.closureAddedMax);
+  printMetric("Avg closure_added/total_tasks", avgClosureFracOfTasks);
 
   if (marketHeuristics) {
     const MarketStats marketStats = lns.getMarketStats();

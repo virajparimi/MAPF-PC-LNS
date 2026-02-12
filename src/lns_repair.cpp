@@ -99,12 +99,18 @@ bool isPendingCommitState(const Neighbor& neighborhood, int task) {
 }  // namespace
 
 bool LNS::computeRegret() {
+  if (runtimeBudgetExhausted()) {
+    return false;
+  }
   regretEvalStatsCurrent_.recomputeCalls++;
   regretEvalStatsTotal_.recomputeCalls++;
   lnsNeighborhood_.regretMaxHeap.clear();
   const vector<pair<int, int>> fullPrecedenceConstraints =
       buildFullPrecedenceConstraints();
   for (const auto& [_, conflictTask] : lnsNeighborhood_.removedTasks) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     bool enoughSpace =
         computeRegretForTask(conflictTask.task, fullPrecedenceConstraints);
     if (!enoughSpace) {
@@ -152,6 +158,9 @@ vector<int> LNS::computeCurrentLastTaskPerAgent() const {
 }
 
 bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
+  if (runtimeBudgetExhausted()) {
+    return false;
+  }
   regretEvalStatsCurrent_.recomputeCalls++;
   regretEvalStatsTotal_.recomputeCalls++;
   incrementalRegretStatsCurrent_.recomputeCalls++;
@@ -159,6 +168,9 @@ bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
   const vector<pair<int, int>> fullPrecedenceConstraints =
       buildFullPrecedenceConstraints();
   for (int task : tasks) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     if (!isPendingCommitState(lnsNeighborhood_, task)) {
       continue;
     }
@@ -295,6 +307,9 @@ bool LNS::computeRegretForTask(int task) {
 
 bool LNS::computeRegretForTask(
     int task, const vector<pair<int, int>>& fullPrecedenceConstraints) {
+  if (runtimeBudgetExhausted()) {
+    return false;
+  }
   regretEvalStatsCurrent_.tasksEvaluated++;
   regretEvalStatsTotal_.tasksEvaluated++;
   pairing_heap<Utility, compare<Utility::CompareUtilities>> serviceTimes;
@@ -322,6 +337,9 @@ bool LNS::computeRegretForTask(
       instance_.getAgentNum());
 
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     const auto& sourceAssignments = solution_.agents[agent].taskAssignments;
     if (sourceAssignments.empty()) {
       continue;
@@ -385,6 +403,9 @@ bool LNS::computeRegretForTask(
   precedenceConstraints.assign(inputPrecedenceConstraints.begin(),
                                inputPrecedenceConstraints.end());
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     for (int localTask = 0; localTask < (int)agentTaskAssignments[agent].size();
          localTask++) {
       if (localTask > 0) {
@@ -535,6 +556,9 @@ bool LNS::computeRegretForTask(
   }
 
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
 
     TaskRegretPacket regretPacket = {task, agent, -1, earliestTimestep};
     computeRegretForTaskWithAgent(regretPacket, &agentTaskAssignments,
@@ -576,6 +600,9 @@ void LNS::computeRegretForTaskWithAgent(
     vector<pair<int, int>>* precedenceConstraints,
     const TaskBaselineMetrics& baselineMetrics,
     pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes) {
+  if (runtimeBudgetExhausted()) {
+    return;
+  }
 
   regretEvalStatsCurrent_.agentEvaluations++;
   regretEvalStatsTotal_.agentEvaluations++;
@@ -665,6 +692,9 @@ void LNS::computeRegretForTaskWithAgent(
   }
 
   for (int j : candidatePositions) {
+    if (runtimeBudgetExhausted()) {
+      return;
+    }
 
     regretEvalStatsCurrent_.candidateInsertionsTried++;
     regretEvalStatsTotal_.candidateInsertionsTried++;
@@ -698,6 +728,9 @@ std::variant<bool, Utility> LNS::insertTask(
     const TaskBaselineMetrics* baselineMetrics,
     SingleAgentSolver* reusablePlanner,
     bool rollbackAfter) {
+  if (runtimeBudgetExhausted()) {
+    return false;
+  }
 
   double pathSizeChange = 0;
   int startTime = 0, previousTask = UNDEFINED, nextTask = UNDEFINED;
@@ -1125,6 +1158,9 @@ std::variant<bool, Utility> LNS::insertTask(
       for (int localTask = 0;
            localTask < (int)agentTaskAssignmentsRef[agent].size();
            localTask++) {
+        if (runtimeBudgetExhausted()) {
+          return false;
+        }
         if (localTask > 0) {
           recordSetTaskPathBeginTime(
               agent, localTask,
@@ -1355,6 +1391,9 @@ std::variant<bool, Utility> LNS::insertTask(
 
 bool LNS::commitAncestorTaskOf(
     int globalTask, std::optional<pair<bool, int>> committingNextTask) {
+  if (runtimeBudgetExhausted()) {
+    return false;
+  }
   // We are going to commit some ancestor of this global task. We need to ensure that the paths of all the required ancestors of this task are in order before we can commit the global task and any next task that may exist
   // If the boolean flag commitingNextTask is set then it means that the global task was the next task of some other task and we need to ensure that the ancestors of this next task are in order. This additional check is required as the first if condition changes depending on it.
   // The corresponding integer entry would be the global task id of the main task that we wanted to commit.
@@ -1378,6 +1417,9 @@ bool LNS::commitAncestorTaskOf(
 
   for (int ancestorTask = 0; ancestorTask < (int)ancestorsOfTask.size();
        ancestorTask++) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     if (!ancestorsOfTask[ancestorTask]) {
       continue;
     }
@@ -1456,9 +1498,15 @@ bool LNS::commitAncestorTaskOf(
   const vector<pair<int, int>> committedPrecedenceConstraints =
       buildFullPrecedenceConstraints(iterationStats.size() > 1);
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     for (int localTask = 0;
          localTask < (int)solution_.agents[agent].taskAssignments.size();
          localTask++) {
+      if (runtimeBudgetExhausted()) {
+        return false;
+      }
 
       if (localTask > 0) {
         solution_.agents[agent].taskPaths[localTask].beginTime =
@@ -1569,6 +1617,9 @@ bool LNS::commitAncestorTaskOf(
 }
 
 bool LNS::commitBestRegretTask(Regret bestRegret) {
+  if (runtimeBudgetExhausted()) {
+    return false;
+  }
 
   PLOGD << "Commiting for task " << bestRegret.task << " to agent "
         << bestRegret.agent << " with regret = " << bestRegret.value << "\n";
@@ -1589,6 +1640,9 @@ bool LNS::commitBestRegretTask(Regret bestRegret) {
 }
 
 bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
+  if (runtimeBudgetExhausted()) {
+    return false;
+  }
 
   int startTime = 0, previousTask = UNDEFINED, nextTask = UNDEFINED;
 
@@ -1662,6 +1716,9 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
   }
 
   if (nextTask >= 0) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
 
     if (!commitAncestorTaskOf(
             nextTask,
@@ -1710,6 +1767,9 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
 
     buildConstraintTable(constraintTable, bestRegretPacket.task,
                          precedenceConstraints);
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     AgentTaskPath path = runLowLevelSearch(
         *solution_.agents[bestRegretPacket.agent].pathPlanner, constraintTable,
         startTime, taskPosition, 0);
@@ -1752,6 +1812,9 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
     startTime = solution_.agents[bestRegretPacket.agent]
                     .taskPaths[nextTaskPosition - 1]
                     .endTime();
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     AgentTaskPath nextPath = runLowLevelSearch(
         *solution_.agents[bestRegretPacket.agent].pathPlanner, constraintTable,
         startTime, nextTaskPosition, 0);
@@ -1776,6 +1839,9 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
 
     buildConstraintTable(constraintTable, bestRegretPacket.task,
                          precedenceConstraints);
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     AgentTaskPath path = runLowLevelSearch(
         *solution_.agents[bestRegretPacket.agent].pathPlanner, constraintTable,
         startTime, bestRegretPacket.taskPosition, 0);

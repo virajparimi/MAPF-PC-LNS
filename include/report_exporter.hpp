@@ -16,8 +16,8 @@ class CBSReportExporter {
   //   report_YYYY-MM-DD_HH-MM-SS.txt
   //
   // Example MAPF-PC command:
-  //   ./bin/cbs -m sample_input/empty-16-16.map
-  //   -a sample_input/report_2023-10-25_22-10-11.txt -s 2 -k 10
+  //   ./bin/cbs -m datasets/quickstart/empty-16-16.map
+  //   -a datasets/quickstart/report_2023-10-25_22-10-11.txt -s 2 -k 10
  private:
   std::string outputFile_;
 

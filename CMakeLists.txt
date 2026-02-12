@@ -92,9 +92,9 @@ target_link_libraries(planner_isolation PRIVATE
 enable_testing()
 
 set(TEST_MAP_FILE
-    "${CMAKE_CURRENT_SOURCE_DIR}/sample_input/benchmark/maps/maze-32-32-4.map")
+    "${CMAKE_CURRENT_SOURCE_DIR}/datasets/benchmark/maps/maze-32-32-4.map")
 set(TEST_SCEN_FILE
-    "${CMAKE_CURRENT_SOURCE_DIR}/sample_input/benchmark/scenarios/scen-even/maze-32-32-4-even-1.scen")
+    "${CMAKE_CURRENT_SOURCE_DIR}/datasets/benchmark/scenarios/scen-even/maze-32-32-4-even-1.scen")
 set(TEST_AGENT_COUNT 6)
 set(TEST_ARTIFACT_DIR "${CMAKE_CURRENT_BINARY_DIR}/test_artifacts")
 

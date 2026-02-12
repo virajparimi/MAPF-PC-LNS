@@ -83,9 +83,11 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
   Time::time_point timeStart = Time::now();
   AgentTaskPath path;
   path.beginTime = startTime;
+  setLastSearchOutcome(SearchOutcome::unknown);
   if (stage < 0 || stage >= (int)goalLocations.size()) {
     PLOGE << "MLA*: invalid stage " << stage
           << " for goal count " << goalLocations.size() << "\n";
+    setLastSearchOutcome(SearchOutcome::invalid_input);
     return path;
   }
   int location = startLocation;
@@ -126,6 +128,7 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
   while (!openList_.empty()) {
     if (timedOut()) {
       releaseNodes();
+      setLastSearchOutcome(SearchOutcome::timeout);
       return path;
     }
     updateFocalList();
@@ -134,12 +137,14 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
       // Defensive guard: do not dereference an empty focal heap.
       PLOGE << "MLA*: focal list empty while open list non-empty\n";
       releaseNodes();
+      setLastSearchOutcome(SearchOutcome::search_exhausted);
       return path;
     }
 
     if (current->location == goalLocations[stage] &&
         current->timestep >= holdingTime) {
       updatePath(current, path);
+      setLastSearchOutcome(SearchOutcome::found);
       break;
     }
 
@@ -255,6 +260,7 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
         expansionsSinceTimeoutProbe = 0;
         if (timedOut()) {
           releaseNodes();
+          setLastSearchOutcome(SearchOutcome::timeout);
           return path;
         }
       }
@@ -272,6 +278,7 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
         expansionsSinceTimeoutProbe = 0;
         if (timedOut()) {
           releaseNodes();
+          setLastSearchOutcome(SearchOutcome::timeout);
           return path;
         }
       }
@@ -279,6 +286,9 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
       const int nextTimestep = current->timestep + 1;
       tryExpandSuccessor(successor, nextTimestep);
     }
+  }
+  if (path.empty() && getLastSearchOutcome() == SearchOutcome::unknown) {
+    setLastSearchOutcome(SearchOutcome::search_exhausted);
   }
   releaseNodes();
   return path;

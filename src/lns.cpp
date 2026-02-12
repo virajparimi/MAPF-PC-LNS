@@ -15,7 +15,9 @@
 #include <filesystem>
 #include <numeric>
 #include <optional>
+#include <queue>
 #include <random>
+#include <sstream>
 #include <utility>
 #include "common.hpp"
 #include "utils.hpp"
@@ -100,6 +102,106 @@ TaskAssignmentIndex buildCurrentTaskAssignmentIndex(const Solution& solution,
   }
   return index;
 }
+
+string summarizeIntervals(const vector<pair<int, int>>* intervals,
+                          int maxIntervals = 6) {
+  if (intervals == nullptr || intervals->empty()) {
+    return "(none)";
+  }
+  std::ostringstream oss;
+  const int limit = min((int)intervals->size(), maxIntervals);
+  for (int i = 0; i < limit; i++) {
+    if (i > 0) {
+      oss << ", ";
+    }
+    oss << "[" << (*intervals)[i].first << ", ";
+    if ((*intervals)[i].second == MAX_TIMESTEP) {
+      oss << "INF";
+    } else {
+      oss << (*intervals)[i].second;
+    }
+    oss << ")";
+  }
+  if ((int)intervals->size() > limit) {
+    oss << ", ... (" << intervals->size() << " total)";
+  }
+  return oss.str();
+}
+
+int permanentOccupancyStart(const vector<pair<int, int>>* intervals) {
+  if (intervals == nullptr) {
+    return MAX_TIMESTEP;
+  }
+  int start = MAX_TIMESTEP;
+  for (const auto& interval : *intervals) {
+    if (interval.second == MAX_TIMESTEP) {
+      start = min(start, interval.first);
+    }
+  }
+  return start;
+}
+
+int firstFreeTimeAtOrAfter(const vector<pair<int, int>>* intervals,
+                           int timestep) {
+  if (intervals == nullptr) {
+    return timestep;
+  }
+  int t = timestep;
+  for (const auto& interval : *intervals) {
+    if (t < interval.first) {
+      break;
+    }
+    if (interval.first <= t && t < interval.second) {
+      if (interval.second == MAX_TIMESTEP) {
+        return MAX_TIMESTEP;
+      }
+      t = interval.second;
+    }
+  }
+  return t;
+}
+
+bool reachableWithPermanentBlocksByTime(const Instance& instance,
+                                        const ConstraintTable& constraintTable,
+                                        int start, int goal, int byTime) {
+  if (start < 0 || goal < 0 || start >= instance.mapSize ||
+      goal >= instance.mapSize) {
+    return false;
+  }
+
+  const auto isBlocked = [&](int loc) {
+    if (instance.isObstacle(loc)) {
+      return true;
+    }
+    const int blockedFrom =
+        permanentOccupancyStart(constraintTable.getConstraintIntervals(loc));
+    return blockedFrom != MAX_TIMESTEP && blockedFrom <= byTime;
+  };
+
+  if (isBlocked(start) || isBlocked(goal)) {
+    return false;
+  }
+
+  vector<char> seen(instance.mapSize, 0);
+  std::queue<int> q;
+  q.push(start);
+  seen[start] = 1;
+  while (!q.empty()) {
+    const int curr = q.front();
+    q.pop();
+    if (curr == goal) {
+      return true;
+    }
+    for (int nxt : instance.getNeighbors(curr)) {
+      if (nxt < 0 || nxt >= instance.mapSize || seen[nxt] || isBlocked(nxt)) {
+        continue;
+      }
+      seen[nxt] = 1;
+      q.push(nxt);
+    }
+  }
+  return false;
+}
 }  // namespace
 
 vector<pair<int, int>> LNS::buildFullPrecedenceConstraints(
@@ -133,6 +235,22 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
                                      ConstraintTable& constraintTable,
                                      int startTime, int stage,
                                      int lowerBound) {
+  const double remainingBudget = remainingRuntimeBudgetSec();
+  lastLowLevelRemainingBudgetSec_ = remainingBudget;
+  if (remainingBudget <= 0.0) {
+    solver.setLastSearchOutcome(
+        SingleAgentSolver::SearchOutcome::budget_exhausted);
+    lastLowLevelOutcome_ = solver.getLastSearchOutcome();
+    lastLowLevelEffectiveTimeoutSec_ = 0.0;
+    lowLevelBudgetExhausted_++;
+    return AgentTaskPath();
+  }
+
+  const double configuredTimeout = solver.getSegmentTimeout();
+  const double effectiveTimeout = max(1e-6, min(configuredTimeout, remainingBudget));
+  lastLowLevelEffectiveTimeoutSec_ = effectiveTimeout;
+  solver.setSegmentTimeout(effectiveTimeout);
+
   const uint64_t expandedBefore = solver.numExpanded;
   const uint64_t generatedBefore = solver.numGenerated;
   lowLevelCalls_++;
@@ -140,7 +258,151 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
       solver.findPathSegment(constraintTable, startTime, stage, lowerBound);
   lowLevelExpanded_ += (solver.numExpanded - expandedBefore);
   lowLevelGenerated_ += (solver.numGenerated - generatedBefore);
+  lastLowLevelOutcome_ = solver.getLastSearchOutcome();
+  switch (lastLowLevelOutcome_) {
+    case SingleAgentSolver::SearchOutcome::found:
+      lowLevelFound_++;
+      break;
+    case SingleAgentSolver::SearchOutcome::timeout:
+      lowLevelTimeout_++;
+      break;
+    case SingleAgentSolver::SearchOutcome::search_exhausted:
+      lowLevelSearchExhausted_++;
+      break;
+    case SingleAgentSolver::SearchOutcome::invalid_input:
+      lowLevelInvalidInput_++;
+      break;
+    case SingleAgentSolver::SearchOutcome::budget_exhausted:
+      lowLevelBudgetExhausted_++;
+      break;
+    case SingleAgentSolver::SearchOutcome::unknown:
+    default:
+      lowLevelUnknown_++;
+      break;
+  }
+  solver.setSegmentTimeout(configuredTimeout);
   return path;
+}
+
+void logInitialSegmentFailureDiagnostics(
+    const Instance& instance, const Solution& solution,
+    const ConstraintTable& constraintTable, int agent, int task, int taskPosition,
+    int startTime, SingleAgentSolver& solver, double remainingBudgetSec,
+    double effectiveTimeoutSec) {
+  const int goalLocation = instance.getTaskLocations(task);
+  int startLocation = instance.getStartLocationsRef()[agent];
+  if (taskPosition > 0) {
+    const int prevTask = solution.getAgentGlobalTasks(agent, taskPosition - 1);
+    startLocation = instance.getTaskLocations(prevTask);
+  }
+
+  const auto* goalIntervals = constraintTable.getConstraintIntervals(goalLocation);
+  const auto* startIntervals = constraintTable.getConstraintIntervals(startLocation);
+  const int hDist = solver.getStageGoalDistance(taskPosition, startLocation);
+  const int earliestArrivalLb =
+      (hDist >= MAX_TIMESTEP / 2) ? MAX_TIMESTEP : startTime + hDist;
+  const int goalFreeAt = firstFreeTimeAtOrAfter(goalIntervals, earliestArrivalLb);
+  const int goalPermanentFrom = permanentOccupancyStart(goalIntervals);
+  const int stableTime = max(startTime, constraintTable.temporalExtent + 1);
+  int constrainedVerticesAtStable = 0;
+  int permanentVerticesByStable = 0;
+  for (int loc = 0; loc < instance.mapSize; loc++) {
+    if (constraintTable.constrained(loc, stableTime)) {
+      constrainedVerticesAtStable++;
+    }
+    const int blockedFrom =
+        permanentOccupancyStart(constraintTable.getConstraintIntervals(loc));
+    if (blockedFrom != MAX_TIMESTEP && blockedFrom <= stableTime) {
+      permanentVerticesByStable++;
+    }
+  }
+  const bool permanentStaticReachable = reachableWithPermanentBlocksByTime(
+      instance, constraintTable, startLocation, goalLocation, stableTime);
+
+  int feasibleImmediateMoves = 0;
+  for (int nxt : instance.getNeighbors(startLocation)) {
+    const bool blockedVertex = constraintTable.constrained(nxt, startTime + 1);
+    const bool blockedEdge =
+        constraintTable.constrained(startLocation, nxt, startTime + 1);
+    if (!blockedVertex && !blockedEdge) {
+      feasibleImmediateMoves++;
+    }
+  }
+  const bool canWaitAtStart =
+      !constraintTable.constrained(startLocation, startTime + 1);
+
+  PLOGE << "Init LL-failure diagnostics: agent=" << agent << ", task=" << task
+        << ", stage=" << taskPosition << ", start_loc=" << startLocation
+        << ", goal_loc=" << goalLocation << ", start_time=" << startTime
+        << ", hdist_to_goal=" << hDist
+        << ", earliest_arrival_lb=" << earliestArrivalLb
+        << ", goal_first_free_at_or_after_lb="
+        << (goalFreeAt == MAX_TIMESTEP ? -1 : goalFreeAt)
+        << ", goal_permanent_block_from="
+        << (goalPermanentFrom == MAX_TIMESTEP ? -1 : goalPermanentFrom)
+        << ", stable_time=" << stableTime
+        << ", constrained_vertices_at_stable=" << constrainedVerticesAtStable
+        << ", permanent_vertices_by_stable=" << permanentVerticesByStable
+        << ", permanent_static_reachable="
+        << (permanentStaticReachable ? "true" : "false")
+        << ", feasible_immediate_moves_from_start=" << feasibleImmediateMoves
+        << ", can_wait_at_start=" << (canWaitAtStart ? "true" : "false")
+        << ", remaining_budget_sec=" << remainingBudgetSec
+        << ", effective_timeout_sec=" << effectiveTimeoutSec << "\n";
+  PLOGE << "Init LL-failure diagnostics: goal_intervals="
+        << summarizeIntervals(goalIntervals)
+        << ", start_intervals=" << summarizeIntervals(startIntervals) << "\n";
+
+  if (goalPermanentFrom != MAX_TIMESTEP &&
+      goalPermanentFrom <= earliestArrivalLb) {
+    PLOGE << "Init LL-failure diagnostics: certificate=goal_permanently_occupied"
+          << "_before_earliest_arrival_lb\n";
+  }
+  if (!canWaitAtStart && feasibleImmediateMoves == 0) {
+    PLOGE << "Init LL-failure diagnostics: certificate=start_trapped_at_t+1\n";
+  }
+  if (!permanentStaticReachable) {
+    PLOGE << "Init LL-failure diagnostics: certificate=static_disconnected_under_"
+             "permanent_blocks\n";
+  }
+
+  MultiLabelSIPPS sippsCrossCheck(instance, agent, false);
+  sippsCrossCheck.setGoalLocations(instance.getTaskLocations(
+      solution.getAgentGlobalTasks(agent)));
+  sippsCrossCheck.setSegmentTimeout(max(1e-6, min(30.0, remainingBudgetSec)));
+  ConstraintTable sippsCt(constraintTable);
+  const AgentTaskPath sippsPath = sippsCrossCheck.findPathSegment(
+      sippsCt, startTime, taskPosition, 0);
+  PLOGE << "Init LL-failure diagnostics: sipps_crosscheck_outcome="
+        << sippsCrossCheck.getLastSearchOutcomeName()
+        << ", sipps_path_size=" << sippsPath.size() << "\n";
+}
+
+double LNS::elapsedRuntimeSec() const {
+  return ((fsec)(Time::now() - plannerStartTime_)).count();
+}
+
+double LNS::remainingRuntimeBudgetSec() const {
+  return max(0.0, timeLimit_ - elapsedRuntimeSec());
+}
+
+bool LNS::runtimeBudgetExhausted() const { return elapsedRuntimeSec() >= timeLimit_; }
+
+int LNS::cascadeTaskBudget() const {
+  if (maxCascadeTasks_ > 0) {
+    return maxCascadeTasks_;
+  }
+  if (maxCascadeFactor_ <= 0.0) {
+    return std::numeric_limits<int>::max();
+  }
+  const int neighborhood = max(0, neighborSize_);
+  const double scaledBudget = maxCascadeFactor_ * (double)neighborhood;
+  const int factorBudget =
+      (scaledBudget >= (double)std::numeric_limits<int>::max())
+          ? std::numeric_limits<int>::max()
+          : (int)std::ceil(scaledBudget);
+  const int offsetBudget = neighborhood + 10;
+  return max(factorBudget, offsetBudget);
 }
 
 LNS::LNS(int numOfIterations, const Instance& instance,
@@ -163,10 +425,17 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   lnsConflictWeight_ = parameters.core.lnsConflictWeight;
   lnsCostWeight_ = parameters.core.lnsCostWeight;
   initialSolutionStrategy = parameters.core.initialSolutionStrategy;
+  initialSolutionFallback = parameters.core.initialSolutionFallback;
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
   regretType = parameters.core.regretType;
   regretCandidateTopK_ = std::max(0, parameters.core.regretCandidateTopK);
+  maxCascadeFactor_ = parameters.core.maxCascadeFactor;
+  if (!std::isfinite(maxCascadeFactor_)) {
+    maxCascadeFactor_ = 3.0;
+  }
+  maxCascadeFactor_ = max(0.0, maxCascadeFactor_);
+  maxCascadeTasks_ = std::max(0, parameters.core.maxCascadeTasks);
   repairIncludeNonAncestorAgents_ =
       parameters.core.repairIncludeNonAncestorAgents;
   if (parameters.lowLevel.planner == "sipps") {
@@ -1161,6 +1430,9 @@ bool LNS::buildGreedySolution() {
   initialPaths_.resize(instance_.getTasksNum(), AgentTaskPath());
   vector<char> plannedTasks(instance_.getTasksNum(), 0);
   for (int id : planningOrder) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
 
     const int task = id;
     int startTime = 0;
@@ -1234,7 +1506,15 @@ bool LNS::buildGreedySolution() {
         taskPosition, 0);
     if (initialPaths_[id].empty()) {
       PLOGE << "No path exists for agent " << agent << " and task " << task
-            << "\n";
+            << " (ll_outcome=" << getLastLowLevelOutcomeName()
+            << ", remaining_budget_sec=" << getLastLowLevelRemainingBudgetSec()
+            << ", effective_timeout_sec=" << getLastLowLevelEffectiveTimeoutSec()
+            << ")\n";
+      logInitialSegmentFailureDiagnostics(
+          instance_, solution_, constraintTable, agent, task, taskPosition,
+          startTime, *solution_.agents[agent].pathPlanner,
+          getLastLowLevelRemainingBudgetSec(),
+          getLastLowLevelEffectiveTimeoutSec());
       return false;
     }
     solution_.agents[agent].taskPaths[taskPosition] = initialPaths_[id];
@@ -1256,6 +1536,256 @@ bool LNS::buildGreedySolution() {
         static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
   }
   solution_.sumOfCosts = clampSocToInt(initialSumOfCosts, "buildGreedySolution");
+  return true;
+}
+
+bool LNS::buildPrioritizedInitialSolution() {
+
+  // Reset any previous task->agent mapping.
+  for (int& assignedAgent : solution_.taskAgentMap) {
+    assignedAgent = UNASSIGNED;
+  }
+
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    solution_.agents[agent].taskPaths.clear();
+    solution_.agents[agent].path = AgentTaskPath();
+    solution_.agents[agent].taskAssignments.clear();
+    solution_.agents[agent].intraPrecedenceConstraints.clear();
+  }
+
+  // Reuse existing greedy task assignment for now; prioritized initialization
+  // focuses on robust path construction under inter-agent reservations.
+  if (!greedyTaskAssignment(&instance_, &solution_)) {
+    PLOGE << "Failed to compute greedy task assignment\n";
+    return false;
+  }
+
+  size_t expectedIntraSize = 0;
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& agentTasks = solution_.getAgentGlobalTasks(agent);
+    vector<int> taskLocations = instance_.getTaskLocations(agentTasks);
+    solution_.agents[agent].pathPlanner->setGoalLocations(taskLocations);
+    solution_.agents[agent].taskPaths.resize(agentTasks.size(), AgentTaskPath());
+    if (!agentTasks.empty()) {
+      expectedIntraSize += agentTasks.size() - 1;
+    }
+  }
+
+  // Global precedence constraints = input + intra-agent ordering.
+  vector<pair<int, int>> precedenceConstraints;
+  const auto& inputPrecedenceConstraints =
+      instance_.getInputPrecedenceConstraintsRef();
+  precedenceConstraints.reserve(inputPrecedenceConstraints.size() +
+                                expectedIntraSize);
+  precedenceConstraints.insert(precedenceConstraints.end(),
+                               inputPrecedenceConstraints.begin(),
+                               inputPrecedenceConstraints.end());
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    for (int task = 1; task < (int)solution_.getAgentGlobalTasks(agent).size();
+         task++) {
+      solution_.agents[agent].insertPrecedenceConstraint(
+          solution_.agents[agent].taskAssignments[task - 1],
+          solution_.agents[agent].taskAssignments[task]);
+      precedenceConstraints.emplace_back(
+          solution_.agents[agent].taskAssignments[task - 1],
+          solution_.agents[agent].taskAssignments[task]);
+    }
+  }
+
+  // Task-level topological order used when traversing each agent's chain.
+  vector<int> planningOrder;
+  bool success =
+      topologicalSort(&instance_, precedenceConstraints, planningOrder);
+  if (!success) {
+    PLOGE << "Topological sorting failed\n";
+    return false;
+  }
+  const TaskAssignmentIndex assignmentIndex =
+      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
+
+  // Build predecessor adjacency to enforce precedence timing.
+  vector<vector<int>> predecessors(instance_.getTasksNum());
+  for (const auto& edge : precedenceConstraints) {
+    if (edge.first < 0 || edge.first >= instance_.getTasksNum() ||
+        edge.second < 0 || edge.second >= instance_.getTasksNum()) {
+      continue;
+    }
+    predecessors[edge.second].push_back(edge.first);
+  }
+
+  // Build a deterministic agent priority. Prefer an order that respects
+  // cross-agent precedence constraints; fallback to agent-id order if the
+  // induced agent graph is cyclic.
+  const int agentCount = instance_.getAgentNum();
+  vector<vector<int>> agentSuccessors(agentCount);
+  vector<int> agentInDegree(agentCount, 0);
+  vector<vector<char>> hasAgentEdge(agentCount, vector<char>(agentCount, 0));
+  for (const auto& edge : precedenceConstraints) {
+    if (edge.first < 0 || edge.first >= instance_.getTasksNum() ||
+        edge.second < 0 || edge.second >= instance_.getTasksNum()) {
+      continue;
+    }
+    const int srcAgent = solution_.getAgentWithTask(edge.first);
+    const int dstAgent = solution_.getAgentWithTask(edge.second);
+    if (srcAgent == UNASSIGNED || dstAgent == UNASSIGNED ||
+        srcAgent == dstAgent || hasAgentEdge[srcAgent][dstAgent]) {
+      continue;
+    }
+    hasAgentEdge[srcAgent][dstAgent] = 1;
+    agentSuccessors[srcAgent].push_back(dstAgent);
+    agentInDegree[dstAgent]++;
+  }
+
+  vector<int> agentPriorityOrder;
+  agentPriorityOrder.reserve(agentCount);
+  vector<char> agentConsumed(agentCount, 0);
+  set<int> readyAgents;
+  for (int agent = 0; agent < agentCount; agent++) {
+    if (agentInDegree[agent] == 0) {
+      readyAgents.insert(agent);
+    }
+  }
+  while (!readyAgents.empty()) {
+    const int agent = *readyAgents.begin();
+    readyAgents.erase(readyAgents.begin());
+    if (agentConsumed[agent]) {
+      continue;
+    }
+    agentConsumed[agent] = 1;
+    agentPriorityOrder.push_back(agent);
+    for (int nextAgent : agentSuccessors[agent]) {
+      if (--agentInDegree[nextAgent] == 0) {
+        readyAgents.insert(nextAgent);
+      }
+    }
+  }
+  if ((int)agentPriorityOrder.size() != agentCount) {
+    PLOGW << "buildPrioritizedInitialSolution: cross-agent precedence induces a "
+             "cycle under current assignment; falling back to agent-id order\n";
+    agentPriorityOrder.clear();
+    for (int agent = 0; agent < agentCount; agent++) {
+      agentPriorityOrder.push_back(agent);
+    }
+  }
+
+  initialPaths_.assign(instance_.getTasksNum(), AgentTaskPath());
+  vector<char> plannedAgents(agentCount, 0);
+
+  for (int priorityIdx = 0; priorityIdx < agentCount; priorityIdx++) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
+    const int agent = agentPriorityOrder[priorityIdx];
+    const auto& agentTasks = solution_.getAgentGlobalTasks(agent);
+    if (agentTasks.empty()) {
+      plannedAgents[agent] = 1;
+      continue;
+    }
+
+    for (int task : planningOrder) {
+      if (runtimeBudgetExhausted()) {
+        return false;
+      }
+      if (solution_.getAgentWithTask(task) != agent) {
+        continue;
+      }
+
+      const int taskPosition = (task >= 0 && task < (int)assignmentIndex.pos.size())
+                                   ? assignmentIndex.pos[task]
+                                   : UNASSIGNED;
+      if (taskPosition < 0 || taskPosition >= (int)agentTasks.size() ||
+          taskPosition >= (int)solution_.agents[agent].taskPaths.size()) {
+        PLOGE << "buildPrioritizedInitialSolution: invalid local task index "
+              << taskPosition << " for task " << task << " on agent "
+              << agent << "\n";
+        return false;
+      }
+
+      int startTime = 0;
+      if (taskPosition != 0) {
+        const int previousTask = agentTasks[taskPosition - 1];
+        if (previousTask < 0 || previousTask >= instance_.getTasksNum() ||
+            initialPaths_[previousTask].empty()) {
+          PLOGE << "buildPrioritizedInitialSolution: missing prior task path "
+                << "for task " << task << " on agent " << agent << "\n";
+          return false;
+        }
+        startTime = initialPaths_[previousTask].endTimeChecked();
+      }
+
+      int earliestGoalTime = 0;
+      for (int pred : predecessors[task]) {
+        if (pred < 0 || pred >= instance_.getTasksNum()) {
+          continue;
+        }
+        if (initialPaths_[pred].empty()) {
+          PLOGD << "buildPrioritizedInitialSolution: predecessor task " << pred
+                << " for task " << task
+                << " is not planned yet under current agent priority\n";
+          return false;
+        }
+        earliestGoalTime =
+            max(earliestGoalTime, initialPaths_[pred].endTimeChecked() + 1);
+      }
+
+      ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
+      constraintTable.goalLocation = instance_.getTaskLocations(task);
+      constraintTable.lengthMin = max(constraintTable.lengthMin, earliestGoalTime);
+      constraintTable.latestTimestep =
+          max(constraintTable.latestTimestep, constraintTable.lengthMin);
+
+      // Reserve all paths of previously planned agents.
+      for (int reservedAgent = 0; reservedAgent < agentCount; reservedAgent++) {
+        if (!plannedAgents[reservedAgent]) {
+          continue;
+        }
+        const auto& reservedAssignments =
+            solution_.agents[reservedAgent].taskAssignments;
+        for (int localTask = 0; localTask < (int)reservedAssignments.size();
+             localTask++) {
+          if (localTask >=
+              (int)solution_.agents[reservedAgent].taskPaths.size()) {
+            continue;
+          }
+          const auto& reservedPath =
+              solution_.agents[reservedAgent].taskPaths[localTask];
+          if (reservedPath.empty()) {
+            continue;
+          }
+          const bool waitAtGoal =
+              (localTask + 1 == (int)reservedAssignments.size());
+          constraintTable.addPath(reservedPath, waitAtGoal);
+        }
+      }
+
+      initialPaths_[task] = runLowLevelSearch(
+          *solution_.agents[agent].pathPlanner, constraintTable, startTime,
+          taskPosition, 0);
+      if (initialPaths_[task].empty()) {
+        PLOGE << "buildPrioritizedInitialSolution: no path for agent " << agent
+              << " and task " << task << "\n";
+        return false;
+      }
+      solution_.agents[agent].taskPaths[taskPosition] = initialPaths_[task];
+    }
+    plannedAgents[agent] = 1;
+  }
+
+  // Join per-task paths into per-agent paths.
+  vector<int> agentsToCompute(agentCount);
+  std::iota(agentsToCompute.begin(), agentsToCompute.end(), 0);
+  if (!solution_.joinPaths(agentsToCompute)) {
+    PLOGE << "buildPrioritizedInitialSolution: failed to join agent paths\n";
+    return false;
+  }
+
+  long long initialSumOfCosts = 0;
+  for (int agent = 0; agent < agentCount; agent++) {
+    initialSumOfCosts +=
+        static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
+  }
+  solution_.sumOfCosts =
+      clampSocToInt(initialSumOfCosts, "buildPrioritizedInitialSolution");
   return true;
 }
 
@@ -1331,6 +1861,9 @@ bool LNS::buildGreedySolutionPrecedenceOnly() {
   // from other agents in the constraint table).
   initialPaths_.assign(instance_.getTasksNum(), AgentTaskPath());
   for (int task : planningOrder) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
     const int agent = solution_.getAgentWithTask(task);
     if (agent == UNASSIGNED) {
       PLOGE << "buildGreedySolutionPrecedenceOnly: task " << task
@@ -1384,7 +1917,15 @@ bool LNS::buildGreedySolutionPrecedenceOnly() {
         taskPosition, 0);
     if (initialPaths_[task].empty()) {
       PLOGE << "No path exists for agent " << agent << " and task " << task
-            << "\n";
+            << " (ll_outcome=" << getLastLowLevelOutcomeName()
+            << ", remaining_budget_sec=" << getLastLowLevelRemainingBudgetSec()
+            << ", effective_timeout_sec=" << getLastLowLevelEffectiveTimeoutSec()
+            << ")\n";
+      logInitialSegmentFailureDiagnostics(
+          instance_, solution_, constraintTable, agent, task, taskPosition,
+          startTime, *solution_.agents[agent].pathPlanner,
+          getLastLowLevelRemainingBudgetSec(),
+          getLastLowLevelEffectiveTimeoutSec());
       return false;
     }
     solution_.agents[agent].taskPaths[taskPosition] = initialPaths_[task];

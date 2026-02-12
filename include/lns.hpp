@@ -597,7 +597,7 @@ struct ALNS {
   double reactionFactor = 0.35;
   vector<double> weights, used, success;
   vector<int64_t> selections, accepted, rejected, feasible, bestUpdates,
-      improvedAccepted, downgradedAccepted, couldNotFind;
+      improvedAccepted, downgradedAccepted, couldNotFind, cascadeAborted;
   vector<double> deltaSocAll, deltaSocAccepted;
 
   ALNS() {
@@ -612,6 +612,7 @@ struct ALNS {
     improvedAccepted.assign(numDestroyHeuristics, 0);
     downgradedAccepted.assign(numDestroyHeuristics, 0);
     couldNotFind.assign(numDestroyHeuristics, 0);
+    cascadeAborted.assign(numDestroyHeuristics, 0);
     deltaSocAll.assign(numDestroyHeuristics, 0.0);
     deltaSocAccepted.assign(numDestroyHeuristics, 0.0);
   }
@@ -630,6 +631,9 @@ struct LNSParams {
     double lnsConflictWeight = 0.75;
     double lnsCostWeight = 0.25;
     string initialSolutionStrategy;
+    // Fallback strategy when initialSolutionStrategy fails.
+    // Supported: "greedy", "none".
+    string initialSolutionFallback = "greedy";
     string destroyHeuristic;
     string acceptanceCriteria;
     string regretType;
@@ -641,6 +645,12 @@ struct LNSParams {
     // Candidate insertion budget per (task, agent) regret evaluation.
     // 0 means evaluate all candidate positions.
     int regretCandidateTopK = 0;
+    // Hard cap on precedence successor-closure growth in prepareNextIteration.
+    // If maxCascadeTasks == 0, use:
+    //   max(maxCascadeFactor * neighborSize, neighborSize + 10)
+    // If maxCascadeFactor <= 0 and maxCascadeTasks == 0, cap is disabled.
+    double maxCascadeFactor = 3.0;
+    int maxCascadeTasks = 0;
     // Supported: "descendants", "descendants+agent".
     string incrementalRegretMode = "descendants+agent";
     unsigned int seed = 0;
@@ -690,6 +700,12 @@ class LNS {
     uint64_t calls = 0;
     uint64_t expanded = 0;
     uint64_t generated = 0;
+    uint64_t found = 0;
+    uint64_t timeout = 0;
+    uint64_t searchExhausted = 0;
+    uint64_t invalidInput = 0;
+    uint64_t budgetExhausted = 0;
+    uint64_t unknown = 0;
   };
 
   struct RegretEvalStats {
@@ -718,6 +734,18 @@ class LNS {
     int64_t changedMax = 0;
 
     void reset() { *this = IncrementalRegretStats(); }
+  };
+
+  struct CascadeStats {
+    int64_t prepareCalls = 0;
+    int64_t budgetAborts = 0;
+    int64_t seedTasksSum = 0;
+    int64_t closureTasksSum = 0;
+    int64_t closureAddedSum = 0;
+    int64_t closureTasksMax = 0;
+    int64_t closureAddedMax = 0;
+
+    void reset() { *this = CascadeStats(); }
   };
 
  private:
@@ -777,13 +805,24 @@ class LNS {
   AgentTaskPath runLowLevelSearch(SingleAgentSolver& solver,
                                   ConstraintTable& constraintTable,
                                   int startTime, int stage, int lowerBound);
+  double elapsedRuntimeSec() const;
+  double remainingRuntimeBudgetSec() const;
+  bool runtimeBudgetExhausted() const;
+  int cascadeTaskBudget() const;
   void clearNeighborhood();
 
  protected:
   ALNS adaptiveLNS_;
   int neighborSize_;
   int regretCandidateTopK_ = 0;
+  double maxCascadeFactor_ = 3.0;
+  int maxCascadeTasks_ = 0;
   bool repairIncludeNonAncestorAgents_ = true;
+  bool lastPrepareAbortedByCascade_ = false;
+  int lastPrepareSeedTasks_ = 0;
+  int lastPrepareClosureTasks_ = 0;
+  int lastPrepareClosureAdded_ = 0;
+  CascadeStats cascadeStats_;
   Neighbor lnsNeighborhood_;
   const Instance& instance_;
   unsigned int seed_ = 0;
@@ -794,6 +833,16 @@ class LNS {
   uint64_t lowLevelCalls_ = 0;
   uint64_t lowLevelExpanded_ = 0;
   uint64_t lowLevelGenerated_ = 0;
+  uint64_t lowLevelFound_ = 0;
+  uint64_t lowLevelTimeout_ = 0;
+  uint64_t lowLevelSearchExhausted_ = 0;
+  uint64_t lowLevelInvalidInput_ = 0;
+  uint64_t lowLevelBudgetExhausted_ = 0;
+  uint64_t lowLevelUnknown_ = 0;
+  SingleAgentSolver::SearchOutcome lastLowLevelOutcome_ =
+      SingleAgentSolver::SearchOutcome::unknown;
+  double lastLowLevelRemainingBudgetSec_ = 0.0;
+  double lastLowLevelEffectiveTimeoutSec_ = 0.0;
   double initialTemperature_ = 0.0;
   double maxTemperature_ = std::numeric_limits<double>::infinity();
   double greatDelugeDecay_ = 0.0;
@@ -808,7 +857,8 @@ class LNS {
   double runtime = 0;
   int numOfFailures = 0, sumOfCosts = 0;
   vector<IterationStats> iterationStats;
-  string initialSolutionStrategy, destroyHeuristic, acceptanceCriteria,
+  string initialSolutionStrategy, initialSolutionFallback, destroyHeuristic,
+      acceptanceCriteria,
       regretType;
 
   LNS(int numOfIterations, const Instance& instance,
@@ -819,6 +869,7 @@ class LNS {
   bool run();
 
   bool buildGreedySolution();
+  bool buildPrioritizedInitialSolution();
   // Precedence-feasible initial solution that ignores inter-agent collisions.
   bool buildGreedySolutionPrecedenceOnly();
   bool buildGreedySolutionWithMAPFPC(const string& variant);
@@ -890,8 +941,26 @@ class LNS {
   const Solution& getSolution() const { return solution_; }
   const ALNS& getAdaptiveLNSRef() const { return adaptiveLNS_; }
   ALNS getAdaptiveLNS() const { return adaptiveLNS_; }
+  bool lastPrepareAbortedByCascade() const {
+    return lastPrepareAbortedByCascade_;
+  }
+  int lastPrepareClosureAdded() const { return lastPrepareClosureAdded_; }
+  const CascadeStats& getCascadeStatsRef() const { return cascadeStats_; }
+  int getCascadeTaskBudget() const { return cascadeTaskBudget(); }
   LowLevelSearchStats getLowLevelSearchStats() const {
-    return {lowLevelCalls_, lowLevelExpanded_, lowLevelGenerated_};
+    return {lowLevelCalls_,         lowLevelExpanded_,      lowLevelGenerated_,
+            lowLevelFound_,         lowLevelTimeout_,       lowLevelSearchExhausted_,
+            lowLevelInvalidInput_,  lowLevelBudgetExhausted_,
+            lowLevelUnknown_};
+  }
+  const char* getLastLowLevelOutcomeName() const {
+    return SingleAgentSolver::searchOutcomeName(lastLowLevelOutcome_);
+  }
+  double getLastLowLevelRemainingBudgetSec() const {
+    return lastLowLevelRemainingBudgetSec_;
+  }
+  double getLastLowLevelEffectiveTimeoutSec() const {
+    return lastLowLevelEffectiveTimeoutSec_;
   }
   std::optional<IncrementalRegretStats> getIncrementalRegretStats() const {
     if (!incrementalRegret_) {
