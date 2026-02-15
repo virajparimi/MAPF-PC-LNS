@@ -538,8 +538,14 @@ bool LNS::computeRegretForTask(
       TaskRegretPacket taskPacket = {assignments[localTask], agent, localTask,
                                      -1};
       // TODO: Possible incomplete precedence constraints here!
-      buildConstraintTable(constraintTable, taskPacket, goalLocations[localTask],
-                           workspace, &precedenceConstraints);
+      if (!buildConstraintTable(constraintTable, taskPacket,
+                                goalLocations[localTask], workspace,
+                                &precedenceConstraints)) {
+        PLOGE << "computeRegretForTask: failed to build constraint table for "
+              << "agent " << agent << ", task " << assignments[localTask]
+              << " at position " << localTask << "\n";
+        return false;
+      }
       AgentTaskPath path = runLowLevelSearch(*localPlanner, constraintTable,
                                              startTime, localTask, 0);
       // We must be able to find the path for the next task. If not then we
@@ -1396,9 +1402,14 @@ std::variant<bool, Utility> LNS::insertTask(
                                           instance_.mapSize);
           TaskRegretPacket taskPacket = {
               assignmentsFor(agent)[localTask], agent, localTask, -1};
-          buildConstraintTable(constraintTable, taskPacket,
-                               goalLocations[localTask], workspace,
-                               precedenceConstraints);
+          if (!buildConstraintTable(constraintTable, taskPacket,
+                                    goalLocations[localTask], workspace,
+                                    precedenceConstraints)) {
+            PLOGE << "insertTask: failed to build constraint table for agent "
+                  << agent << ", task " << assignmentsFor(agent)[localTask]
+                  << " at position " << localTask << "\n";
+            return false;
+          }
           AgentTaskPath path = runLowLevelSearch(
               *localPlanner, constraintTable, startTime, localTask, 0);
           // We must be able to find the path for the next task. If not then we cannot move forward!
@@ -1454,9 +1465,14 @@ std::variant<bool, Utility> LNS::insertTask(
     }
     localPlanner->setGoalLocations(goalLocations);
 
-    buildConstraintTable(constraintTable, regretPacket,
-                         goalLocations[taskPosition], workspace,
-                         precedenceConstraints);
+    if (!buildConstraintTable(constraintTable, regretPacket,
+                              goalLocations[taskPosition], workspace,
+                              precedenceConstraints)) {
+      PLOGE << "insertTask: failed to build constraint table for task "
+            << regretPacket.task << " (agent " << regretPacket.agent
+            << ", position " << taskPosition << ")\n";
+      return false;
+    }
     AgentTaskPath path = runLowLevelSearch(*localPlanner, constraintTable,
                                            startTime, taskPosition, 0);
     if (path.empty()) {
@@ -1481,9 +1497,14 @@ std::variant<bool, Utility> LNS::insertTask(
     }
     TaskRegretPacket nextTaskPacket = {
         nextTask, regretPacket.agent, nextTaskPosition, {}};
-    buildConstraintTable(constraintTable, nextTaskPacket,
-                         goalLocations[nextTaskPosition], workspace,
-                         precedenceConstraints, true);
+    if (!buildConstraintTable(constraintTable, nextTaskPacket,
+                              goalLocations[nextTaskPosition], workspace,
+                              precedenceConstraints, true)) {
+      PLOGE << "insertTask: failed to build constraint table for next task "
+            << nextTask << " (agent " << regretPacket.agent << ", position "
+            << nextTaskPosition << ")\n";
+      return false;
+    }
     AgentTaskPath nextPath = runLowLevelSearch(
         *localPlanner, constraintTable, startTime, nextTaskPosition, 0);
     if (nextPath.empty()) {
@@ -1512,9 +1533,14 @@ std::variant<bool, Utility> LNS::insertTask(
     }
     localPlanner->setGoalLocations(goalLocations);
 
-    buildConstraintTable(constraintTable, regretPacket,
-                         goalLocations[regretPacket.taskPosition], workspace,
-                         precedenceConstraints);
+    if (!buildConstraintTable(constraintTable, regretPacket,
+                              goalLocations[regretPacket.taskPosition],
+                              workspace, precedenceConstraints)) {
+      PLOGE << "insertTask: failed to build constraint table for task "
+            << regretPacket.task << " (agent " << regretPacket.agent
+            << ", position " << regretPacket.taskPosition << ")\n";
+      return false;
+    }
     AgentTaskPath path = runLowLevelSearch(*localPlanner, constraintTable,
                                            startTime, regretPacket.taskPosition,
                                            0);
@@ -1745,9 +1771,16 @@ bool LNS::commitAncestorTaskOf(
               solution_.agents[agent].taskPaths[localTask - 1].endTime();
         }
         ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
-        buildConstraintTable(constraintTable,
-                             solution_.agents[agent].taskAssignments[localTask],
-                             committedPrecedenceConstraints);
+        if (!buildConstraintTable(
+                constraintTable,
+                solution_.agents[agent].taskAssignments[localTask],
+                committedPrecedenceConstraints)) {
+          PLOGE << "commitAncestorTaskOf: failed to build constraint table for "
+                << "agent " << agent << ", task "
+                << solution_.agents[agent].taskAssignments[localTask]
+                << " at position " << localTask << "\n";
+          return false;
+        }
         AgentTaskPath path = runLowLevelSearch(
             *solution_.agents[agent].pathPlanner, constraintTable, startTime,
             localTask, 0);
@@ -1958,8 +1991,13 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
                           .endTime()
                     : 0;
 
-    buildConstraintTable(constraintTable, bestRegretPacket.task,
-                         precedenceConstraints);
+    if (!buildConstraintTable(constraintTable, bestRegretPacket.task,
+                              precedenceConstraints)) {
+      PLOGE << "insertBestRegretTask: failed to build constraint table for "
+            << "task " << bestRegretPacket.task << " (agent "
+            << bestRegretPacket.agent << ")\n";
+      return false;
+    }
     if (runtimeBudgetExhausted()) {
       return false;
     }
@@ -1980,7 +2018,13 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
                                               taskPosition);
     solution_.taskAgentMap[bestRegretPacket.task] = bestRegretPacket.agent;
 
-    buildConstraintTable(constraintTable, nextTask, precedenceConstraints);
+    if (!buildConstraintTable(constraintTable, nextTask,
+                              precedenceConstraints)) {
+      PLOGE << "insertBestRegretTask: failed to build constraint table for "
+            << "next task " << nextTask << " (agent "
+            << bestRegretPacket.agent << ")\n";
+      return false;
+    }
     const auto nextTaskIt =
         find(solution_.agents[bestRegretPacket.agent].taskAssignments.begin(),
              solution_.agents[bestRegretPacket.agent].taskAssignments.end(),
@@ -2030,8 +2074,13 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
     solution_.agents[bestRegretPacket.agent].pathPlanner->setGoalLocations(
         goalLocations);
 
-    buildConstraintTable(constraintTable, bestRegretPacket.task,
-                         precedenceConstraints);
+    if (!buildConstraintTable(constraintTable, bestRegretPacket.task,
+                              precedenceConstraints)) {
+      PLOGE << "insertBestRegretTask: failed to build constraint table for "
+            << "task " << bestRegretPacket.task << " (agent "
+            << bestRegretPacket.agent << ")\n";
+      return false;
+    }
     if (runtimeBudgetExhausted()) {
       return false;
     }
@@ -2058,7 +2107,7 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
   return true;
 }
 
-void LNS::buildConstraintTable(ConstraintTable& constraintTable,
+bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
                                TaskRegretPacket taskPacket, int taskLocation,
                                RegretWorkspace& workspace,
                                vector<pair<int, int>>* precedenceConstraints,
@@ -2105,6 +2154,11 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable,
     const auto& assignments = workspace.assignments(agent);
     if ((int)assignments.size() > 0) {
       int lastTask = assignments.back();
+      if (lastTask < 0 || lastTask >= instance_.getTasksNum()) {
+        PLOGE << "buildConstraintTable: invalid final task id " << lastTask
+              << " for agent " << agent << "\n";
+        return false;
+      }
       finalTasks[lastTask] = true;
     }
   }
@@ -2140,7 +2194,7 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable,
       if (prevAssignedAgent == UNASSIGNED) {
         PLOGE << "Missing agent assignment for ancestor task "
               << ancestorTask << " in previous solution\n";
-        return;
+        return false;
       }
       ancestorTaskAgent = prevAssignedAgent;
     } else {
@@ -2151,7 +2205,7 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable,
       if (curAssignedAgent == UNASSIGNED) {
         PLOGE << "Missing agent assignment for ancestor task "
               << ancestorTask << " in current solution\n";
-        return;
+        return false;
       }
       ancestorTaskAgent = curAssignedAgent;
     }
@@ -2166,7 +2220,7 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable,
         assignmentLookup.owner[ancestorTask] != ancestorTaskAgent) {
       PLOGE << "buildConstraintTable: could not locate ancestor task "
             << ancestorTask << " for agent " << ancestorTaskAgent << "\n";
-      return;
+      return false;
     }
     assert(!workspace.taskPaths(ancestorTaskAgent)[ancestorTaskLocalIndex]
                 .empty());
@@ -2229,17 +2283,22 @@ void LNS::buildConstraintTable(ConstraintTable& constraintTable,
 
   constraintTable.latestTimestep =
       max(constraintTable.latestTimestep, constraintTable.lengthMin);
+  return true;
 }
 
-void LNS::buildConstraintTable(ConstraintTable& constraintTable, int task) {
+bool LNS::buildConstraintTable(ConstraintTable& constraintTable, int task) {
   const vector<pair<int, int>> precedenceConstraints =
       buildFullPrecedenceConstraints(iterationStats.size() > 1);
-  buildConstraintTable(constraintTable, task, precedenceConstraints);
+  return buildConstraintTable(constraintTable, task, precedenceConstraints);
 }
 
-void LNS::buildConstraintTable(
+bool LNS::buildConstraintTable(
     ConstraintTable& constraintTable, int task,
     const vector<pair<int, int>>& precedenceConstraints) {
+  if (task < 0 || task >= instance_.getTasksNum()) {
+    PLOGE << "buildConstraintTable: invalid task id " << task << "\n";
+    return false;
+  }
   constraintTable.goalLocation = instance_.getTaskLocations(task);
 
   vector<vector<int>> ancestors(instance_.getTasksNum());
@@ -2269,7 +2328,7 @@ void LNS::buildConstraintTable(
     if (ancestorTaskAgent == UNASSIGNED) {
       PLOGE << "Missing agent assignment for ancestor task "
             << ancestorTask << " in current solution\n";
-      return;
+      return false;
     }
     const int ancestorTaskPosition =
         solution_.getLocalTaskIndex(ancestorTaskAgent, ancestorTask);
@@ -2278,14 +2337,14 @@ void LNS::buildConstraintTable(
             (int)solution_.agents[ancestorTaskAgent].taskPaths.size()) {
       PLOGE << "buildConstraintTable: invalid local index for ancestor task "
             << ancestorTask << " on agent " << ancestorTaskAgent << "\n";
-      return;
+      return false;
     }
     const auto& pathRef =
         solution_.agents[ancestorTaskAgent].taskPaths[ancestorTaskPosition];
     if (pathRef.empty()) {
       PLOGE << "Missing path for ancestor task " << ancestorTask
             << " in current solution\n";
-      return;
+      return false;
     }
     const bool isFinalTask =
         ancestorTask ==
@@ -2300,6 +2359,7 @@ void LNS::buildConstraintTable(
 
   constraintTable.latestTimestep =
       max(constraintTable.latestTimestep, constraintTable.lengthMin);
+  return true;
 }
 
 int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue) {

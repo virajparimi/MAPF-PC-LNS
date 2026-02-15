@@ -35,6 +35,27 @@ const char* occupancyPairLabel(LNS::OccupancySource lhs,
 }
 }  // namespace
 
+int LNS::getServiceOccupancyEndExclusive(int agent) const {
+  if (agent < 0 || agent >= instance_.getAgentNum()) {
+    return 0;
+  }
+  const auto& servicePath = solution_.agents[agent].path;
+  if (servicePath.empty()) {
+    return 0;
+  }
+  if (goalOccupationMode_ == "stay") {
+    return MAX_TIMESTEP;
+  }
+  int endExclusive = (int)servicePath.size();
+  if (!solution_.agents[agent].taskAssignments.empty() && goalTailSteps_ > 0) {
+    if (endExclusive >= MAX_TIMESTEP - goalTailSteps_) {
+      return MAX_TIMESTEP;
+    }
+    endExclusive += goalTailSteps_;
+  }
+  return endExclusive;
+}
+
 LNS::OccupancySource LNS::getAgentOccupancySourceAt(
     int agent, int timestep, bool includeTerminal) const {
   if (agent < 0 || agent >= instance_.getAgentNum() || timestep < 0) {
@@ -47,17 +68,20 @@ LNS::OccupancySource LNS::getAgentOccupancySourceAt(
   if (timestep < (int)servicePath.size()) {
     return OccupancySource::service;
   }
+  if (timestep < getServiceOccupancyEndExclusive(agent)) {
+    return OccupancySource::service;
+  }
 
   if (includeTerminal && solution_.agents[agent].terminalPathActive) {
     const auto& terminalPath = solution_.agents[agent].terminalPath;
     if (!terminalPath.empty()) {
       if (timestep < terminalPath.beginTime) {
-        return OccupancySource::service;
+        return OccupancySource::undefined;
       }
       return OccupancySource::terminal;
     }
   }
-  return OccupancySource::service;
+  return OccupancySource::undefined;
 }
 
 int LNS::getAgentLocationAt(int agent, int timestep, bool includeTerminal) const {
@@ -71,12 +95,15 @@ int LNS::getAgentLocationAt(int agent, int timestep, bool includeTerminal) const
   if (timestep < (int)servicePath.size()) {
     return servicePath.at(timestep).location;
   }
+  if (timestep < getServiceOccupancyEndExclusive(agent)) {
+    return servicePath.back().location;
+  }
 
   if (includeTerminal && solution_.agents[agent].terminalPathActive) {
     const auto& terminalPath = solution_.agents[agent].terminalPath;
     if (!terminalPath.empty()) {
       if (timestep < terminalPath.beginTime) {
-        return servicePath.back().location;
+        return UNDEFINED;
       }
       const int terminalOffset = timestep - terminalPath.beginTime;
       if (terminalOffset >= 0 && terminalOffset < (int)terminalPath.size()) {
@@ -85,9 +112,7 @@ int LNS::getAgentLocationAt(int agent, int timestep, bool includeTerminal) const
       return terminalPath.back().location;
     }
   }
-
-  // Legacy behavior: hold at last service location.
-  return servicePath.back().location;
+  return UNDEFINED;
 }
 
 int LNS::getAgentOccupancyHorizon(int agent, bool includeTerminal) const {
@@ -98,7 +123,9 @@ int LNS::getAgentOccupancyHorizon(int agent, bool includeTerminal) const {
   if (servicePath.empty()) {
     return 0;
   }
-  int horizon = (int)servicePath.size();
+  int horizon = (goalOccupationMode_ == "stay")
+                    ? (int)servicePath.size()
+                    : getServiceOccupancyEndExclusive(agent);
   if (includeTerminal && solution_.agents[agent].terminalPathActive) {
     const auto& terminalPath = solution_.agents[agent].terminalPath;
     if (!terminalPath.empty()) {

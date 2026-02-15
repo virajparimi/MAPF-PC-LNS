@@ -1937,7 +1937,11 @@ bool LNS::buildGreedySolution() {
     PLOGI << "Planning for agent " << agent << " and task " << task << "\n";
 
     ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
-    buildConstraintTable(constraintTable, task);
+    if (!buildConstraintTable(constraintTable, task)) {
+      PLOGE << "buildGreedySolution: failed to build constraint table for task "
+            << task << " (agent " << agent << ")\n";
+      return false;
+    }
     // Strengthen greedy initialization with collision constraints from tasks
     // that have already been planned in this pass. This keeps initialization
     // robust across low-level planners that may choose different but valid
@@ -2304,162 +2308,125 @@ bool LNS::buildPrioritizedInitialSolution() {
     predecessors[edge.second].push_back(edge.first);
   }
 
-  // Build a deterministic agent priority. Prefer an order that respects
-  // cross-agent precedence constraints; fallback to agent-id order if the
-  // induced agent graph is cyclic.
   const int agentCount = instance_.getAgentNum();
-  vector<vector<int>> agentSuccessors(agentCount);
-  vector<int> agentInDegree(agentCount, 0);
-  vector<vector<char>> hasAgentEdge(agentCount, vector<char>(agentCount, 0));
-  for (const auto& edge : precedenceConstraints) {
-    if (edge.first < 0 || edge.first >= instance_.getTasksNum() ||
-        edge.second < 0 || edge.second >= instance_.getTasksNum()) {
-      continue;
-    }
-    const int srcAgent = solution_.getAgentWithTask(edge.first);
-    const int dstAgent = solution_.getAgentWithTask(edge.second);
-    if (srcAgent == UNASSIGNED || dstAgent == UNASSIGNED ||
-        srcAgent == dstAgent || hasAgentEdge[srcAgent][dstAgent]) {
-      continue;
-    }
-    hasAgentEdge[srcAgent][dstAgent] = 1;
-    agentSuccessors[srcAgent].push_back(dstAgent);
-    agentInDegree[dstAgent]++;
-  }
+  const int taskCount = instance_.getTasksNum();
+  initialPaths_.assign(taskCount, AgentTaskPath());
+  vector<char> plannedTasks(taskCount, 0);
 
-  vector<int> agentPriorityOrder;
-  agentPriorityOrder.reserve(agentCount);
-  vector<char> agentConsumed(agentCount, 0);
-  set<int> readyAgents;
-  for (int agent = 0; agent < agentCount; agent++) {
-    if (agentInDegree[agent] == 0) {
-      readyAgents.insert(agent);
-    }
-  }
-  while (!readyAgents.empty()) {
-    const int agent = *readyAgents.begin();
-    readyAgents.erase(readyAgents.begin());
-    if (agentConsumed[agent]) {
-      continue;
-    }
-    agentConsumed[agent] = 1;
-    agentPriorityOrder.push_back(agent);
-    for (int nextAgent : agentSuccessors[agent]) {
-      if (--agentInDegree[nextAgent] == 0) {
-        readyAgents.insert(nextAgent);
-      }
-    }
-  }
-  if ((int)agentPriorityOrder.size() != agentCount) {
-    PLOGW << "buildPrioritizedInitialSolution: cross-agent precedence induces a "
-             "cycle under current assignment; falling back to agent-id order\n";
-    agentPriorityOrder.clear();
-    for (int agent = 0; agent < agentCount; agent++) {
-      agentPriorityOrder.push_back(agent);
-    }
-  }
-
-  initialPaths_.assign(instance_.getTasksNum(), AgentTaskPath());
-  vector<char> plannedAgents(agentCount, 0);
-
-  for (int priorityIdx = 0; priorityIdx < agentCount; priorityIdx++) {
+  // Plan tasks directly in global topological order. This avoids the
+  // cross-agent ordering deadlocks caused by agent-level priority DAG cycles.
+  for (int task : planningOrder) {
     if (runtimeBudgetExhausted()) {
       return false;
     }
-    const int agent = agentPriorityOrder[priorityIdx];
-    const auto& agentTasks = solution_.getAgentGlobalTasks(agent);
-    if (agentTasks.empty()) {
-      plannedAgents[agent] = 1;
-      continue;
+
+    const int agent = solution_.getAgentWithTask(task);
+    if (agent == UNASSIGNED) {
+      PLOGE << "buildPrioritizedInitialSolution: task " << task
+            << " is not assigned to any agent\n";
+      return false;
     }
 
-    for (int task : planningOrder) {
-      if (runtimeBudgetExhausted()) {
+    const auto& agentTasks = solution_.getAgentGlobalTasks(agent);
+    const int taskPosition = (task >= 0 && task < (int)assignmentIndex.pos.size())
+                                 ? assignmentIndex.pos[task]
+                                 : UNASSIGNED;
+    if (taskPosition < 0 || taskPosition >= (int)agentTasks.size() ||
+        taskPosition >= (int)solution_.agents[agent].taskPaths.size()) {
+      PLOGE << "buildPrioritizedInitialSolution: invalid local task index "
+            << taskPosition << " for task " << task << " on agent " << agent
+            << "\n";
+      return false;
+    }
+
+    int startTime = 0;
+    if (taskPosition > 0) {
+      const int previousTask = agentTasks[taskPosition - 1];
+      if (previousTask < 0 || previousTask >= taskCount ||
+          initialPaths_[previousTask].empty()) {
+        PLOGE << "buildPrioritizedInitialSolution: missing prior task path "
+              << "for task " << task << " on agent " << agent << "\n";
         return false;
       }
-      if (solution_.getAgentWithTask(task) != agent) {
+      startTime = initialPaths_[previousTask].endTimeChecked();
+    }
+
+    int earliestGoalTime = 0;
+    for (int pred : predecessors[task]) {
+      if (pred < 0 || pred >= taskCount) {
         continue;
       }
-
-      const int taskPosition = (task >= 0 && task < (int)assignmentIndex.pos.size())
-                                   ? assignmentIndex.pos[task]
-                                   : UNASSIGNED;
-      if (taskPosition < 0 || taskPosition >= (int)agentTasks.size() ||
-          taskPosition >= (int)solution_.agents[agent].taskPaths.size()) {
-        PLOGE << "buildPrioritizedInitialSolution: invalid local task index "
-              << taskPosition << " for task " << task << " on agent "
-              << agent << "\n";
+      if (initialPaths_[pred].empty()) {
+        PLOGE << "buildPrioritizedInitialSolution: predecessor task " << pred
+              << " for task " << task
+              << " is unexpectedly unplanned in topological order\n";
         return false;
       }
-
-      int startTime = 0;
-      if (taskPosition != 0) {
-        const int previousTask = agentTasks[taskPosition - 1];
-        if (previousTask < 0 || previousTask >= instance_.getTasksNum() ||
-            initialPaths_[previousTask].empty()) {
-          PLOGE << "buildPrioritizedInitialSolution: missing prior task path "
-                << "for task " << task << " on agent " << agent << "\n";
-          return false;
-        }
-        startTime = initialPaths_[previousTask].endTimeChecked();
-      }
-
-      int earliestGoalTime = 0;
-      for (int pred : predecessors[task]) {
-        if (pred < 0 || pred >= instance_.getTasksNum()) {
-          continue;
-        }
-        if (initialPaths_[pred].empty()) {
-          PLOGD << "buildPrioritizedInitialSolution: predecessor task " << pred
-                << " for task " << task
-                << " is not planned yet under current agent priority\n";
-          return false;
-        }
-        earliestGoalTime =
-            max(earliestGoalTime, initialPaths_[pred].endTimeChecked() + 1);
-      }
-
-      ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
-      constraintTable.goalLocation = instance_.getTaskLocations(task);
-      constraintTable.lengthMin = max(constraintTable.lengthMin, earliestGoalTime);
-      constraintTable.latestTimestep =
-          max(constraintTable.latestTimestep, constraintTable.lengthMin);
-
-      // Reserve all paths of previously planned agents.
-      for (int reservedAgent = 0; reservedAgent < agentCount; reservedAgent++) {
-        if (!plannedAgents[reservedAgent]) {
-          continue;
-        }
-        const auto& reservedAssignments =
-            solution_.agents[reservedAgent].taskAssignments;
-        for (int localTask = 0; localTask < (int)reservedAssignments.size();
-             localTask++) {
-          if (localTask >=
-              (int)solution_.agents[reservedAgent].taskPaths.size()) {
-            continue;
-          }
-          const auto& reservedPath =
-              solution_.agents[reservedAgent].taskPaths[localTask];
-          if (reservedPath.empty()) {
-            continue;
-          }
-          const bool isFinalTask =
-              (localTask + 1 == (int)reservedAssignments.size());
-          reservePathWithGoalPolicy(constraintTable, reservedPath, isFinalTask);
-        }
-      }
-
-      initialPaths_[task] = runLowLevelSearch(
-          *solution_.agents[agent].pathPlanner, constraintTable, startTime,
-          taskPosition, 0);
-      if (initialPaths_[task].empty()) {
-        PLOGE << "buildPrioritizedInitialSolution: no path for agent " << agent
-              << " and task " << task << "\n";
-        return false;
-      }
-      solution_.agents[agent].taskPaths[taskPosition] = initialPaths_[task];
+      earliestGoalTime =
+          max(earliestGoalTime, initialPaths_[pred].endTimeChecked() + 1);
     }
-    plannedAgents[agent] = 1;
+
+    ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
+    constraintTable.goalLocation = instance_.getTaskLocations(task);
+    constraintTable.lengthMin = max(constraintTable.lengthMin, earliestGoalTime);
+    constraintTable.latestTimestep =
+        max(constraintTable.latestTimestep, constraintTable.lengthMin);
+
+    // Reserve all already planned tasks, regardless of owning agent.
+    for (int reservedTask = 0; reservedTask < taskCount; reservedTask++) {
+      if (!plannedTasks[reservedTask]) {
+        continue;
+      }
+      const int reservedAgent = solution_.getAgentWithTask(reservedTask);
+      if (reservedAgent == UNASSIGNED) {
+        PLOGE << "buildPrioritizedInitialSolution: planned task " << reservedTask
+              << " has no assigned agent\n";
+        return false;
+      }
+      const int reservedTaskPos =
+          (reservedTask >= 0 && reservedTask < (int)assignmentIndex.pos.size())
+              ? assignmentIndex.pos[reservedTask]
+              : UNASSIGNED;
+      if (reservedTaskPos < 0 ||
+          reservedTaskPos >=
+              (int)solution_.agents[reservedAgent].taskPaths.size()) {
+        PLOGE << "buildPrioritizedInitialSolution: invalid reserved task index "
+              << reservedTaskPos << " for task " << reservedTask << " (agent "
+              << reservedAgent << ")\n";
+        return false;
+      }
+      const auto& reservedPath =
+          solution_.agents[reservedAgent].taskPaths[reservedTaskPos];
+      if (reservedPath.empty()) {
+        PLOGE << "buildPrioritizedInitialSolution: planned task "
+              << reservedTask << " has empty path when reserving\n";
+        return false;
+      }
+      const bool isFinalTask =
+          (reservedTaskPos + 1 ==
+           (int)solution_.agents[reservedAgent].taskAssignments.size());
+      reservePathWithGoalPolicy(constraintTable, reservedPath, isFinalTask);
+    }
+
+    initialPaths_[task] = runLowLevelSearch(
+        *solution_.agents[agent].pathPlanner, constraintTable, startTime,
+        taskPosition, 0);
+    if (initialPaths_[task].empty()) {
+      PLOGE << "buildPrioritizedInitialSolution: no path for agent " << agent
+            << " and task " << task << " (ll_outcome="
+            << getLastLowLevelOutcomeName()
+            << ", remaining_budget_sec=" << getLastLowLevelRemainingBudgetSec()
+            << ", effective_timeout_sec=" << getLastLowLevelEffectiveTimeoutSec()
+            << ")\n";
+      logInitialSegmentFailureDiagnostics(
+          instance_, solution_, constraintTable, agent, task, taskPosition,
+          startTime, *solution_.agents[agent].pathPlanner,
+          getLastLowLevelRemainingBudgetSec(),
+          getLastLowLevelEffectiveTimeoutSec());
+      return false;
+    }
+    solution_.agents[agent].taskPaths[taskPosition] = initialPaths_[task];
+    plannedTasks[task] = 1;
   }
 
   // Join per-task paths into per-agent paths.

@@ -914,6 +914,7 @@ class LNS {
   void reservePathWithGoalPolicy(ConstraintTable& constraintTable,
                                  const AgentTaskPath& path,
                                  bool isFinalTask) const;
+  int getServiceOccupancyEndExclusive(int agent) const;
   void reserveTerminalPathIfActive(ConstraintTable& constraintTable,
                                    int agent) const;
   int computeActiveServiceHorizon() const;
@@ -949,24 +950,24 @@ class LNS {
   OccupancySource getAgentOccupancySourceAt(
       int agent, int timestep, bool includeTerminal = true) const;
   // Returns an agent's occupied location at timestep.
-  // If includeTerminal is false, ignores terminalPath and mirrors current
-  // behavior by holding at the end of the service path.
+  // If includeTerminal is false, occupancy follows service + goal policy
+  // (stay/tail/reposition), excluding explicit terminalPath.
   int getAgentLocationAt(int agent, int timestep,
                          bool includeTerminal = true) const;
   // Returns the occupancy horizon (exclusive upper bound) for collision checks.
-  // In Phase A, behavior is unchanged unless includeTerminal is true and
-  // terminalPath is explicitly active.
+  // Horizon is policy-aware for service occupancy and optionally includes
+  // explicit terminalPath when includeTerminal is true.
   int getAgentOccupancyHorizon(int agent,
                                bool includeTerminal = true) const;
   bool validateSolution(ConflictMap* conflictedTasks = nullptr);
   void addConflictingTask(int agent, int timestep, ConflictMap* out) const;
 
-  void buildConstraintTable(ConstraintTable& constraintTable, int task);
-  void buildConstraintTable(
+  bool buildConstraintTable(ConstraintTable& constraintTable, int task);
+  bool buildConstraintTable(
       ConstraintTable& constraintTable, int task,
       const vector<pair<int, int>>& precedenceConstraints);
 
-  void buildConstraintTable(ConstraintTable& constraintTable,
+  bool buildConstraintTable(ConstraintTable& constraintTable,
                             TaskRegretPacket taskPacket, int taskLocation,
                             RegretWorkspace& workspace,
                             vector<pair<int, int>>* precedenceConstraints,

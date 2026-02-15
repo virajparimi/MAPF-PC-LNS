@@ -104,8 +104,8 @@ bool LNS::run() {
     // Run the greedy task assignment and subsequent path finding algorithm
     success = buildGreedySolution();
   } else if (initialSolutionStrategy == "prioritized") {
-    // Plan agent chains by fixed priority with reservations from already
-    // planned agents.
+    // Plan tasks in global topological order with reservations from already
+    // planned task segments.
     success = buildPrioritizedInitialSolution();
   } else if (initialSolutionStrategy == "greedy_precedence_only") {
     // Precedence-feasible, collision-infeasible warm start.
@@ -964,7 +964,11 @@ bool LNS::prepareNextIteration() {
       assert(taskPosition <= (int)agentTasks.size() - 1);
 
       ConstraintTable constraintTable(instance_.numOfCols, instance_.mapSize);
-      buildConstraintTable(constraintTable, task);
+      if (!buildConstraintTable(constraintTable, task)) {
+        PLOGE << "prepareNextIteration: failed to build constraint table for "
+              << "task " << task << " (agent " << agent << ")\n";
+        return false;
+      }
       AgentTaskPath path = runLowLevelSearch(
           *solution_.agents[agent].pathPlanner, constraintTable, startTime,
           taskPosition, 0);
