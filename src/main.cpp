@@ -59,6 +59,11 @@ int main(int argc, char** argv) {
       "Absolute cap for successor-closure added tasks in "
       "prepareNextIteration (0 = use maxCascadeFactor formula)");
   desc.add_options()(
+      "partialSolutionRestore",
+      po::value<bool>()->default_value(false),
+      "Use touched-agent-scoped rollback restore instead of always copying "
+      "the full solution snapshot");
+  desc.add_options()(
       "repairIncludeNonAncestorAgents",
       po::value<bool>()->default_value(true),
       "Include non-ancestor agent paths in repair constraint tables");
@@ -71,6 +76,38 @@ int main(int argc, char** argv) {
       "initialFallback",
       po::value<string>()->default_value("greedy"),
       "Fallback when initial solution fails: 'greedy' or 'none'");
+  desc.add_options()(
+      "goalOccupationMode",
+      po::value<string>()->default_value("stay"),
+      "Final-goal reservation policy: 'stay', 'tail', 'reposition', or "
+      "'reposition_true'");
+  desc.add_options()(
+      "goalTailSteps",
+      po::value<int>()->default_value(0),
+      "Additional timesteps to reserve final goals in 'tail'/'reposition' modes");
+  desc.add_options()(
+      "repositionMaxCandidates",
+      po::value<int>()->default_value(12),
+      "Maximum parking candidates evaluated per final goal in "
+      "'reposition_true' mode");
+  desc.add_options()(
+      "repositionDemandLookahead",
+      po::value<int>()->default_value(0),
+      "Demand scan horizon after completion in 'reposition_true' "
+      "(0 = full path horizon)");
+  desc.add_options()(
+      "repositionReservationSlack",
+      po::value<int>()->default_value(64),
+      "Additional timesteps beyond active service horizon to reserve "
+      "terminal occupancy in 'reposition_true'");
+  desc.add_options()(
+      "greedySegmentDiagnostics",
+      po::bool_switch()->default_value(false),
+      "Emit per-segment low-level diagnostics for greedy initialization");
+  desc.add_options()(
+      "greedySegmentDiagnosticsTopK",
+      po::value<int>()->default_value(10),
+      "Top-K expensive greedy segments to print in diagnostics summary");
   desc.add_options()(
       "destroyHeuristic,H", po::value<string>()->default_value("conflict"),
       "Destroy heuristic to use for creating the LNS neighborhood");
@@ -285,6 +322,48 @@ int main(int argc, char** argv) {
              "from 'greedy' and 'none'\n";
     return 1;
   }
+  string goalOccupationMode = vm["goalOccupationMode"].as<string>();
+  if (goalOccupationMode != "stay" && goalOccupationMode != "tail" &&
+      goalOccupationMode != "reposition" &&
+      goalOccupationMode != "reposition_true") {
+    PLOGE << "Incorrect goal occupation mode provided. Please choose from "
+             "'stay', 'tail', 'reposition', and 'reposition_true'\n";
+    return 1;
+  }
+  const int goalTailSteps = vm["goalTailSteps"].as<int>();
+  const int repositionMaxCandidates =
+      vm["repositionMaxCandidates"].as<int>();
+  const int repositionDemandLookahead =
+      vm["repositionDemandLookahead"].as<int>();
+  const int repositionReservationSlack =
+      vm["repositionReservationSlack"].as<int>();
+  const bool greedySegmentDiagnostics =
+      vm["greedySegmentDiagnostics"].as<bool>();
+  const int greedySegmentDiagnosticsTopK =
+      vm["greedySegmentDiagnosticsTopK"].as<int>();
+  if (goalTailSteps < 0) {
+    PLOGE << "goalTailSteps must be non-negative\n";
+    return 1;
+  }
+  if (repositionMaxCandidates <= 0) {
+    PLOGE << "repositionMaxCandidates must be positive\n";
+    return 1;
+  }
+  if (repositionDemandLookahead < 0) {
+    PLOGE << "repositionDemandLookahead must be non-negative\n";
+    return 1;
+  }
+  if (repositionReservationSlack < 0) {
+    PLOGE << "repositionReservationSlack must be non-negative\n";
+    return 1;
+  }
+  if (greedySegmentDiagnosticsTopK <= 0) {
+    PLOGE << "greedySegmentDiagnosticsTopK must be positive\n";
+    return 1;
+  }
+  if (goalOccupationMode == "stay" && goalTailSteps > 0) {
+    PLOGW << "goalTailSteps is ignored when goalOccupationMode='stay'\n";
+  }
 
   string destroyHeuristic = vm["destroyHeuristic"].as<string>();
   if (destroyHeuristic != "conflict" && destroyHeuristic != "worst" &&
@@ -417,6 +496,7 @@ int main(int argc, char** argv) {
   const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
   const double maxCascadeFactor = vm["maxCascadeFactor"].as<double>();
   const int maxCascadeTasks = vm["maxCascadeTasks"].as<int>();
+  const bool partialSolutionRestore = vm["partialSolutionRestore"].as<bool>();
   const bool repairIncludeNonAncestorAgents =
       vm["repairIncludeNonAncestorAgents"].as<bool>();
   if (agentNum < 0) {
@@ -511,6 +591,13 @@ int main(int argc, char** argv) {
   parameters.core.timeLimit = cutoffTime;
   parameters.core.initialSolutionStrategy = initialSolutionStrategy;
   parameters.core.initialSolutionFallback = initialSolutionFallback;
+  parameters.core.goalOccupationMode = goalOccupationMode;
+  parameters.core.goalTailSteps = goalTailSteps;
+  parameters.core.repositionMaxCandidates = repositionMaxCandidates;
+  parameters.core.repositionDemandLookahead = repositionDemandLookahead;
+  parameters.core.repositionReservationSlack = repositionReservationSlack;
+  parameters.core.greedySegmentDiagnostics = greedySegmentDiagnostics;
+  parameters.core.greedySegmentDiagnosticsTopK = greedySegmentDiagnosticsTopK;
   parameters.core.destroyHeuristic = destroyHeuristic;
   parameters.core.acceptanceCriteria = acceptanceCriteria;
   parameters.core.regretType = regretType;
@@ -518,6 +605,7 @@ int main(int argc, char** argv) {
   parameters.core.regretCandidateTopK = regretCandidateTopK;
   parameters.core.maxCascadeFactor = maxCascadeFactor;
   parameters.core.maxCascadeTasks = maxCascadeTasks;
+  parameters.core.partialSolutionRestore = partialSolutionRestore;
   parameters.core.repairIncludeNonAncestorAgents =
       repairIncludeNonAncestorAgents;
   parameters.core.incrementalRegretMode = incrementalRegretMode;

@@ -44,17 +44,32 @@ struct MarketStats {
 struct Agent {
   int id;
   AgentTaskPath path;
+  // Optional post-completion trajectory (move-out/wait/return) used by
+  // true-reposition modes. In Phase A this is plumbing only.
+  AgentTaskPath terminalPath;
+  bool terminalPathActive = false;
   vector<int> taskAssignments;
   vector<AgentTaskPath> taskPaths;
   vector<pair<int, int>> intraPrecedenceConstraints;
+  // Best-effort inverse lookup cache: global task -> local index in
+  // taskAssignments. Entries are validated before use, so stale hints are safe.
+  mutable vector<int> localTaskIndexCache;
+  // True when assignment-order mutations happened without eagerly updating
+  // intraPrecedenceConstraints. This keeps hot-path updates O(1) and treats
+  // intraPrecedenceConstraints as diagnostic-only cache.
+  bool intraPrecedenceDirty = false;
   std::shared_ptr<SingleAgentSolver> pathPlanner = nullptr;
 
   Agent(const Agent& other)
       : id(other.id),
         path(other.path),
+        terminalPath(other.terminalPath),
+        terminalPathActive(other.terminalPathActive),
         taskAssignments(other.taskAssignments),
         taskPaths(other.taskPaths),
         intraPrecedenceConstraints(other.intraPrecedenceConstraints),
+        localTaskIndexCache(other.localTaskIndexCache),
+        intraPrecedenceDirty(other.intraPrecedenceDirty),
         pathPlanner(clonePlanner(other.pathPlanner, other.id)) {}
   Agent(Agent&&) noexcept = default;
   Agent& operator=(const Agent& other) {
@@ -64,9 +79,13 @@ struct Agent {
     const int oldId = id;
     id = other.id;
     path = other.path;
+    terminalPath = other.terminalPath;
+    terminalPathActive = other.terminalPathActive;
     taskPaths = other.taskPaths;
     taskAssignments = other.taskAssignments;
     intraPrecedenceConstraints = other.intraPrecedenceConstraints;
+    localTaskIndexCache = other.localTaskIndexCache;
+    intraPrecedenceDirty = other.intraPrecedenceDirty;
     if (other.pathPlanner == nullptr) {
       pathPlanner.reset();
     } else if (pathPlanner != nullptr && oldId == other.id &&
@@ -81,14 +100,35 @@ struct Agent {
   Agent& operator=(Agent&&) noexcept = default;
   Agent(const Instance& instance, int id) : id(id) {
     pathPlanner = std::make_shared<MultiLabelSpaceTimeAStar>(instance, id);
+    localTaskIndexCache.assign(instance.getTasksNum(), UNASSIGNED);
   }
   ~Agent() = default;
 
   int getLocalTaskIndex(int globalTask) const {
+    if (globalTask < 0) {
+      PLOGE << "Agent::getLocalTaskIndex: invalid negative task "
+            << globalTask << " for agent " << id << "\n";
+      assert(false);
+      return UNASSIGNED;
+    }
+    if (globalTask >= 0 && globalTask < (int)localTaskIndexCache.size()) {
+      const int cached = localTaskIndexCache[globalTask];
+      if (cached >= 0 && cached < (int)taskAssignments.size() &&
+          taskAssignments[cached] == globalTask) {
+        return cached;
+      }
+    }
     for (int i = 0; i < (int)taskAssignments.size(); i++) {
-      if (taskAssignments[i] == globalTask) {
+      const int task = taskAssignments[i];
+      if (task >= 0 && task < (int)localTaskIndexCache.size()) {
+        localTaskIndexCache[task] = i;
+      }
+      if (task == globalTask) {
         return i;
       }
+    }
+    if (globalTask >= 0 && globalTask < (int)localTaskIndexCache.size()) {
+      localTaskIndexCache[globalTask] = UNASSIGNED;
     }
     PLOGE << "Agent::getLocalTaskIndex: task " << globalTask
           << " not found in agent " << id << " assignments\n";
@@ -101,12 +141,8 @@ struct Agent {
            taskAssignments.end());
     assert(std::find(taskAssignments.begin(), taskAssignments.end(), taskB) !=
            taskAssignments.end());
-    const auto edge = std::make_pair(taskA, taskB);
-    if (std::find(intraPrecedenceConstraints.begin(),
-                  intraPrecedenceConstraints.end(),
-                  edge) == intraPrecedenceConstraints.end()) {
-      intraPrecedenceConstraints.push_back(edge);
-    }
+    intraPrecedenceConstraints.emplace_back(taskA, taskB);
+    intraPrecedenceDirty = false;
   }
 
   // Inserts intra-agent precedence edges around a newly inserted task.
@@ -123,82 +159,28 @@ struct Agent {
       assert(false);
       return;
     }
-    int previousTask = UNDEFINED, nextTask = UNDEFINED;
-    if (taskPosition > 0) {
-      previousTask = taskAssignments[taskPosition - 1];
+    if (taskAssignments[taskPosition] != task) {
+      PLOGE << "insertIntraAgentPrecedenceConstraint: task mismatch at "
+            << "position " << taskPosition << " for agent " << id
+            << " (expected " << task << ", found "
+            << taskAssignments[taskPosition] << ")\n";
+      assert(false);
+      return;
     }
-    if (taskPosition + 1 < assignmentSize) {
-      nextTask = taskAssignments[taskPosition + 1];
-    }
-    intraPrecedenceConstraints.erase(
-        std::remove_if(intraPrecedenceConstraints.begin(),
-                       intraPrecedenceConstraints.end(),
-                       [previousTask, nextTask](pair<int, int> x) {
-                         return (
-                             (x.first == previousTask && x.second == nextTask));
-                       }),
-        intraPrecedenceConstraints.end());
-    const auto addEdgeIfMissing = [this](int from, int to) {
-      if (from < 0 || to < 0) {
-        return;
-      }
-      const auto edge = std::make_pair(from, to);
-      if (std::find(intraPrecedenceConstraints.begin(),
-                    intraPrecedenceConstraints.end(),
-                    edge) == intraPrecedenceConstraints.end()) {
-        intraPrecedenceConstraints.emplace_back(edge);
-      }
-    };
-    addEdgeIfMissing(previousTask, task);
-    addEdgeIfMissing(task, nextTask);
+    intraPrecedenceDirty = true;
   }
 
   void clearIntraAgentPrecedenceConstraint(int task) {
-    assert(std::find(taskAssignments.begin(), taskAssignments.end(), task) !=
-           taskAssignments.end());
-    int taskPosition = getLocalTaskIndex(task);
-    if (taskPosition == UNASSIGNED) {
+#ifndef NDEBUG
+    const auto taskIt = std::find(taskAssignments.begin(), taskAssignments.end(),
+                                  task);
+    if (taskIt == taskAssignments.end()) {
       PLOGE << "clearIntraAgentPrecedenceConstraint: task " << task
-            << " has no local index for agent " << id << "\n";
+            << " not found for agent " << id << "\n";
       return;
     }
-    int previousTask = UNDEFINED, nextTask = UNDEFINED;
-
-    // During destroy/repair, taskAssignments can temporarily contain tombstones
-    // (UNDEFINED / UNASSIGNED) before compaction; skip them when reconnecting.
-    const auto isConcreteTask = [](int value) {
-      return value != UNDEFINED && value != UNASSIGNED;
-    };
-    for (int pos = taskPosition - 1; pos >= 0; --pos) {
-      if (isConcreteTask(taskAssignments[pos])) {
-        previousTask = taskAssignments[pos];
-        break;
-      }
-    }
-    for (int pos = taskPosition + 1; pos < (int)taskAssignments.size(); ++pos) {
-      if (isConcreteTask(taskAssignments[pos])) {
-        nextTask = taskAssignments[pos];
-        break;
-      }
-    }
-
-    if (previousTask >= 0 || nextTask >= 0) {
-      intraPrecedenceConstraints.erase(
-          std::remove_if(intraPrecedenceConstraints.begin(),
-                         intraPrecedenceConstraints.end(),
-                         [task, previousTask, nextTask](pair<int, int> x) {
-                           return (
-                               (previousTask >= 0 && x.first == previousTask &&
-                                x.second == task) ||
-                               (nextTask >= 0 && x.first == task &&
-                                x.second == nextTask));
-                         }),
-          intraPrecedenceConstraints.end());
-    }
-
-    if (previousTask >= 0 && nextTask >= 0) {
-      insertPrecedenceConstraint(previousTask, nextTask);
-    }
+#endif
+    intraPrecedenceDirty = true;
   }
 
  private:
@@ -634,6 +616,25 @@ struct LNSParams {
     // Fallback strategy when initialSolutionStrategy fails.
     // Supported: "greedy", "none".
     string initialSolutionFallback = "greedy";
+    // Final-goal occupancy policy used when reserving completed task paths in
+    // constraint tables:
+    // - "stay": reserve final goal indefinitely (legacy behavior)
+    // - "tail": reserve final goal for goalTailSteps and then release
+    // - "reposition": MVP alias of tail-release (explicit move-out/return is
+    //   not yet modeled in task paths)
+    // - "reposition_true": explicit terminal move-out/return path (Phase B+)
+    string goalOccupationMode = "stay";
+    int goalTailSteps = 0;
+    // Phase-D knobs for true reposition performance.
+    int repositionMaxCandidates = 12;
+    // 0 = scan full path horizon when detecting demand at final goals.
+    int repositionDemandLookahead = 0;
+    // Additional timesteps beyond active service horizon to reserve
+    // terminalPath occupancy in constraint tables.
+    int repositionReservationSlack = 64;
+    // Emit per-(agent,task) greedy low-level segment diagnostics.
+    bool greedySegmentDiagnostics = false;
+    int greedySegmentDiagnosticsTopK = 10;
     string destroyHeuristic;
     string acceptanceCriteria;
     string regretType;
@@ -651,6 +652,9 @@ struct LNSParams {
     // If maxCascadeFactor <= 0 and maxCascadeTasks == 0, cap is disabled.
     double maxCascadeFactor = 3.0;
     int maxCascadeTasks = 0;
+    // Enable touched-agent-scoped rollback restore.
+    // Full-copy restore remains the default/fallback behavior.
+    bool partialSolutionRestore = false;
     // Supported: "descendants", "descendants+agent".
     string incrementalRegretMode = "descendants+agent";
     unsigned int seed = 0;
@@ -696,6 +700,7 @@ struct LNSParams {
 
 class LNS {
  public:
+  struct RegretWorkspace;
   struct LowLevelSearchStats {
     uint64_t calls = 0;
     uint64_t expanded = 0;
@@ -714,6 +719,8 @@ class LNS {
     int64_t agentEvaluations = 0;
     int64_t candidateInsertionsTried = 0;
     int64_t candidateInsertionsFeasible = 0;
+    int64_t workspaceAgentsCloned = 0;
+    int64_t workspaceMaxClonedPerTask = 0;
     int64_t neighborhoods = 0;
     int64_t removedTasksSum = 0;
     int64_t removedTasksMax = 0;
@@ -748,6 +755,28 @@ class LNS {
     void reset() { *this = CascadeStats(); }
   };
 
+  struct TerminalRepositionStats {
+    int64_t replansRequested = 0;
+    int64_t agentsEvaluated = 0;
+    int64_t agentsPlanned = 0;
+    int64_t skippedNoDemand = 0;
+    int64_t planningFailures = 0;
+    int64_t candidateCacheHits = 0;
+    int64_t candidateCacheMisses = 0;
+
+    void reset() { *this = TerminalRepositionStats(); }
+  };
+
+  struct SolutionRestoreStats {
+    int64_t restoreCalls = 0;
+    int64_t fullRestores = 0;
+    int64_t partialRestores = 0;
+    int64_t partialRestoreFallbacks = 0;
+    int64_t partialAgentsRestored = 0;
+
+    void reset() { *this = SolutionRestoreStats(); }
+  };
+
  private:
   int numOfIterations_;
   bool incrementalRegret_ = false;
@@ -755,6 +784,7 @@ class LNS {
   double lowLevelSegmentTimeout_ = 600.0;
   bool plannerParityCheck_ = false;
   int plannerParityMaxLogs_ = 10;
+  bool partialSolutionRestore_ = false;
   struct MarketState : LNSParams::Market {
     // Runtime-only market state. Configuration fields are inherited from
     // LNSParams::Market to avoid duplicated declarations.
@@ -795,6 +825,9 @@ class LNS {
   IncrementalRegretStats incrementalRegretStatsCurrent_;
   IncrementalRegretStats incrementalRegretStatsTotal_;
 
+  void buildFullPrecedenceConstraints(
+      vector<pair<int, int>>& out,
+      bool includeIntraConstraints = true) const;
   vector<pair<int, int>> buildFullPrecedenceConstraints(
       bool includeIntraConstraints = true) const;
   void computeTaskScheduleMetricsFromIndex(
@@ -810,6 +843,8 @@ class LNS {
   bool runtimeBudgetExhausted() const;
   int cascadeTaskBudget() const;
   void clearNeighborhood();
+  vector<int> buildRollbackAgentHints(const vector<int>& baseAgents) const;
+  void restoreSolutionFromPrevious(const vector<int>* agentHints = nullptr);
 
  protected:
   ALNS adaptiveLNS_;
@@ -818,11 +853,16 @@ class LNS {
   double maxCascadeFactor_ = 3.0;
   int maxCascadeTasks_ = 0;
   bool repairIncludeNonAncestorAgents_ = true;
+  bool useTerminalPathsInValidation_ = false;
   bool lastPrepareAbortedByCascade_ = false;
   int lastPrepareSeedTasks_ = 0;
   int lastPrepareClosureTasks_ = 0;
   int lastPrepareClosureAdded_ = 0;
+  vector<int> lastPrepareAffectedAgents_;
+  vector<int> iterationRollbackHintAgents_;
   CascadeStats cascadeStats_;
+  SolutionRestoreStats solutionRestoreStats_;
+  vector<pair<int, int>> fullPrecedenceConstraintsScratch_;
   Neighbor lnsNeighborhood_;
   const Instance& instance_;
   unsigned int seed_ = 0;
@@ -852,6 +892,15 @@ class LNS {
                      shawDistanceWeight_ = 9, shawTemporalWeight_ = 3,
                      lnsConflictWeight_ = 0.75, lnsCostWeight_ = 0.25;
   Time::time_point plannerStartTime_;
+  string goalOccupationMode_ = "stay";
+  int goalTailSteps_ = 0;
+  int repositionMaxCandidates_ = 12;
+  int repositionDemandLookahead_ = 0;
+  int repositionReservationSlack_ = 64;
+  bool greedySegmentDiagnostics_ = false;
+  int greedySegmentDiagnosticsTopK_ = 10;
+  mutable unordered_map<int, vector<int>> parkingCandidatesCache_;
+  TerminalRepositionStats terminalRepositionStats_;
 
  public:
   double runtime = 0;
@@ -860,6 +909,20 @@ class LNS {
   string initialSolutionStrategy, initialSolutionFallback, destroyHeuristic,
       acceptanceCriteria,
       regretType;
+
+ private:
+  void reservePathWithGoalPolicy(ConstraintTable& constraintTable,
+                                 const AgentTaskPath& path,
+                                 bool isFinalTask) const;
+  void reserveTerminalPathIfActive(ConstraintTable& constraintTable,
+                                   int agent) const;
+  int computeActiveServiceHorizon() const;
+  bool didAgentServicePathChange(int agent) const;
+  vector<int> selectTerminalReplanAgents(
+      const vector<int>& candidateAgents) const;
+  const vector<int>& getParkingCandidatesForGoal(int finalGoal);
+
+ public:
 
   LNS(int numOfIterations, const Instance& instance,
       const LNSParams& parameters);
@@ -873,6 +936,8 @@ class LNS {
   // Precedence-feasible initial solution that ignores inter-agent collisions.
   bool buildGreedySolutionPrecedenceOnly();
   bool buildGreedySolutionWithMAPFPC(const string& variant);
+  bool planTerminalReposition(const vector<int>& agentsToPlan,
+                              bool fullRebuild);
 
   bool prepareNextIteration();
   void markResolved(int globalTask);
@@ -880,6 +945,19 @@ class LNS {
   void patchAgentTaskPaths(int agent, int taskPosition);
 
   void printPaths() const;
+  enum class OccupancySource { undefined, service, terminal };
+  OccupancySource getAgentOccupancySourceAt(
+      int agent, int timestep, bool includeTerminal = true) const;
+  // Returns an agent's occupied location at timestep.
+  // If includeTerminal is false, ignores terminalPath and mirrors current
+  // behavior by holding at the end of the service path.
+  int getAgentLocationAt(int agent, int timestep,
+                         bool includeTerminal = true) const;
+  // Returns the occupancy horizon (exclusive upper bound) for collision checks.
+  // In Phase A, behavior is unchanged unless includeTerminal is true and
+  // terminalPath is explicitly active.
+  int getAgentOccupancyHorizon(int agent,
+                               bool includeTerminal = true) const;
   bool validateSolution(ConflictMap* conflictedTasks = nullptr);
   void addConflictingTask(int agent, int timestep, ConflictMap* out) const;
 
@@ -890,8 +968,7 @@ class LNS {
 
   void buildConstraintTable(ConstraintTable& constraintTable,
                             TaskRegretPacket taskPacket, int taskLocation,
-                            vector<vector<int>>* agentTaskAssignments,
-                            vector<vector<AgentTaskPath>>* agentTaskPaths,
+                            RegretWorkspace& workspace,
                             vector<pair<int, int>>* precedenceConstraints,
                             bool findingNextTask = false);
 
@@ -906,8 +983,7 @@ class LNS {
       int task,
       const vector<pair<int, int>>& fullPrecedenceConstraints);
   void computeRegretForTaskWithAgent(
-      TaskRegretPacket regretPacket, vector<vector<int>>* agentTaskAssignments,
-      vector<vector<AgentTaskPath>>* agentTaskPaths,
+      TaskRegretPacket regretPacket, RegretWorkspace& workspace,
       vector<pair<int, int>>* precedenceConstraints,
       const TaskBaselineMetrics& baselineMetrics,
       pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes);
@@ -930,8 +1006,7 @@ class LNS {
 
   std::variant<bool, Utility> insertTask(
       TaskRegretPacket regretPacket,
-      vector<vector<AgentTaskPath>>* agentTaskPaths,
-      vector<vector<int>>* agentTaskAssignments,
+      RegretWorkspace& workspace,
       vector<pair<int, int>>* precedenceConstraints,
       const TaskBaselineMetrics* baselineMetrics = nullptr,
       SingleAgentSolver* reusablePlanner = nullptr,
@@ -947,6 +1022,13 @@ class LNS {
   int lastPrepareClosureAdded() const { return lastPrepareClosureAdded_; }
   const CascadeStats& getCascadeStatsRef() const { return cascadeStats_; }
   int getCascadeTaskBudget() const { return cascadeTaskBudget(); }
+  const SolutionRestoreStats& getSolutionRestoreStats() const {
+    return solutionRestoreStats_;
+  }
+  bool isPartialSolutionRestoreEnabled() const { return partialSolutionRestore_; }
+  const TerminalRepositionStats& getTerminalRepositionStats() const {
+    return terminalRepositionStats_;
+  }
   LowLevelSearchStats getLowLevelSearchStats() const {
     return {lowLevelCalls_,         lowLevelExpanded_,      lowLevelGenerated_,
             lowLevelFound_,         lowLevelTimeout_,       lowLevelSearchExhausted_,
@@ -1009,8 +1091,11 @@ class LNS {
   double computeTaskMarketExposure(int task, bool normalized) const;
   double computeSolutionMarketPressure() const;
   double computeSolutionPrecedenceWait() const;
-  bool passMarketAcceptanceGuards(double candidatePressure,
-                                  double candidateWait) const;
+  bool passMarketAcceptanceGuards(double previousPressure,
+                                  double candidatePressure,
+                                  double previousWait,
+                                  double candidateWait,
+                                  bool candidateIsWorse) const;
   void updateMarketStateFromCurrentSolution();
   void maybeUpdateMarketState(bool accepted);
   double computeMarketExposureFromPath(const AgentTaskPath& taskPath,
@@ -1018,6 +1103,9 @@ class LNS {
   int computeTaskPrecedenceWaitFromState(
       int task, int taskLocation, const vector<vector<int>>& agentTaskAssignments,
       const vector<vector<AgentTaskPath>>& agentTaskPaths,
+      const vector<pair<int, int>>& precedenceConstraints) const;
+  int computeTaskPrecedenceWaitFromWorkspace(
+      int task, int taskLocation, const RegretWorkspace& workspace,
       const vector<pair<int, int>>& precedenceConstraints) const;
   int computeTaskPrecedenceWaitInCurrentSolution(int task) const;
 

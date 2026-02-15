@@ -1,29 +1,6 @@
 #include "lns.hpp"
+#include "internal/task_position_index.hpp"
 #include "utils.hpp"
-
-namespace {
-vector<int> buildTaskPositionIndexByMappedAgent(const Solution& solution,
-                                                int taskCount) {
-  vector<int> taskToPosition(taskCount, UNASSIGNED);
-  for (int agent = 0; agent < solution.numOfAgents; agent++) {
-    const auto& assignments = solution.agents[agent].taskAssignments;
-    for (int pos = 0; pos < (int)assignments.size(); pos++) {
-      const int task = assignments[pos];
-      if (task < 0 || task >= taskCount) {
-        continue;
-      }
-      if (task >= (int)solution.taskAgentMap.size() ||
-          solution.taskAgentMap[task] != agent) {
-        continue;
-      }
-      if (taskToPosition[task] == UNASSIGNED) {
-        taskToPosition[task] = pos;
-      }
-    }
-  }
-  return taskToPosition;
-}
-}  // namespace
 
 void LNS::clearNeighborhood() {
   lnsNeighborhood_.patchedTasks.clear();
@@ -270,7 +247,7 @@ void LNS::randomRemoval() {
   // avoiding repeated draws/duplicate checks.
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPosition =
-      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   const int numToRemove = (neighborSize_ < taskCount) ? neighborSize_ : taskCount;
   vector<int> taskIds(taskCount);
   std::iota(taskIds.begin(), taskIds.end(), 0);
@@ -319,7 +296,7 @@ void LNS::conflictRemoval(const ConflictMap* potentialNeighborhood) {
 
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPosition =
-      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   const int cappedNeighborSize = min(neighborSize_, taskCount);
   if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
     // Augment conflicts without unbounded rejection-sampling loops.
@@ -378,7 +355,7 @@ void LNS::worstRemoval() {
 
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPosition =
-      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   const int cappedNeighborSize = min(neighborSize_, taskCount);
   // Maintain a priority queue of (key, value) where key is the path length of a task and the value is the task. We need to do a reverse way to avoid making our own comparator
   ppq worstTasksOrder;
@@ -451,7 +428,7 @@ void LNS::shawRemoval(int prioritySize) {
 
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPosition =
-      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   // Sample a random task and remove it!
   int randomTask = -1;
   int randomTaskAgent = UNASSIGNED;
@@ -671,6 +648,8 @@ void LNS::precedenceWaitRemoval(const ConflictMap* potentialNeighborhood) {
   vector<char> taskFeasible(taskCount, 1);
   vector<int> taskToAgent(taskCount, UNASSIGNED);
   vector<int> taskToPosition(taskCount, -1);
+  vector<TaskScheduleMetrics> scheduleMetrics;
+  computeTaskScheduleMetrics(scheduleMetrics, nullptr);
 
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     const auto& assignments = solution_.agents[agent].taskAssignments;
@@ -694,58 +673,19 @@ void LNS::precedenceWaitRemoval(const ConflictMap* potentialNeighborhood) {
       continue;
     }
 
-    int prevEnd = 0;
-    int prevLocation = instance_.getStartLocationsRef()[agent];
-    if (taskPos > 0) {
-      const AgentTaskPath& previousTaskPath =
-          solution_.agents[agent].taskPaths[taskPos - 1];
-      if (!previousTaskPath.empty()) {
-        prevEnd = previousTaskPath.endTime();
-        prevLocation = previousTaskPath.back().location;
-      } else {
-        // Defensive fallback for malformed intermediate schedules.
-        const int previousTask =
-            solution_.agents[agent].taskAssignments[taskPos - 1];
-        prevLocation = instance_.getTaskLocations(previousTask);
-        prevEnd = 0;
-      }
+    if (task >= (int)scheduleMetrics.size()) {
+      taskFeasible[task] = 0;
+      continue;
     }
-
-    const int taskLocation = instance_.getTaskLocations(task);
-    const int travelToTask =
-        instance_.getManhattanDistance(prevLocation, taskLocation);
-    const int earliestArrivalNoPrec = prevEnd + travelToTask;
-
-    int maxPredEnd = std::numeric_limits<int>::min();
-    int blocker = UNASSIGNED;
-    for (int pred : predecessors[task]) {
-      if (pred < 0 || pred >= taskCount) {
-        continue;
-      }
-      const int predAgent = taskToAgent[pred];
-      const int predPos = taskToPosition[pred];
-      if (predAgent == UNASSIGNED) {
-        continue;
-      }
-      if (predPos < 0 ||
-          predPos >= (int)solution_.agents[predAgent].taskPaths.size()) {
-        continue;
-      }
-      const AgentTaskPath& predPath = solution_.agents[predAgent].taskPaths[predPos];
-      if (predPath.empty()) {
-        continue;
-      }
-      const int predEnd = predPath.endTime();
-      if (predEnd > maxPredEnd) {
-        maxPredEnd = predEnd;
-        blocker = pred;
-      }
+    const TaskScheduleMetrics& metric = scheduleMetrics[task];
+    if (!metric.valid) {
+      taskFeasible[task] = 0;
+      continue;
     }
-
-    if (blocker != UNASSIGNED) {
-      criticalPred[task] = blocker;
-      releaseTime[task] = maxPredEnd;
-      precedenceWait[task] = max(0, maxPredEnd - earliestArrivalNoPrec);
+    if (metric.blocker != UNASSIGNED) {
+      criticalPred[task] = metric.blocker;
+      releaseTime[task] = metric.release;
+      precedenceWait[task] = metric.waitPrec;
     }
   }
 
@@ -888,6 +828,8 @@ void LNS::lowSlackRemoval(const ConflictMap* potentialNeighborhood) {
 
   vector<int> taskToAgent(taskCount, UNASSIGNED);
   vector<int> taskToPosition(taskCount, -1);
+  vector<TaskScheduleMetrics> scheduleMetrics;
+  computeTaskScheduleMetrics(scheduleMetrics, nullptr);
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     const auto& assignments = solution_.agents[agent].taskAssignments;
     const auto& taskPaths = solution_.agents[agent].taskPaths;
@@ -901,28 +843,31 @@ void LNS::lowSlackRemoval(const ConflictMap* potentialNeighborhood) {
     }
   }
 
-  vector<char> taskFeasible(taskCount, 1);
-  vector<char> hasSuccessor(taskCount, 0);
-  vector<int> slack(taskCount, INF);
-  vector<int> tightSuccessor(taskCount, UNASSIGNED);
+  struct CriticalEdge {
+    int from = UNASSIGNED;
+    int to = UNASSIGNED;
+    int slack = INF;
+  };
+  vector<CriticalEdge> edgeOrder;
+  edgeOrder.reserve(taskCount);
+
+  vector<char> taskFeasible(taskCount, 0);
+  vector<char> hasCriticalEdge(taskCount, 0);
+  vector<int> bestIncidentSlack(taskCount, INF);
 
   for (int task = 0; task < taskCount; task++) {
     const int agent = taskToAgent[task];
     const int taskPos = taskToPosition[task];
     if (agent == UNASSIGNED || taskPos < 0 ||
         taskPos >= (int)solution_.agents[agent].taskPaths.size()) {
-      taskFeasible[task] = 0;
       continue;
     }
-    const AgentTaskPath& taskPath = solution_.agents[agent].taskPaths[taskPos];
-    if (taskPath.empty()) {
-      taskFeasible[task] = 0;
+    if (task >= (int)scheduleMetrics.size() || !scheduleMetrics[task].valid) {
       continue;
     }
+    taskFeasible[task] = 1;
 
-    const int endTask = taskPath.endTime();
-    int minSuccStart = INF;
-    int minSucc = UNASSIGNED;
+    const int endTask = scheduleMetrics[task].end;
     for (int succ : successors[task]) {
       if (succ < 0 || succ >= taskCount) {
         continue;
@@ -933,23 +878,29 @@ void LNS::lowSlackRemoval(const ConflictMap* potentialNeighborhood) {
           succPos >= (int)solution_.agents[succAgent].taskPaths.size()) {
         continue;
       }
-      const AgentTaskPath& succPath = solution_.agents[succAgent].taskPaths[succPos];
-      if (succPath.empty()) {
+      if (succ >= (int)scheduleMetrics.size() || !scheduleMetrics[succ].valid) {
         continue;
       }
-      hasSuccessor[task] = 1;
-      const int succStart = succPath.beginTime;
-      if (succStart < minSuccStart) {
-        minSuccStart = succStart;
-        minSucc = succ;
-      }
-    }
-
-    if (minSucc != UNASSIGNED) {
-      tightSuccessor[task] = minSucc;
-      slack[task] = minSuccStart - endTask;
+      // Critical-edge slack uses realized successor arrival and predecessor end.
+      const int edgeSlack = scheduleMetrics[succ].arrive - endTask;
+      edgeOrder.push_back({task, succ, edgeSlack});
+      hasCriticalEdge[task] = 1;
+      hasCriticalEdge[succ] = 1;
+      bestIncidentSlack[task] = min(bestIncidentSlack[task], edgeSlack);
+      bestIncidentSlack[succ] = min(bestIncidentSlack[succ], edgeSlack);
     }
   }
+
+  std::stable_sort(edgeOrder.begin(), edgeOrder.end(),
+                   [](const CriticalEdge& lhs, const CriticalEdge& rhs) {
+                     if (lhs.slack != rhs.slack) {
+                       return lhs.slack < rhs.slack;  // tighter edge first
+                     }
+                     if (lhs.from != rhs.from) {
+                       return lhs.from < rhs.from;
+                     }
+                     return lhs.to < rhs.to;
+                   });
 
   vector<int> order(taskCount);
   std::iota(order.begin(), order.end(), 0);
@@ -957,11 +908,11 @@ void LNS::lowSlackRemoval(const ConflictMap* potentialNeighborhood) {
     if (taskFeasible[lhs] != taskFeasible[rhs]) {
       return taskFeasible[lhs] > taskFeasible[rhs];
     }
-    if (hasSuccessor[lhs] != hasSuccessor[rhs]) {
-      return hasSuccessor[lhs] > hasSuccessor[rhs];
+    if (hasCriticalEdge[lhs] != hasCriticalEdge[rhs]) {
+      return hasCriticalEdge[lhs] > hasCriticalEdge[rhs];
     }
-    if (slack[lhs] != slack[rhs]) {
-      return slack[lhs] < slack[rhs];  // lower slack = tighter
+    if (bestIncidentSlack[lhs] != bestIncidentSlack[rhs]) {
+      return bestIncidentSlack[lhs] < bestIncidentSlack[rhs];
     }
     return lhs < rhs;
   });
@@ -1013,29 +964,26 @@ void LNS::lowSlackRemoval(const ConflictMap* potentialNeighborhood) {
     }
   };
 
-  // Pass 1: remove low-slack tasks and their tight successors / local DAG
-  // neighbors to unlock precedence bottlenecks.
-  for (int task : order) {
+  // Pass 1: remove endpoints of low-slack precedence edges and their local DAG
+  // neighborhoods to unlock tight handoffs.
+  for (const auto& edge : edgeOrder) {
     if ((int)lnsNeighborhood_.removedTasks.size() >= cappedNeighborSize) {
       break;
     }
-    if (!taskFeasible[task] || !hasSuccessor[task]) {
+    const int task = edge.from;
+    const int succ = edge.to;
+    if (!taskFeasible[task] || !taskFeasible[succ]) {
       continue;
     }
-    const bool insertedSeed = addTask(task);
-    if (!insertedSeed) {
+    const bool insertedTask = addTask(task);
+    const bool insertedSucc = addTask(succ);
+    if (!insertedTask && !insertedSucc) {
       continue;
-    }
-    const int succ = tightSuccessor[task];
-    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
-        succ != UNASSIGNED) {
-      addTask(succ);
     }
     if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
       addOneHopNeighborhood(task);
     }
-    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize &&
-        succ != UNASSIGNED) {
+    if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
       addOneHopNeighborhood(succ);
     }
   }

@@ -395,6 +395,52 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Max closure added tasks", cascadeStats.closureAddedMax);
   printMetric("Avg closure_added/total_tasks", avgClosureFracOfTasks);
 
+  const auto& restoreStats = lns.getSolutionRestoreStats();
+  const double partialRestoreRate =
+      restoreStats.restoreCalls > 0
+          ? (double)restoreStats.partialRestores /
+                (double)restoreStats.restoreCalls
+          : 0.0;
+  const double avgAgentsPerPartialRestore =
+      restoreStats.partialRestores > 0
+          ? (double)restoreStats.partialAgentsRestored /
+                (double)restoreStats.partialRestores
+          : 0.0;
+  std::cout << "\n=== Solution Restore Stats ===\n";
+  printMetric("Partial restore enabled",
+              lns.isPartialSolutionRestoreEnabled() ? "true" : "false");
+  printMetric("Restore calls", restoreStats.restoreCalls);
+  printMetric("Full restores", restoreStats.fullRestores);
+  printMetric("Partial restores", restoreStats.partialRestores);
+  printMetric("Partial restore fallbacks",
+              restoreStats.partialRestoreFallbacks);
+  printMetric("Partial restore rate", partialRestoreRate);
+  printMetric("Avg agents/partial restore", avgAgentsPerPartialRestore);
+
+  const auto& terminalStats = lns.getTerminalRepositionStats();
+  if (terminalStats.replansRequested > 0) {
+    const double plannedRate =
+        terminalStats.agentsEvaluated > 0
+            ? (double)terminalStats.agentsPlanned /
+                  (double)terminalStats.agentsEvaluated
+            : 0.0;
+    const double noDemandRate =
+        terminalStats.agentsEvaluated > 0
+            ? (double)terminalStats.skippedNoDemand /
+                  (double)terminalStats.agentsEvaluated
+            : 0.0;
+    std::cout << "\n=== Terminal Reposition Stats ===\n";
+    printMetric("Replan calls", terminalStats.replansRequested);
+    printMetric("Agents evaluated", terminalStats.agentsEvaluated);
+    printMetric("Agents planned", terminalStats.agentsPlanned);
+    printMetric("Skipped (no demand)", terminalStats.skippedNoDemand);
+    printMetric("Planning failures", terminalStats.planningFailures);
+    printMetric("Candidate cache hits", terminalStats.candidateCacheHits);
+    printMetric("Candidate cache misses", terminalStats.candidateCacheMisses);
+    printMetric("Planned/evaluated", plannedRate);
+    printMetric("No-demand/evaluated", noDemandRate);
+  }
+
   if (marketHeuristics) {
     const MarketStats marketStats = lns.getMarketStats();
     std::cout << "\n=== Market Stats ===\n";
@@ -426,6 +472,9 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
               regretStats.candidateInsertionsTried);
   printMetric("Candidate insertions feasible",
               regretStats.candidateInsertionsFeasible);
+  printMetric("Workspace agents cloned", regretStats.workspaceAgentsCloned);
+  printMetric("Max cloned agents/task",
+              regretStats.workspaceMaxClonedPerTask);
   printMetric("Feasible rate", feasibleRate);
   printMetric("Repair neighborhoods", regretStats.neighborhoods);
   printMetric("Avg removed tasks/neighborhood", avgRemovedTasks);

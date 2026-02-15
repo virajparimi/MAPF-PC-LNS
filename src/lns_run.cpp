@@ -1,31 +1,8 @@
 #include "lns.hpp"
+#include "internal/task_position_index.hpp"
 #include "utils.hpp"
 #include <cmath>
 #include <limits>
-
-namespace {
-vector<int> buildTaskPositionIndexByMappedAgent(const Solution& solution,
-                                                int taskCount) {
-  vector<int> taskToPosition(taskCount, UNASSIGNED);
-  for (int agent = 0; agent < solution.numOfAgents; agent++) {
-    const auto& assignments = solution.agents[agent].taskAssignments;
-    for (int pos = 0; pos < (int)assignments.size(); pos++) {
-      const int task = assignments[pos];
-      if (task < 0 || task >= taskCount) {
-        continue;
-      }
-      if (task >= (int)solution.taskAgentMap.size() ||
-          solution.taskAgentMap[task] != agent) {
-        continue;
-      }
-      if (taskToPosition[task] == UNASSIGNED) {
-        taskToPosition[task] = pos;
-      }
-    }
-  }
-  return taskToPosition;
-}
-}  // namespace
 
 bool LNS::simulatedAnnealing() {
 
@@ -39,7 +16,7 @@ bool LNS::simulatedAnnealing() {
     temperature_ = fallbackTemperature;
     accepted = solution_.utility <= previousSolution_.utility;
     if (!accepted) {
-      solution_ = previousSolution_;
+      restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
       PLOGD << "Rejecting this solution!\n";
     }
     temperature_ = max(kMinTemperature, temperature_ * coolingCoefficient_);
@@ -65,7 +42,7 @@ bool LNS::simulatedAnnealing() {
     accepted = true;
   } else {
     // Reject this solution
-    solution_ = previousSolution_;
+    restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
     PLOGD << "Rejecting this solution!\n";
   }
   temperature_ *= coolingCoefficient_;
@@ -80,7 +57,7 @@ bool LNS::thresholdAcceptance() {
     accepted = true;
   } else {
     // Reject this solution
-    solution_ = previousSolution_;
+    restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
     PLOGD << "Rejecting this solution!\n";
   }
   temperature_ *= coolingCoefficient_;
@@ -96,7 +73,7 @@ bool LNS::oldBachelorsAcceptance() {
     accepted = true;
   } else {
     // Reject this solution and increase the temperature
-    solution_ = previousSolution_;
+    restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
     const double reheated = temperature_ * heatingCoefficient_;
     temperature_ = std::min(reheated, maxTemperature_);
     PLOGD << "Rejecting this solution\n";
@@ -114,7 +91,7 @@ bool LNS::greatDelugeAlgorithm() {
     accepted = true;
   } else {
     // Reject this solution but dont change the temperature'
-    solution_ = previousSolution_;
+    restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
     PLOGD << "Rejecting this solution\n";
   }
   return accepted;
@@ -164,8 +141,20 @@ bool LNS::run() {
   PLOGD << "Initial solution cost = " << solution_.sumOfCosts
         << ", Runtime = " << initialSolutionRuntime_ << "\n";
 
+  if (goalOccupationMode_ == "reposition_true") {
+    vector<int> allAgents(instance_.getAgentNum());
+    std::iota(allAgents.begin(), allAgents.end(), 0);
+    if (!planTerminalReposition(allAgents, true)) {
+      PLOGE << "run: true terminal reposition planning failed during "
+               "initialization\n";
+      return false;
+    }
+  }
+
   ConflictMap potentialNeighborhood;  // Need for the conflict removal case
+  useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
   bool valid = validateSolution(&potentialNeighborhood);
+  useTerminalPathsInValidation_ = false;
 
   bool feasibleSolutionUpdated = false;
   if (valid) {
@@ -255,7 +244,12 @@ bool LNS::run() {
   // LNS loop
   while (runtime < timeLimit_ &&
          static_cast<int64_t>(iterationStats.size()) < iterationLimit) {
+    iterationRollbackHintAgents_.clear();
     const int previousSocForIter = previousSolution_.sumOfCosts;
+    const double previousPressureForIter =
+        market_.heuristics ? computeSolutionMarketPressure() : 0.0;
+    const double previousWaitForIter =
+        market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
     int alnsHeuristicForIter = -1;
 
     // These functions populate the LNS neighborhoods' removedTask parameter
@@ -304,7 +298,11 @@ bool LNS::run() {
           adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
         }
       }
-      solution_ = previousSolution_;
+      if (!cascadeAbort) {
+        iterationRollbackHintAgents_ =
+            buildRollbackAgentHints(lastPrepareAffectedAgents_);
+        restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+      }
       feasibleSolutionUpdated = false;
       quality = IterationQuality::couldNotFind;
       runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
@@ -326,6 +324,82 @@ bool LNS::run() {
       }
     }
     lnsNeighborhood_.immutableRemovedTasks = lnsNeighborhood_.removedTasks;
+    // Collect agents impacted by this neighborhood once and reuse across:
+    // 1) terminal-path invalidation, 2) path-join scope, 3) terminal replanning.
+    vector<int> agentsToCompute;
+    vector<char> agentMarked(instance_.getAgentNum(), 0);
+    auto markAgent = [&](int agent) {
+      if (agent >= 0 && agent < instance_.getAgentNum() && !agentMarked[agent]) {
+        agentMarked[agent] = 1;
+        agentsToCompute.push_back(agent);
+      }
+    };
+    vector<char> visitedTask(instance_.getTasksNum(), 0);
+    stack<int> taskStack;
+    for (const auto& [_, conflict] : lnsNeighborhood_.immutableRemovedTasks) {
+      taskStack.push(conflict.task);
+      markAgent(conflict.agent);
+    }
+    const auto& ancestors = instance_.getAncestorsRef();
+    const auto& successors = instance_.getSuccessorsRef();
+    while (!taskStack.empty()) {
+      const int task = taskStack.top();
+      taskStack.pop();
+      if (task < 0 || task >= instance_.getTasksNum() || visitedTask[task]) {
+        continue;
+      }
+      visitedTask[task] = 1;
+      const int curAgent =
+          (task >= 0 && task < (int)solution_.taskAgentMap.size())
+              ? solution_.taskAgentMap[task]
+              : UNASSIGNED;
+      if (curAgent != UNASSIGNED) {
+        markAgent(curAgent);
+      }
+      const int prevAgent =
+          (task >= 0 && task < (int)previousSolution_.taskAgentMap.size())
+              ? previousSolution_.taskAgentMap[task]
+              : UNASSIGNED;
+      if (prevAgent != UNASSIGNED) {
+        markAgent(prevAgent);
+      }
+      for (int parent : ancestors[task]) {
+        if (parent >= 0 && parent < instance_.getTasksNum() &&
+            !visitedTask[parent]) {
+          taskStack.push(parent);
+        }
+      }
+      for (int child : successors[task]) {
+        if (child >= 0 && child < instance_.getTasksNum() &&
+            !visitedTask[child]) {
+          taskStack.push(child);
+        }
+      }
+    }
+    if (agentsToCompute.empty()) {
+      agentsToCompute.resize(instance_.getAgentNum());
+      std::iota(agentsToCompute.begin(), agentsToCompute.end(), 0);
+    }
+    const vector<int> rollbackBaseAgents = agentsToCompute;
+    // Phase-D optimization: join only agents that are provably dirty.
+    // prepareNextIteration clears service paths for impacted agents, so an
+    // empty joined path is a reliable dirty signal.
+    vector<int> filteredAgentsToCompute;
+    filteredAgentsToCompute.reserve(agentsToCompute.size());
+    for (int agent : agentsToCompute) {
+      if (agent < 0 || agent >= instance_.getAgentNum()) {
+        continue;
+      }
+      const bool assignmentsChanged =
+          (solution_.agents[agent].taskAssignments !=
+           previousSolution_.agents[agent].taskAssignments);
+      if (solution_.agents[agent].path.empty() || assignmentsChanged) {
+        filteredAgentsToCompute.push_back(agent);
+      }
+    }
+    if (!filteredAgentsToCompute.empty()) {
+      agentsToCompute.swap(filteredAgentsToCompute);
+    }
 
     // Repair: commit removed tasks back using regret.
     //
@@ -464,7 +538,9 @@ bool LNS::run() {
         adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
       }
       // Reject whatever we done till now
-      solution_ = previousSolution_;
+      iterationRollbackHintAgents_ =
+          buildRollbackAgentHints(rollbackBaseAgents);
+      restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
       feasibleSolutionUpdated = false;
       quality = IterationQuality::couldNotFind;
       runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
@@ -478,70 +554,16 @@ bool LNS::run() {
       continue;
     }
 
-    // Join only agents impacted by this neighborhood (removed tasks and their
-    // precedence neighborhood). This avoids rebuilding all agent paths every
-    // iteration when only a small subset changed.
-    vector<int> agentsToCompute;
-    vector<char> agentMarked(instance_.getAgentNum(), 0);
-    auto markAgent = [&](int agent) {
-      if (agent >= 0 && agent < instance_.getAgentNum() && !agentMarked[agent]) {
-        agentMarked[agent] = 1;
-        agentsToCompute.push_back(agent);
-      }
-    };
-    vector<char> visitedTask(instance_.getTasksNum(), 0);
-    stack<int> taskStack;
-    for (const auto& [_, conflict] : lnsNeighborhood_.immutableRemovedTasks) {
-      taskStack.push(conflict.task);
-      markAgent(conflict.agent);
-    }
-    const auto& ancestors = instance_.getAncestorsRef();
-    const auto& successors = instance_.getSuccessorsRef();
-    while (!taskStack.empty()) {
-      const int task = taskStack.top();
-      taskStack.pop();
-      if (task < 0 || task >= instance_.getTasksNum() || visitedTask[task]) {
-        continue;
-      }
-      visitedTask[task] = 1;
-      const int curAgent =
-          (task >= 0 && task < (int)solution_.taskAgentMap.size())
-              ? solution_.taskAgentMap[task]
-              : UNASSIGNED;
-      if (curAgent != UNASSIGNED) {
-        markAgent(curAgent);
-      }
-      const int prevAgent =
-          (task >= 0 && task < (int)previousSolution_.taskAgentMap.size())
-              ? previousSolution_.taskAgentMap[task]
-              : UNASSIGNED;
-      if (prevAgent != UNASSIGNED) {
-        markAgent(prevAgent);
-      }
-      for (int parent : ancestors[task]) {
-        if (parent >= 0 && parent < instance_.getTasksNum() &&
-            !visitedTask[parent]) {
-          taskStack.push(parent);
-        }
-      }
-      for (int child : successors[task]) {
-        if (child >= 0 && child < instance_.getTasksNum() &&
-            !visitedTask[child]) {
-          taskStack.push(child);
-        }
-      }
-    }
-    if (agentsToCompute.empty()) {
-      agentsToCompute.resize(instance_.getAgentNum());
-      std::iota(agentsToCompute.begin(), agentsToCompute.end(), 0);
-    }
+    // Join only agents impacted by this neighborhood.
     if (!solution_.joinPaths(agentsToCompute)) {
       PLOGE << "run: failed to join agent paths for candidate solution\n";
       if (alnsHeuristicForIter >= 0 &&
           alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
         adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
       }
-      solution_ = previousSolution_;
+      iterationRollbackHintAgents_ =
+          buildRollbackAgentHints(rollbackBaseAgents);
+      restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
       feasibleSolutionUpdated = false;
       quality = IterationQuality::couldNotFind;
       runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
@@ -550,6 +572,30 @@ bool LNS::run() {
           solution_.sumOfCosts, feasibleSolutionUpdated, quality));
       maybeUpdateMarketState(false);
       continue;
+    }
+    if (goalOccupationMode_ == "reposition_true") {
+      const vector<int> terminalReplanAgents =
+          selectTerminalReplanAgents(agentsToCompute);
+      if (!terminalReplanAgents.empty() &&
+          !planTerminalReposition(terminalReplanAgents, false)) {
+        PLOGE << "run: failed to replan terminal reposition paths for "
+                 "candidate solution\n";
+        if (alnsHeuristicForIter >= 0 &&
+            alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
+          adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
+        }
+        iterationRollbackHintAgents_ =
+            buildRollbackAgentHints(rollbackBaseAgents);
+        restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+        feasibleSolutionUpdated = false;
+        quality = IterationQuality::couldNotFind;
+        runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
+        appendIterationStat(IterationStats(
+            runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
+            solution_.sumOfCosts, feasibleSolutionUpdated, quality));
+        maybeUpdateMarketState(false);
+        continue;
+      }
     }
 
     // Compute the updated sum of costs
@@ -578,7 +624,9 @@ bool LNS::run() {
 
     // Extract the set of conflicting tasks
     potentialNeighborhood.clear();
+    useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
     valid = validateSolution(&potentialNeighborhood);
+    useTerminalPathsInValidation_ = false;
 
     PLOGD << "Number of conflicts in new solution: "
           << potentialNeighborhood.size() << "\n";
@@ -620,9 +668,15 @@ bool LNS::run() {
         temperature_ = max(0.0, temperature_ - greatDelugeDecay_);
       }
     };
+    iterationRollbackHintAgents_ = buildRollbackAgentHints(rollbackBaseAgents);
     if (market_.heuristics && market_.acceptanceGuards &&
-        !passMarketAcceptanceGuards(candidatePressure, candidateWait)) {
-      solution_ = previousSolution_;
+        !passMarketAcceptanceGuards(previousPressureForIter, candidatePressure,
+                                    previousWaitForIter, candidateWait,
+                                    previousSolution_.utility <
+                                        solution_.utility)) {
+      iterationRollbackHintAgents_ =
+          buildRollbackAgentHints(rollbackBaseAgents);
+      restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
       accepted = false;
       guardRejected = true;
       advanceTemperatureOnGuardReject();
@@ -707,10 +761,11 @@ bool LNS::prepareNextIteration() {
   lastPrepareSeedTasks_ = 0;
   lastPrepareClosureTasks_ = 0;
   lastPrepareClosureAdded_ = 0;
+  lastPrepareAffectedAgents_.clear();
 
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPositionBefore =
-      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
 
   // Find the tasks that are following the earliest conflicting task as their paths need to be invalidated
   const auto& successors = instance_.getSuccessorsRef();
@@ -846,12 +901,16 @@ bool LNS::prepareNextIteration() {
     }
     solution_.agents[agent].taskPaths[taskPosition] = AgentTaskPath();
   }
+  lastPrepareAffectedAgents_.assign(affectedAgents.begin(),
+                                    affectedAgents.end());
 
   // Marking past information about conflicting tasks
   for (int affAgent : affectedAgents) {
 
     // For an affected agent there can be multiple conflicting tasks so need to do it this way
     solution_.agents[affAgent].path = AgentTaskPath();
+    solution_.agents[affAgent].terminalPath = AgentTaskPath();
+    solution_.agents[affAgent].terminalPathActive = false;
     solution_.agents[affAgent].taskAssignments.erase(
         std::remove_if(solution_.agents[affAgent].taskAssignments.begin(),
                        solution_.agents[affAgent].taskAssignments.end(),
@@ -869,7 +928,7 @@ bool LNS::prepareNextIteration() {
   }
 
   const vector<int> taskToPositionAfter =
-      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
 
   lnsNeighborhood_.patchedTasks = tasksToFix;
 

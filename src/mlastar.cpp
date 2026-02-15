@@ -155,13 +155,13 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
     // After the last relevant constraint timestamp, compress time progression
     // for spatial moves to keep the state-space finite. Wait actions are
     // skipped in that regime because they are dominated.
-    const int constraintHorizon = constraintTable.temporalExtent;
     // Do not compress time progression before holding-time obligations are met.
     // Otherwise stages that require waiting past the constraint horizon can
     // become unreachable (no action can increase timestep further).
-    const bool compressTimeBeyondHorizon =
-        (current->timestep > constraintHorizon + 1 &&
-         current->timestep >= holdingTime);
+    // Correctness-first policy: keep explicit timestep progression even beyond
+    // the finite constraint horizon. This avoids relying on compressed-time
+    // state equivalence between gVal and timestep.
+    const bool compressTimeBeyondHorizon = false;
 
     auto tryExpandSuccessor = [&](int successor, int nextTimestep) {
       if (constraintTable.constrained(successor, nextTimestep) ||

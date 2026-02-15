@@ -1,29 +1,112 @@
 #include "lns.hpp"
+#include "internal/task_position_index.hpp"
 #include "utils.hpp"
 
 namespace {
-vector<int> buildTaskPositionIndexByMappedAgent(const Solution& solution,
-                                                int taskCount) {
-  vector<int> taskToPosition(taskCount, UNASSIGNED);
-  for (int agent = 0; agent < solution.numOfAgents; agent++) {
-    const auto& assignments = solution.agents[agent].taskAssignments;
-    for (int pos = 0; pos < (int)assignments.size(); pos++) {
-      const int task = assignments[pos];
-      if (task < 0 || task >= taskCount) {
-        continue;
-      }
-      if (task >= (int)solution.taskAgentMap.size() ||
-          solution.taskAgentMap[task] != agent) {
-        continue;
-      }
-      if (taskToPosition[task] == UNASSIGNED) {
-        taskToPosition[task] = pos;
-      }
-    }
+const char* occupancySourceName(LNS::OccupancySource source) {
+  switch (source) {
+    case LNS::OccupancySource::service:
+      return "service";
+    case LNS::OccupancySource::terminal:
+      return "terminal";
+    case LNS::OccupancySource::undefined:
+    default:
+      return "undefined";
   }
-  return taskToPosition;
+}
+
+const char* occupancyPairLabel(LNS::OccupancySource lhs,
+                               LNS::OccupancySource rhs) {
+  if (lhs == LNS::OccupancySource::terminal &&
+      rhs == LNS::OccupancySource::terminal) {
+    return "terminal-vs-terminal";
+  }
+  if ((lhs == LNS::OccupancySource::service &&
+       rhs == LNS::OccupancySource::terminal) ||
+      (lhs == LNS::OccupancySource::terminal &&
+       rhs == LNS::OccupancySource::service)) {
+    return "service-vs-terminal";
+  }
+  if (lhs == LNS::OccupancySource::service &&
+      rhs == LNS::OccupancySource::service) {
+    return "service-vs-service";
+  }
+  return "unknown";
 }
 }  // namespace
+
+LNS::OccupancySource LNS::getAgentOccupancySourceAt(
+    int agent, int timestep, bool includeTerminal) const {
+  if (agent < 0 || agent >= instance_.getAgentNum() || timestep < 0) {
+    return OccupancySource::undefined;
+  }
+  const auto& servicePath = solution_.agents[agent].path;
+  if (servicePath.empty()) {
+    return OccupancySource::undefined;
+  }
+  if (timestep < (int)servicePath.size()) {
+    return OccupancySource::service;
+  }
+
+  if (includeTerminal && solution_.agents[agent].terminalPathActive) {
+    const auto& terminalPath = solution_.agents[agent].terminalPath;
+    if (!terminalPath.empty()) {
+      if (timestep < terminalPath.beginTime) {
+        return OccupancySource::service;
+      }
+      return OccupancySource::terminal;
+    }
+  }
+  return OccupancySource::service;
+}
+
+int LNS::getAgentLocationAt(int agent, int timestep, bool includeTerminal) const {
+  if (agent < 0 || agent >= instance_.getAgentNum() || timestep < 0) {
+    return UNDEFINED;
+  }
+  const auto& servicePath = solution_.agents[agent].path;
+  if (servicePath.empty()) {
+    return UNDEFINED;
+  }
+  if (timestep < (int)servicePath.size()) {
+    return servicePath.at(timestep).location;
+  }
+
+  if (includeTerminal && solution_.agents[agent].terminalPathActive) {
+    const auto& terminalPath = solution_.agents[agent].terminalPath;
+    if (!terminalPath.empty()) {
+      if (timestep < terminalPath.beginTime) {
+        return servicePath.back().location;
+      }
+      const int terminalOffset = timestep - terminalPath.beginTime;
+      if (terminalOffset >= 0 && terminalOffset < (int)terminalPath.size()) {
+        return terminalPath.at(terminalOffset).location;
+      }
+      return terminalPath.back().location;
+    }
+  }
+
+  // Legacy behavior: hold at last service location.
+  return servicePath.back().location;
+}
+
+int LNS::getAgentOccupancyHorizon(int agent, bool includeTerminal) const {
+  if (agent < 0 || agent >= instance_.getAgentNum()) {
+    return 0;
+  }
+  const auto& servicePath = solution_.agents[agent].path;
+  if (servicePath.empty()) {
+    return 0;
+  }
+  int horizon = (int)servicePath.size();
+  if (includeTerminal && solution_.agents[agent].terminalPathActive) {
+    const auto& terminalPath = solution_.agents[agent].terminalPath;
+    if (!terminalPath.empty()) {
+      horizon = max(horizon, terminalPath.endTimeOrZero() + 1);
+    }
+  }
+  return horizon;
+}
 
 void LNS::addConflictingTask(int agent, int timestep, ConflictMap* out) const {
   if (out == nullptr || agent < 0 || agent >= instance_.getAgentNum()) {
@@ -60,7 +143,7 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
   bool result = true;
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPosition =
-      buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
 
   vector<pair<int, int>> precedenceConstraints =
       buildFullPrecedenceConstraints();
@@ -146,20 +229,9 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
       continue;
     }
     activeAgents.push_back(agent);
-    maxPathLength = max(maxPathLength, (int)solution_.agents[agent].path.size());
+    maxPathLength = max(maxPathLength, getAgentOccupancyHorizon(
+                                           agent, useTerminalPathsInValidation_));
   }
-
-  auto getLocationAt = [this](int agent, int timestep) {
-    const auto& path = solution_.agents[agent].path;
-    if (path.empty()) {
-      return UNDEFINED;
-    }
-    if (timestep < (int)path.size()) {
-      return path.at(timestep).location;
-    }
-    // After path end, agent waits at its final location.
-    return path.back().location;
-  };
 
   auto edgeKey = [](int from, int to) -> uint64_t {
     return (static_cast<uint64_t>(static_cast<uint32_t>(from)) << 32) |
@@ -175,7 +247,8 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
     // Vertex collisions at timestep.
     occupancy.clear();
     for (int agent : activeAgents) {
-      const int location = getLocationAt(agent, timestep);
+      const int location = getAgentLocationAt(
+          agent, timestep, useTerminalPathsInValidation_);
       if (location == UNDEFINED) {
         continue;
       }
@@ -191,10 +264,18 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
         for (int j = i + 1; j < (int)agentsAtLocation.size(); j++) {
           const int agentI = agentsAtLocation[i];
           const int agentJ = agentsAtLocation[j];
+          const OccupancySource sourceI = getAgentOccupancySourceAt(
+              agentI, timestep, useTerminalPathsInValidation_);
+          const OccupancySource sourceJ = getAgentOccupancySourceAt(
+              agentJ, timestep, useTerminalPathsInValidation_);
           pair<int, int> coord = instance_.getCoordinate(location);
           PLOGE << "Agents " << agentI << " and " << agentJ
                 << " collide with each other at (" << coord.first << ", "
-                << coord.second << ") at timestep " << timestep << "\n";
+                << coord.second << ") at timestep " << timestep
+                << " [type=" << occupancyPairLabel(sourceI, sourceJ)
+                << ", a" << agentI << "=" << occupancySourceName(sourceI)
+                << ", a" << agentJ << "=" << occupancySourceName(sourceJ)
+                << "]\n";
           result = false;
           if (conflictedTasks == nullptr) {
             return false;
@@ -211,8 +292,10 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
     }
     directedEdgeOwner.clear();
     for (int agent : activeAgents) {
-      const int from = getLocationAt(agent, timestep);
-      const int to = getLocationAt(agent, timestep + 1);
+      const int from = getAgentLocationAt(
+          agent, timestep, useTerminalPathsInValidation_);
+      const int to = getAgentLocationAt(
+          agent, timestep + 1, useTerminalPathsInValidation_);
       if (from == UNDEFINED || to == UNDEFINED || from == to) {
         // Waiting cannot create a swap conflict.
         continue;
@@ -221,12 +304,34 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
       const auto reverseIt = directedEdgeOwner.find(reverse);
       if (reverseIt != directedEdgeOwner.end()) {
         const int otherAgent = reverseIt->second;
+        const OccupancySource sourceAFrom = getAgentOccupancySourceAt(
+            agent, timestep, useTerminalPathsInValidation_);
+        const OccupancySource sourceATo = getAgentOccupancySourceAt(
+            agent, timestep + 1, useTerminalPathsInValidation_);
+        const OccupancySource sourceBFrom = getAgentOccupancySourceAt(
+            otherAgent, timestep, useTerminalPathsInValidation_);
+        const OccupancySource sourceBTo = getAgentOccupancySourceAt(
+            otherAgent, timestep + 1, useTerminalPathsInValidation_);
+        const OccupancySource sourceA =
+            (sourceAFrom == OccupancySource::terminal ||
+             sourceATo == OccupancySource::terminal)
+                ? OccupancySource::terminal
+                : sourceAFrom;
+        const OccupancySource sourceB =
+            (sourceBFrom == OccupancySource::terminal ||
+             sourceBTo == OccupancySource::terminal)
+                ? OccupancySource::terminal
+                : sourceBFrom;
         pair<int, int> coordI = instance_.getCoordinate(from);
         pair<int, int> coordJ = instance_.getCoordinate(to);
         PLOGE << "Agents " << agent << " and " << otherAgent
               << " collide with each other at (" << coordI.first << ", "
               << coordI.second << ") --> (" << coordJ.first << ", "
-              << coordJ.second << ") at timestep " << timestep << "\n";
+              << coordJ.second << ") at timestep " << timestep
+              << " [type=" << occupancyPairLabel(sourceA, sourceB)
+              << ", a" << agent << "=" << occupancySourceName(sourceA)
+              << ", a" << otherAgent << "=" << occupancySourceName(sourceB)
+              << "]\n";
         result = false;
         if (conflictedTasks == nullptr) {
           return false;

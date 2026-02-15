@@ -204,30 +204,66 @@ bool reachableWithPermanentBlocksByTime(const Instance& instance,
 }
 }  // namespace
 
-vector<pair<int, int>> LNS::buildFullPrecedenceConstraints(
+void LNS::buildFullPrecedenceConstraints(
+    vector<pair<int, int>>& precedenceConstraints,
     bool includeIntraConstraints) const {
   const auto& inputConstraints = instance_.getInputPrecedenceConstraintsRef();
   size_t totalConstraints = inputConstraints.size();
   if (includeIntraConstraints) {
     for (int agent = 0; agent < instance_.getAgentNum(); ++agent) {
-      totalConstraints +=
-          solution_.agents[agent].intraPrecedenceConstraints.size();
+      const auto& assignments = solution_.agents[agent].taskAssignments;
+      if (assignments.size() > 1) {
+        totalConstraints += (assignments.size() - 1);
+      }
     }
   }
 
-  vector<pair<int, int>> precedenceConstraints;
+  precedenceConstraints.clear();
   precedenceConstraints.reserve(totalConstraints);
   precedenceConstraints.insert(precedenceConstraints.end(),
                                inputConstraints.begin(),
                                inputConstraints.end());
   if (includeIntraConstraints) {
+    int mismatchLogs = 0;
+    constexpr int kMaxMismatchLogs = 10;
     for (int agent = 0; agent < instance_.getAgentNum(); ++agent) {
-      const auto& intra = solution_.agents[agent].intraPrecedenceConstraints;
-      precedenceConstraints.insert(precedenceConstraints.end(),
-                                   intra.begin(),
-                                   intra.end());
+      const auto& assignments = solution_.agents[agent].taskAssignments;
+      const auto& storedIntra = solution_.agents[agent].intraPrecedenceConstraints;
+      const bool intraDirty = solution_.agents[agent].intraPrecedenceDirty;
+
+      // Correctness-first: derive intra-agent precedence directly from the
+      // current assignment order so cycle checks and precedence constraints use
+      // the same edge source.
+      for (int pos = 1; pos < (int)assignments.size(); ++pos) {
+        const int pred = assignments[pos - 1];
+        const int succ = assignments[pos];
+        if (pred >= 0 && pred < instance_.getTasksNum() &&
+            succ >= 0 && succ < instance_.getTasksNum()) {
+          precedenceConstraints.emplace_back(pred, succ);
+        }
+      }
+
+      // Keep stored intra edges for diagnostics only. If they drift from the
+      // assignment-derived edges, log warnings so stale state is visible.
+      if (!intraDirty &&
+          (storedIntra.size() + 1 < assignments.size() ||
+           (assignments.empty() && !storedIntra.empty()))) {
+        if (mismatchLogs < kMaxMismatchLogs) {
+          PLOGW << "buildFullPrecedenceConstraints: stored intra-edge count ("
+                << storedIntra.size() << ") differs from assignment-derived count ("
+                << (assignments.empty() ? 0 : (int)assignments.size() - 1)
+                << ") for agent " << agent << "\n";
+          mismatchLogs++;
+        }
+      }
     }
   }
+}
+
+vector<pair<int, int>> LNS::buildFullPrecedenceConstraints(
+    bool includeIntraConstraints) const {
+  vector<pair<int, int>> precedenceConstraints;
+  buildFullPrecedenceConstraints(precedenceConstraints, includeIntraConstraints);
   return precedenceConstraints;
 }
 
@@ -388,6 +424,239 @@ double LNS::remainingRuntimeBudgetSec() const {
 
 bool LNS::runtimeBudgetExhausted() const { return elapsedRuntimeSec() >= timeLimit_; }
 
+void LNS::reservePathWithGoalPolicy(ConstraintTable& constraintTable,
+                                    const AgentTaskPath& path,
+                                    bool isFinalTask) const {
+  if (path.empty()) {
+    return;
+  }
+  if (!isFinalTask || goalOccupationMode_ == "stay") {
+    constraintTable.addPath(path, isFinalTask);
+    return;
+  }
+
+  // Tail/reposition modes reserve the traversal but release the terminal goal
+  // after a bounded hold to avoid permanent bottlenecks.
+  constraintTable.addPath(path, false);
+  if (goalTailSteps_ <= 0) {
+    return;
+  }
+
+  const int holdStart = path.endTimeChecked() + 1;
+  if (holdStart >= MAX_TIMESTEP) {
+    return;
+  }
+  const int holdEnd = min(MAX_TIMESTEP, holdStart + goalTailSteps_);
+  if (holdEnd > holdStart) {
+    constraintTable.insert2CT(path.back().location, holdStart, holdEnd);
+  }
+}
+
+void LNS::reserveTerminalPathIfActive(ConstraintTable& constraintTable,
+                                      int agent) const {
+  if (goalOccupationMode_ != "reposition_true") {
+    return;
+  }
+  if (agent < 0 || agent >= instance_.getAgentNum()) {
+    return;
+  }
+  const auto& terminalPath = solution_.agents[agent].terminalPath;
+  if (!solution_.agents[agent].terminalPathActive || terminalPath.empty()) {
+    return;
+  }
+  const int serviceHorizon = computeActiveServiceHorizon();
+  const int cappedEndExclusive =
+      serviceHorizon + max(0, repositionReservationSlack_);
+  if (cappedEndExclusive <= terminalPath.beginTime) {
+    return;
+  }
+  if (terminalPath.endTimeChecked() < cappedEndExclusive) {
+    constraintTable.addPath(terminalPath, false);
+    return;
+  }
+
+  AgentTaskPath clippedTerminal;
+  clippedTerminal.beginTime = terminalPath.beginTime;
+  const int clippedSize =
+      min((int)terminalPath.size(), cappedEndExclusive - terminalPath.beginTime);
+  if (clippedSize <= 0) {
+    return;
+  }
+  clippedTerminal.path.insert(clippedTerminal.path.end(),
+                              terminalPath.path.begin(),
+                              terminalPath.path.begin() + clippedSize);
+  constraintTable.addPath(clippedTerminal, false);
+
+  // Hold the terminal end location through the capped horizon so CT occupancy
+  // matches validator semantics (agent remains at terminal endpoint).
+  const int holdStart = clippedTerminal.beginTime + (int)clippedTerminal.size();
+  if (holdStart < cappedEndExclusive) {
+    constraintTable.insert2CT(clippedTerminal.back().location, holdStart,
+                              cappedEndExclusive);
+  }
+}
+
+int LNS::computeActiveServiceHorizon() const {
+  int horizon = 0;
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (solution_.agents[agent].path.empty()) {
+      continue;
+    }
+    horizon = max(horizon, solution_.agents[agent].path.endTimeOrZero() + 1);
+  }
+  return horizon;
+}
+
+bool LNS::didAgentServicePathChange(int agent) const {
+  if (agent < 0 || agent >= instance_.getAgentNum()) {
+    return true;
+  }
+  const auto& currentPath = solution_.agents[agent].path;
+  const auto& previousPath = previousSolution_.agents[agent].path;
+  if (currentPath.empty() != previousPath.empty()) {
+    return true;
+  }
+  if (currentPath.empty() && previousPath.empty()) {
+    return false;
+  }
+  if (currentPath.beginTime != previousPath.beginTime ||
+      currentPath.size() != previousPath.size()) {
+    return true;
+  }
+  for (int i = 0; i < (int)currentPath.size(); i++) {
+    if (currentPath.at(i).location != previousPath.at(i).location ||
+        currentPath.at(i).isGoal != previousPath.at(i).isGoal) {
+      return true;
+    }
+  }
+  return false;
+}
+
+vector<int> LNS::selectTerminalReplanAgents(
+    const vector<int>& candidateAgents) const {
+  vector<int> replanAgents;
+  if (goalOccupationMode_ != "reposition_true") {
+    return replanAgents;
+  }
+
+  const int agentCount = instance_.getAgentNum();
+  vector<char> marked(agentCount, 0);
+  auto markAgent = [&](int agent) {
+    if (agent < 0 || agent >= agentCount || marked[agent]) {
+      return;
+    }
+    marked[agent] = 1;
+    replanAgents.push_back(agent);
+  };
+
+  vector<int> changedAgents;
+  changedAgents.reserve(candidateAgents.size());
+  for (int agent : candidateAgents) {
+    if (agent < 0 || agent >= agentCount) {
+      continue;
+    }
+    const bool hasTerminalPath =
+        solution_.agents[agent].terminalPathActive &&
+        !solution_.agents[agent].terminalPath.empty();
+    if (didAgentServicePathChange(agent) || !hasTerminalPath) {
+      changedAgents.push_back(agent);
+      markAgent(agent);
+    }
+  }
+
+  if (changedAgents.empty()) {
+    return replanAgents;
+  }
+
+  unordered_map<int, vector<int>> finalGoalOwners;
+  finalGoalOwners.reserve((size_t)agentCount);
+  for (int agent = 0; agent < agentCount; agent++) {
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    if (assignments.empty() || solution_.agents[agent].path.empty()) {
+      continue;
+    }
+    const int finalTask = assignments.back();
+    if (finalTask < 0 || finalTask >= instance_.getTasksNum()) {
+      continue;
+    }
+    finalGoalOwners[instance_.getTaskLocations(finalTask)].push_back(agent);
+  }
+
+  auto markOwnersAtLocation = [&](int location, int sourceAgent) {
+    const auto it = finalGoalOwners.find(location);
+    if (it == finalGoalOwners.end()) {
+      return;
+    }
+    for (int ownerAgent : it->second) {
+      if (ownerAgent == sourceAgent) {
+        continue;
+      }
+      markAgent(ownerAgent);
+    }
+  };
+
+  for (int changedAgent : changedAgents) {
+    const auto& currentServicePath = solution_.agents[changedAgent].path;
+    for (int t = 0; t < (int)currentServicePath.size(); t++) {
+      markOwnersAtLocation(currentServicePath.at(t).location, changedAgent);
+    }
+    const auto& previousServicePath = previousSolution_.agents[changedAgent].path;
+    for (int t = 0; t < (int)previousServicePath.size(); t++) {
+      markOwnersAtLocation(previousServicePath.at(t).location, changedAgent);
+    }
+    if (previousSolution_.agents[changedAgent].terminalPathActive) {
+      const auto& previousTerminalPath =
+          previousSolution_.agents[changedAgent].terminalPath;
+      for (int t = 0; t < (int)previousTerminalPath.size(); t++) {
+        markOwnersAtLocation(previousTerminalPath.at(t).location, changedAgent);
+      }
+    }
+  }
+  return replanAgents;
+}
+
+const vector<int>& LNS::getParkingCandidatesForGoal(int finalGoal) {
+  auto cacheIt = parkingCandidatesCache_.find(finalGoal);
+  if (cacheIt != parkingCandidatesCache_.end()) {
+    terminalRepositionStats_.candidateCacheHits++;
+    return cacheIt->second;
+  }
+
+  terminalRepositionStats_.candidateCacheMisses++;
+  vector<pair<int, int>> rankedCandidates;
+  rankedCandidates.reserve(instance_.getTaskLocationsRef().size());
+  unordered_set<int> seenLocations;
+  for (int location : instance_.getTaskLocationsRef()) {
+    if (location < 0 || location >= instance_.mapSize || location == finalGoal ||
+        instance_.isObstacle(location) || seenLocations.count(location) > 0) {
+      continue;
+    }
+    seenLocations.insert(location);
+    rankedCandidates.emplace_back(
+        instance_.getManhattanDistance(finalGoal, location), location);
+  }
+  std::sort(rankedCandidates.begin(), rankedCandidates.end(),
+            [](const pair<int, int>& lhs, const pair<int, int>& rhs) {
+              if (lhs.first == rhs.first) {
+                return lhs.second < rhs.second;
+              }
+              return lhs.first < rhs.first;
+            });
+  vector<int> candidates;
+  const int maxCandidates = max(1, repositionMaxCandidates_);
+  candidates.reserve((size_t)maxCandidates);
+  for (const auto& [distance, location] : rankedCandidates) {
+    (void)distance;
+    candidates.push_back(location);
+    if ((int)candidates.size() >= maxCandidates) {
+      break;
+    }
+  }
+  auto inserted =
+      parkingCandidatesCache_.emplace(finalGoal, std::move(candidates));
+  return inserted.first->second;
+}
+
 int LNS::cascadeTaskBudget() const {
   if (maxCascadeTasks_ > 0) {
     return maxCascadeTasks_;
@@ -403,6 +672,96 @@ int LNS::cascadeTaskBudget() const {
           : (int)std::ceil(scaledBudget);
   const int offsetBudget = neighborhood + 10;
   return max(factorBudget, offsetBudget);
+}
+
+vector<int> LNS::buildRollbackAgentHints(const vector<int>& baseAgents) const {
+  const int agentCount = instance_.getAgentNum();
+  vector<char> marked(agentCount, 0);
+  vector<int> result;
+  result.reserve(baseAgents.size() + (size_t)agentCount / 4 + 1);
+
+  auto markAgent = [&](int agent) {
+    if (agent < 0 || agent >= agentCount || marked[agent]) {
+      return;
+    }
+    marked[agent] = 1;
+    result.push_back(agent);
+  };
+
+  for (int agent : baseAgents) {
+    markAgent(agent);
+  }
+
+  // Cross-agent insertions can introduce touched agents outside the destroy
+  // closure; assignment drift is a robust signal for that case.
+  for (int agent = 0; agent < agentCount; agent++) {
+    if (solution_.agents[agent].taskAssignments !=
+        previousSolution_.agents[agent].taskAssignments) {
+      markAgent(agent);
+    }
+  }
+
+  return result;
+}
+
+void LNS::restoreSolutionFromPrevious(const vector<int>* agentHints) {
+  solutionRestoreStats_.restoreCalls++;
+
+  auto fullRestore = [&]() {
+    solution_ = previousSolution_;
+    solutionRestoreStats_.fullRestores++;
+  };
+
+  if (!partialSolutionRestore_) {
+    fullRestore();
+    return;
+  }
+
+  if (agentHints == nullptr || agentHints->empty()) {
+    solutionRestoreStats_.partialRestoreFallbacks++;
+    fullRestore();
+    return;
+  }
+
+  if (solution_.agents.size() != previousSolution_.agents.size() ||
+      solution_.taskAgentMap.size() != previousSolution_.taskAgentMap.size()) {
+    solutionRestoreStats_.partialRestoreFallbacks++;
+    fullRestore();
+    return;
+  }
+
+  const int agentCount = instance_.getAgentNum();
+  vector<char> marked(agentCount, 0);
+  int touchedAgents = 0;
+  for (int agent : *agentHints) {
+    if (agent < 0 || agent >= agentCount || marked[agent]) {
+      continue;
+    }
+    marked[agent] = 1;
+    touchedAgents++;
+  }
+
+  if (touchedAgents == 0) {
+    solutionRestoreStats_.partialRestoreFallbacks++;
+    fullRestore();
+    return;
+  }
+
+  solution_.numOfTasks = previousSolution_.numOfTasks;
+  solution_.numOfAgents = previousSolution_.numOfAgents;
+  solution_.sumOfCosts = previousSolution_.sumOfCosts;
+  solution_.utility = previousSolution_.utility;
+  solution_.taskAgentMap = previousSolution_.taskAgentMap;
+
+  for (int agent = 0; agent < agentCount; agent++) {
+    if (!marked[agent]) {
+      continue;
+    }
+    solution_.agents[agent] = previousSolution_.agents[agent];
+  }
+
+  solutionRestoreStats_.partialRestores++;
+  solutionRestoreStats_.partialAgentsRestored += touchedAgents;
 }
 
 LNS::LNS(int numOfIterations, const Instance& instance,
@@ -426,6 +785,30 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   lnsCostWeight_ = parameters.core.lnsCostWeight;
   initialSolutionStrategy = parameters.core.initialSolutionStrategy;
   initialSolutionFallback = parameters.core.initialSolutionFallback;
+  goalOccupationMode_ = parameters.core.goalOccupationMode;
+  goalTailSteps_ = max(0, parameters.core.goalTailSteps);
+  repositionMaxCandidates_ = max(1, parameters.core.repositionMaxCandidates);
+  repositionDemandLookahead_ =
+      max(0, parameters.core.repositionDemandLookahead);
+  repositionReservationSlack_ =
+      max(0, parameters.core.repositionReservationSlack);
+  greedySegmentDiagnostics_ = parameters.core.greedySegmentDiagnostics;
+  greedySegmentDiagnosticsTopK_ =
+      max(1, parameters.core.greedySegmentDiagnosticsTopK);
+  terminalRepositionStats_.reset();
+  parkingCandidatesCache_.clear();
+  if (goalOccupationMode_ != "stay" && goalOccupationMode_ != "tail" &&
+      goalOccupationMode_ != "reposition" &&
+      goalOccupationMode_ != "reposition_true") {
+    PLOGW << "Unknown goalOccupationMode '" << goalOccupationMode_
+          << "'; defaulting to 'stay'\n";
+    goalOccupationMode_ = "stay";
+  }
+  if (goalOccupationMode_ == "reposition" && goalTailSteps_ <= 0) {
+    goalTailSteps_ = 1;
+    PLOGW << "goalOccupationMode='reposition' currently uses finite tail "
+             "release; applying goalTailSteps=1 by default.\n";
+  }
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
   regretType = parameters.core.regretType;
@@ -446,6 +829,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   lowLevelSegmentTimeout_ = max(0.0, parameters.lowLevel.segmentTimeout);
   plannerParityCheck_ = parameters.lowLevel.parityCheck;
   plannerParityMaxLogs_ = parameters.lowLevel.parityMaxLogs;
+  partialSolutionRestore_ = parameters.core.partialSolutionRestore;
   market_.heuristics = parameters.market.heuristics;
   market_.bucketDt = max(1, parameters.market.bucketDt);
   market_.vertexBucketCapacity = max(1, parameters.market.vertexBucketCapacity);
@@ -476,6 +860,14 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   market_.lambdaWait = max(0.0, parameters.market.lambdaWait);
   if (market_.closureCap <= 0) {
     market_.closureCap = neighborSize_;
+  }
+  // Repair redesign: keep market influence as SoC tie-break only.
+  if (market_.repairBlend) {
+    PLOGW << "marketRepairBlend is deprecated in favor of tie-break-only "
+             "repair scoring; enabling marketRepairTieBreak and disabling "
+             "marketRepairBlend.\n";
+    market_.repairBlend = false;
+    market_.repairTieBreak = true;
   }
   market_.taskCooldownUntilIter.assign(instance_.getTasksNum(), 0);
 
@@ -673,33 +1065,57 @@ double LNS::computeMarketExposureFromPath(const AgentTaskPath& taskPath,
     return 0.0;
   }
 
+  auto weightedResourcePrice =
+      [](const unordered_map<uint64_t, double>& prices,
+         const unordered_map<uint64_t, double>& excessHat,
+         uint64_t key) -> double {
+    const auto pIt = prices.find(key);
+    if (pIt == prices.end()) {
+      return 0.0;
+    }
+    const auto eIt = excessHat.find(key);
+    if (eIt == excessHat.end()) {
+      return 0.0;
+    }
+    const double excessWeight = max(0.0, eIt->second);
+    if (excessWeight <= 0.0) {
+      return 0.0;
+    }
+    return pIt->second * excessWeight;
+  };
+
   double totalExposure = 0.0;
-  int resourceCount = 0;
+  int activeResourceCount = 0;
   for (int i = 0; i < (int)taskPath.size(); i++) {
     const int timestep = taskPath.beginTime + i;
     const int bucket = marketTimeBucket(timestep);
     const int location = taskPath[i].location;
     const uint64_t vKey = makeMarketVertexKey(location, bucket);
-    const auto vIt = market_.vertexPrices.find(vKey);
-    if (vIt != market_.vertexPrices.end()) {
-      totalExposure += vIt->second;
+    const double vertexContribution =
+        weightedResourcePrice(market_.vertexPrices, market_.vertexExcessHat,
+                              vKey);
+    if (vertexContribution > 0.0) {
+      totalExposure += vertexContribution;
+      activeResourceCount++;
     }
-    resourceCount++;
 
     if (i > 0) {
       const int prevLocation = taskPath[i - 1].location;
       const uint64_t eKey = makeMarketEdgeKey(prevLocation, location, bucket);
-      const auto eIt = market_.edgePrices.find(eKey);
-      if (eIt != market_.edgePrices.end()) {
-        totalExposure += eIt->second;
+      const double edgeContribution =
+          weightedResourcePrice(market_.edgePrices, market_.edgeExcessHat, eKey);
+      if (edgeContribution > 0.0) {
+        totalExposure += edgeContribution;
+        activeResourceCount++;
       }
-      resourceCount++;
     }
   }
   if (!normalized) {
     return totalExposure;
   }
-  return totalExposure / max(1, resourceCount);
+  // Normalize only over resources with positive congestion-weighted
+  // contribution, so long uncongested paths do not dominate the score.
+  return totalExposure / max(1, activeResourceCount);
 }
 
 int LNS::computeTaskPrecedenceWaitFromState(
@@ -869,7 +1285,8 @@ double LNS::computeSolutionMarketPressure() const {
     if (taskPath.empty()) {
       continue;
     }
-    pressure += computeMarketExposureFromPath(taskPath, true);
+    // Pressure aggregates total congestion-weighted exposure.
+    pressure += computeMarketExposureFromPath(taskPath, false);
   }
   return pressure;
 }
@@ -894,19 +1311,23 @@ double LNS::computeSolutionPrecedenceWait() const {
   return computeSolutionPrecedenceWaitFromIndex(currentIndex.pos);
 }
 
-bool LNS::passMarketAcceptanceGuards(double candidatePressure,
-                                     double candidateWait) const {
+bool LNS::passMarketAcceptanceGuards(double previousPressure,
+                                     double candidatePressure,
+                                     double previousWait,
+                                     double candidateWait,
+                                     bool candidateIsWorse) const {
   if (!market_.acceptanceGuards) {
     return true;
   }
-  if (incumbentSolution_.agentPaths.empty()) {
+  // Keep exploration intact: apply guards only for non-improving candidates.
+  if (!candidateIsWorse) {
     return true;
   }
-  if (!std::isfinite(market_.bestPressure) || !std::isfinite(market_.bestWait)) {
+  if (!std::isfinite(previousPressure) || !std::isfinite(previousWait)) {
     return true;
   }
-  const bool pressureOK = candidatePressure <= market_.bestPressure + market_.tauP;
-  const bool waitOK = candidateWait <= market_.bestWait + market_.tauW;
+  const bool pressureOK = candidatePressure <= previousPressure + market_.tauP;
+  const bool waitOK = candidateWait <= previousWait + market_.tauW;
   return pressureOK && waitOK;
 }
 
@@ -974,9 +1395,11 @@ void LNS::updateMarketStateFromCurrentSolution() {
       const double oldHat = (itOldHat == excessHat.end()) ? 0.0 : itOldHat->second;
       const double newHat = market_.rho * oldHat + (1.0 - market_.rho) * excess;
 
+      constexpr double kPriceInit = 1e-3;
+      constexpr double kExcessHatEps = 1e-9;
       double newPrice = oldPrice;
-      if (excess > 0) {
-        const double basePrice = max(oldPrice, 1.0);
+      if (newHat > kExcessHatEps) {
+        const double basePrice = (oldPrice > 0.0) ? oldPrice : kPriceInit;
         newPrice = min(market_.priceCap, basePrice * std::exp(eta * newHat));
       } else {
         newPrice = oldPrice * max(0.0, 1.0 - market_.gamma);
@@ -1363,6 +1786,50 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
 
 bool LNS::buildGreedySolution() {
 
+  struct GreedySegmentDiag {
+    int agent = UNASSIGNED;
+    int task = UNASSIGNED;
+    int taskPosition = -1;
+    int startTime = 0;
+    int pathLength = 0;
+    double runtimeMs = 0.0;
+    uint64_t expanded = 0;
+    uint64_t generated = 0;
+    const char* outcome = "unknown";
+  };
+  vector<GreedySegmentDiag> segmentDiags;
+  segmentDiags.reserve((size_t)instance_.getTasksNum());
+
+  const auto printGreedyDiagSummary = [&](const char* context) {
+    if (!greedySegmentDiagnostics_ || segmentDiags.empty()) {
+      return;
+    }
+    vector<GreedySegmentDiag> sorted = segmentDiags;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const GreedySegmentDiag& lhs, const GreedySegmentDiag& rhs) {
+                if (lhs.runtimeMs == rhs.runtimeMs) {
+                  return lhs.expanded > rhs.expanded;
+                }
+                return lhs.runtimeMs > rhs.runtimeMs;
+              });
+    const int topK = min((int)sorted.size(), greedySegmentDiagnosticsTopK_);
+    std::cout << "Greedy segment diagnostics (" << context
+              << "): total_segments=" << sorted.size() << ", top_k=" << topK
+              << '\n';
+    for (int i = 0; i < topK; i++) {
+      const auto& diag = sorted[i];
+      std::cout << "  [" << i << "] agent=" << diag.agent
+                << ", task=" << diag.task
+                << ", local_pos=" << diag.taskPosition
+                << ", start_t=" << diag.startTime
+                << ", path_len=" << diag.pathLength
+                << ", ll_ms=" << diag.runtimeMs
+                << ", expanded=" << diag.expanded
+                << ", generated=" << diag.generated
+                << ", outcome=" << diag.outcome << '\n';
+    }
+  };
+
   // Reset any previous task->agent mapping.
   for (int& assignedAgent : solution_.taskAgentMap) {
     assignedAgent = UNASSIGNED;
@@ -1371,8 +1838,11 @@ bool LNS::buildGreedySolution() {
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     solution_.agents[agent].taskPaths.clear();
     solution_.agents[agent].path = AgentTaskPath();
+    solution_.agents[agent].terminalPath = AgentTaskPath();
+    solution_.agents[agent].terminalPathActive = false;
     solution_.agents[agent].taskAssignments.clear();
     solution_.agents[agent].intraPrecedenceConstraints.clear();
+    solution_.agents[agent].intraPrecedenceDirty = false;
   }
 
   // Assign tasks
@@ -1495,21 +1965,44 @@ bool LNS::buildGreedySolution() {
       if (plannedPath.empty()) {
         continue;
       }
-      const bool waitAtGoal =
-          !solution_.agents[plannedAgent].taskAssignments.empty() &&
-          plannedTask ==
-              solution_.agents[plannedAgent].taskAssignments.back();
-      constraintTable.addPath(plannedPath, waitAtGoal);
+      const bool isFinalTask =
+          (plannedTaskPos + 1 ==
+           (int)solution_.agents[plannedAgent].taskAssignments.size());
+      reservePathWithGoalPolicy(constraintTable, plannedPath, isFinalTask);
+    }
+
+    uint64_t expandedBefore = 0;
+    uint64_t generatedBefore = 0;
+    double callStartSec = 0.0;
+    if (greedySegmentDiagnostics_) {
+      expandedBefore = lowLevelExpanded_;
+      generatedBefore = lowLevelGenerated_;
+      callStartSec = elapsedRuntimeSec();
     }
     initialPaths_[id] = runLowLevelSearch(
         *solution_.agents[agent].pathPlanner, constraintTable, startTime,
         taskPosition, 0);
+    if (greedySegmentDiagnostics_) {
+      const double callEndSec = elapsedRuntimeSec();
+      GreedySegmentDiag diag;
+      diag.agent = agent;
+      diag.task = task;
+      diag.taskPosition = taskPosition;
+      diag.startTime = startTime;
+      diag.pathLength = (int)initialPaths_[id].size();
+      diag.runtimeMs = max(0.0, (callEndSec - callStartSec) * 1000.0);
+      diag.expanded = lowLevelExpanded_ - expandedBefore;
+      diag.generated = lowLevelGenerated_ - generatedBefore;
+      diag.outcome = getLastLowLevelOutcomeName();
+      segmentDiags.push_back(diag);
+    }
     if (initialPaths_[id].empty()) {
       PLOGE << "No path exists for agent " << agent << " and task " << task
             << " (ll_outcome=" << getLastLowLevelOutcomeName()
             << ", remaining_budget_sec=" << getLastLowLevelRemainingBudgetSec()
             << ", effective_timeout_sec=" << getLastLowLevelEffectiveTimeoutSec()
             << ")\n";
+      printGreedyDiagSummary("failure");
       logInitialSegmentFailureDiagnostics(
           instance_, solution_, constraintTable, agent, task, taskPosition,
           startTime, *solution_.agents[agent].pathPlanner,
@@ -1536,6 +2029,201 @@ bool LNS::buildGreedySolution() {
         static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
   }
   solution_.sumOfCosts = clampSocToInt(initialSumOfCosts, "buildGreedySolution");
+  printGreedyDiagSummary("success");
+  return true;
+}
+
+bool LNS::planTerminalReposition(const vector<int>& agentsToPlan,
+                                 bool fullRebuild) {
+  if (goalOccupationMode_ != "reposition_true") {
+    return true;
+  }
+  terminalRepositionStats_.replansRequested++;
+
+  const int agentCount = instance_.getAgentNum();
+  vector<char> shouldPlan(agentCount, 0);
+  for (int agent : agentsToPlan) {
+    if (agent >= 0 && agent < agentCount) {
+      shouldPlan[agent] = 1;
+    }
+  }
+  if (fullRebuild) {
+    for (int agent = 0; agent < agentCount; agent++) {
+      shouldPlan[agent] = 1;
+      solution_.agents[agent].terminalPath = AgentTaskPath();
+      solution_.agents[agent].terminalPathActive = false;
+    }
+  } else {
+    for (int agent = 0; agent < agentCount; agent++) {
+      if (shouldPlan[agent]) {
+        solution_.agents[agent].terminalPath = AgentTaskPath();
+        solution_.agents[agent].terminalPathActive = false;
+      }
+    }
+  }
+
+  vector<char> plannedTerminal(agentCount, 0);
+  if (!fullRebuild) {
+    for (int agent = 0; agent < agentCount; agent++) {
+      if (!shouldPlan[agent] && solution_.agents[agent].terminalPathActive &&
+          !solution_.agents[agent].terminalPath.empty()) {
+        plannedTerminal[agent] = 1;
+      }
+    }
+  }
+
+  vector<pair<int, int>> planningOrder;
+  planningOrder.reserve(agentCount);
+  for (int agent = 0; agent < agentCount; agent++) {
+    if (!shouldPlan[agent]) {
+      continue;
+    }
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    const auto& joinedPath = solution_.agents[agent].path;
+    if (assignments.empty() || joinedPath.empty()) {
+      continue;
+    }
+    const int completionTime = joinedPath.endTimeOrZero();
+    planningOrder.emplace_back(completionTime, agent);
+  }
+  std::sort(planningOrder.begin(), planningOrder.end(),
+            [](const pair<int, int>& lhs, const pair<int, int>& rhs) {
+              if (lhs.first == rhs.first) {
+                return lhs.second < rhs.second;
+              }
+              return lhs.first < rhs.first;
+            });
+
+  const auto reserveOtherAgents = [&](ConstraintTable& constraintTable,
+                                      int planningAgent) {
+    for (int otherAgent = 0; otherAgent < agentCount; otherAgent++) {
+      if (otherAgent == planningAgent) {
+        continue;
+      }
+      const auto& otherPath = solution_.agents[otherAgent].path;
+      if (!otherPath.empty()) {
+        constraintTable.addPath(otherPath, false);
+      }
+      if (plannedTerminal[otherAgent] &&
+          solution_.agents[otherAgent].terminalPathActive &&
+          !solution_.agents[otherAgent].terminalPath.empty()) {
+        constraintTable.addPath(solution_.agents[otherAgent].terminalPath,
+                                false);
+      }
+    }
+  };
+
+  for (const auto& [completionTime, agent] : planningOrder) {
+    if (runtimeBudgetExhausted()) {
+      return false;
+    }
+    terminalRepositionStats_.agentsEvaluated++;
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    if (assignments.empty()) {
+      continue;
+    }
+    const int finalTask = assignments.back();
+    if (finalTask < 0 || finalTask >= instance_.getTasksNum()) {
+      PLOGE << "planTerminalReposition: invalid final task index " << finalTask
+            << " for agent " << agent << "\n";
+      return false;
+    }
+    const int finalGoal = instance_.getTaskLocations(finalTask);
+
+    int lastDemandTime = -1;
+    for (int otherAgent = 0; otherAgent < agentCount; otherAgent++) {
+      if (otherAgent == agent) {
+        continue;
+      }
+      const auto& otherPath = solution_.agents[otherAgent].path;
+      if (otherPath.empty()) {
+        continue;
+      }
+      const int fromTime = max(0, completionTime + 1);
+      int demandScanEnd = (int)otherPath.size();
+      if (repositionDemandLookahead_ > 0) {
+        demandScanEnd =
+            min(demandScanEnd, completionTime + 1 + repositionDemandLookahead_);
+      }
+      for (int timestep = fromTime; timestep < demandScanEnd;
+           timestep++) {
+        if (otherPath.at(timestep).location == finalGoal) {
+          lastDemandTime = max(lastDemandTime, timestep);
+        }
+      }
+    }
+
+    if (lastDemandTime < completionTime + 1) {
+      terminalRepositionStats_.skippedNoDemand++;
+      // Even without demand, keep explicit terminal occupancy at final goal.
+      AgentTaskPath holdPath;
+      holdPath.beginTime = completionTime + 1;
+      holdPath.path.push_back(PathEntry{false, finalGoal});
+      solution_.agents[agent].terminalPath = std::move(holdPath);
+      solution_.agents[agent].terminalPathActive = true;
+      plannedTerminal[agent] = 1;
+      continue;
+    }
+
+    const vector<int>& parkingCandidates = getParkingCandidatesForGoal(finalGoal);
+    if (parkingCandidates.empty()) {
+      terminalRepositionStats_.planningFailures++;
+      PLOGE << "planTerminalReposition: no parking candidate found for agent "
+            << agent << " final goal " << finalGoal << "\n";
+      return false;
+    }
+
+    bool planned = false;
+    for (int parkingLocation : parkingCandidates) {
+      auto planner = createLocalPlanner(agent);
+      planner->setGoalLocations(vector<int>{finalGoal, parkingLocation});
+      ConstraintTable evacConstraints(instance_.numOfCols, instance_.mapSize);
+      reserveOtherAgents(evacConstraints, agent);
+      AgentTaskPath evacuationPath = runLowLevelSearch(
+          *planner, evacConstraints, completionTime, 1, 0);
+      if (evacuationPath.empty()) {
+        continue;
+      }
+
+      const int evacuationEnd = evacuationPath.endTimeChecked();
+      const int returnStart = max(evacuationEnd, lastDemandTime + 1);
+      planner->setGoalLocations(vector<int>{parkingLocation, finalGoal});
+      ConstraintTable returnConstraints(instance_.numOfCols, instance_.mapSize);
+      reserveOtherAgents(returnConstraints, agent);
+      AgentTaskPath returnPath = runLowLevelSearch(*planner, returnConstraints,
+                                                   returnStart, 1, 0);
+      if (returnPath.empty()) {
+        continue;
+      }
+
+      AgentTaskPath terminalPath = evacuationPath;
+      while (!terminalPath.empty() &&
+             terminalPath.endTimeChecked() < returnStart) {
+        terminalPath.path.push_back(PathEntry{false, parkingLocation});
+      }
+      for (int step = 1; step < (int)returnPath.size(); step++) {
+        terminalPath.path.push_back(returnPath.at(step));
+      }
+
+      if (terminalPath.empty()) {
+        continue;
+      }
+      solution_.agents[agent].terminalPath = std::move(terminalPath);
+      solution_.agents[agent].terminalPathActive = true;
+      plannedTerminal[agent] = 1;
+      terminalRepositionStats_.agentsPlanned++;
+      planned = true;
+      break;
+    }
+
+    if (!planned) {
+      terminalRepositionStats_.planningFailures++;
+      PLOGE << "planTerminalReposition: failed to construct terminal path for "
+            << "agent " << agent << " (goal " << finalGoal << ")\n";
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -1549,8 +2237,11 @@ bool LNS::buildPrioritizedInitialSolution() {
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     solution_.agents[agent].taskPaths.clear();
     solution_.agents[agent].path = AgentTaskPath();
+    solution_.agents[agent].terminalPath = AgentTaskPath();
+    solution_.agents[agent].terminalPathActive = false;
     solution_.agents[agent].taskAssignments.clear();
     solution_.agents[agent].intraPrecedenceConstraints.clear();
+    solution_.agents[agent].intraPrecedenceDirty = false;
   }
 
   // Reuse existing greedy task assignment for now; prioritized initialization
@@ -1752,9 +2443,9 @@ bool LNS::buildPrioritizedInitialSolution() {
           if (reservedPath.empty()) {
             continue;
           }
-          const bool waitAtGoal =
+          const bool isFinalTask =
               (localTask + 1 == (int)reservedAssignments.size());
-          constraintTable.addPath(reservedPath, waitAtGoal);
+          reservePathWithGoalPolicy(constraintTable, reservedPath, isFinalTask);
         }
       }
 
@@ -1799,8 +2490,11 @@ bool LNS::buildGreedySolutionPrecedenceOnly() {
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     solution_.agents[agent].taskPaths.clear();
     solution_.agents[agent].path = AgentTaskPath();
+    solution_.agents[agent].terminalPath = AgentTaskPath();
+    solution_.agents[agent].terminalPathActive = false;
     solution_.agents[agent].taskAssignments.clear();
     solution_.agents[agent].intraPrecedenceConstraints.clear();
+    solution_.agents[agent].intraPrecedenceDirty = false;
   }
 
   // Assign tasks (greedy), but do not build collision constraints.
