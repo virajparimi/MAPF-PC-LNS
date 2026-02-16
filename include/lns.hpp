@@ -31,6 +31,7 @@ enum DestroyHeuristic {
 
 struct MarketStats {
   int64_t updates = 0;
+  int64_t destroyWarmupSkipped = 0;
   int64_t contendedResources = 0;
   double meanPriceContended = 0.0;
   double maxPrice = 0.0;
@@ -684,6 +685,10 @@ struct LNSParams {
     double destroyWeightPrice = 1.0;
     double destroyWeightWait = 2.0;
     double destroyWeightRoot = 1.5;
+    // ALNS-only warmup gate: MarketTatonnement is ineligible until at least
+    // this many market price updates have been performed.
+    // 0 disables warmup gating.
+    int destroyWarmupUpdates = 3;
     double seedTopFrac = 0.2;
     double randomDestroyQuota = 0.15;
     int cooldownIters = 3;
@@ -901,6 +906,10 @@ class LNS {
   int greedySegmentDiagnosticsTopK_ = 10;
   mutable unordered_map<int, vector<int>> parkingCandidatesCache_;
   TerminalRepositionStats terminalRepositionStats_;
+  string initialSolutionRequested_;
+  string initialSolutionEffective_;
+  bool initialSolutionFallbackUsed_ = false;
+  string initialSolutionFallbackReason_;
 
  public:
   double runtime = 0;
@@ -1015,6 +1024,18 @@ class LNS {
   bool insertBestRegretTask(TaskRegretPacket bestRegretPacket);
 
   const Solution& getSolution() const { return solution_; }
+  const string& getInitialSolutionRequested() const {
+    return initialSolutionRequested_;
+  }
+  const string& getInitialSolutionEffective() const {
+    return initialSolutionEffective_;
+  }
+  bool wasInitialSolutionFallbackUsed() const {
+    return initialSolutionFallbackUsed_;
+  }
+  const string& getInitialSolutionFallbackReason() const {
+    return initialSolutionFallbackReason_;
+  }
   const ALNS& getAdaptiveLNSRef() const { return adaptiveLNS_; }
   ALNS getAdaptiveLNS() const { return adaptiveLNS_; }
   bool lastPrepareAbortedByCascade() const {
@@ -1101,13 +1122,14 @@ class LNS {
   void maybeUpdateMarketState(bool accepted);
   double computeMarketExposureFromPath(const AgentTaskPath& taskPath,
                                        bool normalized) const;
+  void buildMarketDemandFromCurrentOccupancy(
+      unordered_map<uint64_t, int>& vertexDemand,
+      unordered_map<uint64_t, int>& edgeDemand) const;
   int computeTaskPrecedenceWaitFromState(
       int task, int taskLocation, const vector<vector<int>>& agentTaskAssignments,
-      const vector<vector<AgentTaskPath>>& agentTaskPaths,
-      const vector<pair<int, int>>& precedenceConstraints) const;
-  int computeTaskPrecedenceWaitFromWorkspace(
-      int task, int taskLocation, const RegretWorkspace& workspace,
-      const vector<pair<int, int>>& precedenceConstraints) const;
+      const vector<vector<AgentTaskPath>>& agentTaskPaths) const;
+  int computeTaskPrecedenceWaitFromWorkspace(int task, int taskLocation,
+                                             const RegretWorkspace& workspace) const;
   int computeTaskPrecedenceWaitInCurrentSolution(int task) const;
 
   void computeMovingMetrics(int numberOfConflicts, int sumOfCosts);

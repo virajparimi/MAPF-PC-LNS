@@ -99,39 +99,68 @@ bool LNS::greatDelugeAlgorithm() {
 
 bool LNS::run() {
 
-  bool success = false;
-  if (initialSolutionStrategy == "greedy") {
-    // Run the greedy task assignment and subsequent path finding algorithm
-    success = buildGreedySolution();
-  } else if (initialSolutionStrategy == "prioritized") {
-    // Plan tasks in global topological order with reservations from already
-    // planned task segments.
-    success = buildPrioritizedInitialSolution();
-  } else if (initialSolutionStrategy == "greedy_precedence_only") {
-    // Precedence-feasible, collision-infeasible warm start.
-    success = buildGreedySolutionPrecedenceOnly();
-  } else if (initialSolutionStrategy.find("sota") != string::npos) {
-    // Run the greedy task assignment and use CBS-PC for finding the paths of agents
-    success = buildGreedySolutionWithMAPFPC(initialSolutionStrategy);
-  }
+  auto runInitialSolutionStrategy = [&](const string& strategy) -> bool {
+    if (strategy == "greedy") {
+      // Run the greedy task assignment and subsequent path finding algorithm.
+      return buildGreedySolution();
+    }
+    if (strategy == "prioritized") {
+      // Plan tasks in global topological order with reservations from already
+      // planned task segments.
+      return buildPrioritizedInitialSolution();
+    }
+    if (strategy == "greedy_precedence_only") {
+      // Precedence-feasible, collision-infeasible warm start.
+      return buildGreedySolutionPrecedenceOnly();
+    }
+    if (strategy.find("sota") != string::npos) {
+      // Run the greedy task assignment and use CBS-PC for finding agent paths.
+      return buildGreedySolutionWithMAPFPC(strategy);
+    }
+    PLOGE << "Unknown initial solution strategy '" << strategy << "'\n";
+    return false;
+  };
+
+  initialSolutionRequested_ = initialSolutionStrategy;
+  initialSolutionEffective_ = initialSolutionStrategy;
+  initialSolutionFallbackUsed_ = false;
+  initialSolutionFallbackReason_ = "none";
+
+  bool success = runInitialSolutionStrategy(initialSolutionStrategy);
 
   if (!success && initialSolutionStrategy != "greedy") {
     if (initialSolutionFallback == "greedy") {
       PLOGW << "Initial solution strategy '" << initialSolutionStrategy
             << "' failed; falling back to 'greedy'\n";
-      success = buildGreedySolution();
+      initialSolutionFallbackUsed_ = true;
+      initialSolutionEffective_ = "greedy";
+      initialSolutionFallbackReason_ = "requested_strategy_failed";
+      success = runInitialSolutionStrategy("greedy");
+      if (!success) {
+        initialSolutionFallbackReason_ = "fallback_greedy_failed";
+      }
     } else if (initialSolutionFallback == "none") {
       PLOGW << "Initial solution strategy '" << initialSolutionStrategy
             << "' failed; fallback disabled\n";
+      initialSolutionFallbackReason_ = "fallback_disabled";
     } else {
       PLOGW << "Unknown initialSolutionFallback '" << initialSolutionFallback
             << "'; defaulting to 'greedy'\n";
-      success = buildGreedySolution();
+      initialSolutionFallbackUsed_ = true;
+      initialSolutionEffective_ = "greedy";
+      initialSolutionFallbackReason_ = "unknown_fallback_defaulted_to_greedy";
+      success = runInitialSolutionStrategy("greedy");
+      if (!success) {
+        initialSolutionFallbackReason_ = "fallback_greedy_failed";
+      }
     }
   }
 
   // If the initial solution strategy failed then we cannot do anything!
   if (!success) {
+    if (initialSolutionFallbackReason_ == "none") {
+      initialSolutionFallbackReason_ = "initializer_failed";
+    }
     return success;
   }
 
@@ -184,7 +213,8 @@ bool LNS::run() {
   };
 
   appendIterationStat(IterationStats(
-      initialSolutionRuntime_, initialSolutionStrategy, instance_.getAgentNum(),
+      initialSolutionRuntime_, initialSolutionEffective_,
+      instance_.getAgentNum(),
       instance_.getTasksNum(), solution_.sumOfCosts, feasibleSolutionUpdated,
       bestSolutionYet));
 
@@ -266,6 +296,11 @@ bool LNS::run() {
     } else if (destroyHeuristic == "low_slack") {
       lowSlackRemoval(&potentialNeighborhood);
     } else if (destroyHeuristic == "market_tatonnement") {
+      if (!market_.heuristics) {
+        PLOGE << "destroyHeuristic='market_tatonnement' requires market "
+                 "heuristics to be enabled\n";
+        return false;
+      }
       marketTatonnementRemoval(&potentialNeighborhood);
     } else if (destroyHeuristic == "alns") {
       alnsRemoval(&potentialNeighborhood);

@@ -316,6 +316,13 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
           : 0.0;
 
   std::cout << "\n=== Run Summary ===\n";
+  printMetric("Requested initial solution",
+              lns.getInitialSolutionRequested());
+  printMetric("Effective initial solution", lns.getInitialSolutionEffective());
+  printMetric("Initial fallback used",
+              lns.wasInitialSolutionFallbackUsed() ? "true" : "false");
+  printMetric("Initial fallback reason",
+              lns.getInitialSolutionFallbackReason());
   printMetric("Runtime (s)", lns.runtime);
   printMetric("Iterations", (int)lns.iterationStats.size());
   printMetric("Iterations/sec", iterPerSec);
@@ -445,6 +452,7 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
     const MarketStats marketStats = lns.getMarketStats();
     std::cout << "\n=== Market Stats ===\n";
     printMetric("Updates", marketStats.updates);
+    printMetric("Destroy warmup skipped", marketStats.destroyWarmupSkipped);
     printMetric("Contended resources", marketStats.contendedResources);
     printMetric("Mean price (contended)", marketStats.meanPriceContended);
     printMetric("Max price", marketStats.maxPrice);

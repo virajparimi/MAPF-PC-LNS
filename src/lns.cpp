@@ -785,6 +785,10 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   lnsCostWeight_ = parameters.core.lnsCostWeight;
   initialSolutionStrategy = parameters.core.initialSolutionStrategy;
   initialSolutionFallback = parameters.core.initialSolutionFallback;
+  initialSolutionRequested_ = initialSolutionStrategy;
+  initialSolutionEffective_ = initialSolutionStrategy;
+  initialSolutionFallbackUsed_ = false;
+  initialSolutionFallbackReason_ = "none";
   goalOccupationMode_ = parameters.core.goalOccupationMode;
   goalTailSteps_ = max(0, parameters.core.goalTailSteps);
   repositionMaxCandidates_ = max(1, parameters.core.repositionMaxCandidates);
@@ -843,9 +847,10 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   market_.acceptanceGuards = parameters.market.acceptanceGuards;
   market_.tauP = max(0.0, parameters.market.tauP);
   market_.tauW = max(0.0, parameters.market.tauW);
-  market_.destroyWeightPrice = parameters.market.destroyWeightPrice;
-  market_.destroyWeightWait = parameters.market.destroyWeightWait;
-  market_.destroyWeightRoot = parameters.market.destroyWeightRoot;
+  market_.destroyWeightPrice = max(0.0, parameters.market.destroyWeightPrice);
+  market_.destroyWeightWait = max(0.0, parameters.market.destroyWeightWait);
+  market_.destroyWeightRoot = max(0.0, parameters.market.destroyWeightRoot);
+  market_.destroyWarmupUpdates = max(0, parameters.market.destroyWarmupUpdates);
   market_.seedTopFrac = min(1.0, max(0.0, parameters.market.seedTopFrac));
   market_.randomDestroyQuota =
       min(1.0, max(0.0, parameters.market.randomDestroyQuota));
@@ -1120,9 +1125,7 @@ double LNS::computeMarketExposureFromPath(const AgentTaskPath& taskPath,
 
 int LNS::computeTaskPrecedenceWaitFromState(
     int task, int taskLocation, const vector<vector<int>>& agentTaskAssignments,
-    const vector<vector<AgentTaskPath>>& agentTaskPaths,
-    const vector<pair<int, int>>& precedenceConstraints) const {
-  (void)precedenceConstraints;
+    const vector<vector<AgentTaskPath>>& agentTaskPaths) const {
   if (task < 0 || task >= instance_.getTasksNum()) {
     return 0;
   }
@@ -1194,6 +1197,35 @@ int LNS::computeTaskPrecedenceWaitFromState(
   return max(0, release - arrive);
 }
 
+void LNS::buildMarketDemandFromCurrentOccupancy(
+    unordered_map<uint64_t, int>& vertexDemand,
+    unordered_map<uint64_t, int>& edgeDemand) const {
+  vertexDemand.clear();
+  edgeDemand.clear();
+
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const int horizon = getAgentOccupancyHorizon(agent, true);
+    if (horizon <= 0) {
+      continue;
+    }
+
+    int prevLocation = UNDEFINED;
+    for (int timestep = 0; timestep < horizon; timestep++) {
+      const int location = getAgentLocationAt(agent, timestep, true);
+      if (location == UNDEFINED) {
+        prevLocation = UNDEFINED;
+        continue;
+      }
+      const int bucket = marketTimeBucket(timestep);
+      vertexDemand[makeMarketVertexKey(location, bucket)]++;
+      if (prevLocation != UNDEFINED) {
+        edgeDemand[makeMarketEdgeKey(prevLocation, location, bucket)]++;
+      }
+      prevLocation = location;
+    }
+  }
+}
+
 int LNS::computeTaskPrecedenceWaitInCurrentSolution(int task) const {
   if (task < 0 || task >= instance_.getTasksNum()) {
     return 0;
@@ -1230,63 +1262,80 @@ int LNS::computeTaskPrecedenceWaitInCurrentSolution(int task) const {
   }
 
   int release = 0;
+  const int taskCount = instance_.getTasksNum();
+  vector<char> seenPredecessor(taskCount, 0);
+  auto consumePredecessor = [&](int pred) {
+    if (pred < 0 || pred >= taskCount || seenPredecessor[pred]) {
+      return;
+    }
+    seenPredecessor[pred] = 1;
+    const int predAgent = (pred >= 0 && pred < (int)solution_.taskAgentMap.size())
+                              ? solution_.taskAgentMap[pred]
+                              : UNASSIGNED;
+    const int predPos = (pred >= 0 && pred < (int)currentIndex.pos.size())
+                            ? currentIndex.pos[pred]
+                            : -1;
+    if (predAgent != UNASSIGNED && predPos >= 0 &&
+        predPos < (int)solution_.agents[predAgent].taskPaths.size() &&
+        !solution_.agents[predAgent].taskPaths[predPos].empty()) {
+      release = max(release, solution_.agents[predAgent].taskPaths[predPos].endTime());
+    }
+  };
+
   const auto& ancestors = instance_.getAncestorsRef();
-  if (task < 0 || task >= (int)ancestors.size()) {
-    return 0;
+  if (task >= 0 && task < (int)ancestors.size()) {
+    for (int pred : ancestors[task]) {
+      consumePredecessor(pred);
+    }
   }
-  for (int pred : ancestors[task]) {
-    if (pred < 0 || pred >= (int)solution_.taskAgentMap.size()) {
-      continue;
-    }
-    const int predAgent = solution_.taskAgentMap[pred];
-    if (predAgent == UNASSIGNED) {
-      continue;
-    }
-    const int predPos =
-        (pred >= 0 && pred < (int)currentIndex.pos.size()) ? currentIndex.pos[pred]
-                                                            : -1;
-    if (predPos < 0) {
-      continue;
-    }
-    if (predPos < 0 ||
-        predPos >= (int)solution_.agents[predAgent].taskPaths.size()) {
-      continue;
-    }
-    const AgentTaskPath& predPath = solution_.agents[predAgent].taskPaths[predPos];
-    if (predPath.empty()) {
-      continue;
-    }
-    release = max(release, predPath.endTime());
+  if (taskPos > 0 && agent >= 0 && agent < instance_.getAgentNum() &&
+      taskPos - 1 < (int)solution_.agents[agent].taskAssignments.size()) {
+    consumePredecessor(solution_.agents[agent].taskAssignments[taskPos - 1]);
   }
 
   return max(0, release - arrive);
 }
 
 double LNS::computeSolutionMarketPressure() const {
-  const int taskCount = instance_.getTasksNum();
-  const TaskAssignmentIndex currentIndex =
-      buildCurrentTaskAssignmentIndex(solution_, taskCount);
+  auto weightedResourcePrice =
+      [](const unordered_map<uint64_t, double>& prices,
+         const unordered_map<uint64_t, double>& excessHat,
+         uint64_t key) -> double {
+    const auto pIt = prices.find(key);
+    if (pIt == prices.end()) {
+      return 0.0;
+    }
+    const auto eIt = excessHat.find(key);
+    if (eIt == excessHat.end()) {
+      return 0.0;
+    }
+    const double excessWeight = max(0.0, eIt->second);
+    if (excessWeight <= 0.0) {
+      return 0.0;
+    }
+    return pIt->second * excessWeight;
+  };
+
+  unordered_map<uint64_t, int> vertexDemand;
+  unordered_map<uint64_t, int> edgeDemand;
+  buildMarketDemandFromCurrentOccupancy(vertexDemand, edgeDemand);
+
   double pressure = 0.0;
-  for (int task = 0; task < taskCount; task++) {
-    const int agent =
-        (task >= 0 && task < (int)solution_.taskAgentMap.size())
-            ? solution_.taskAgentMap[task]
-            : UNASSIGNED;
-    if (agent == UNASSIGNED) {
+  for (const auto& kv : vertexDemand) {
+    const double unitContribution =
+        weightedResourcePrice(market_.vertexPrices, market_.vertexExcessHat, kv.first);
+    if (unitContribution <= 0.0) {
       continue;
     }
-    const int taskPos =
-        (task >= 0 && task < (int)currentIndex.pos.size()) ? currentIndex.pos[task]
-                                                            : -1;
-    if (taskPos < 0 || taskPos >= (int)solution_.agents[agent].taskPaths.size()) {
+    pressure += unitContribution * kv.second;
+  }
+  for (const auto& kv : edgeDemand) {
+    const double unitContribution =
+        weightedResourcePrice(market_.edgePrices, market_.edgeExcessHat, kv.first);
+    if (unitContribution <= 0.0) {
       continue;
     }
-    const AgentTaskPath& taskPath = solution_.agents[agent].taskPaths[taskPos];
-    if (taskPath.empty()) {
-      continue;
-    }
-    // Pressure aggregates total congestion-weighted exposure.
-    pressure += computeMarketExposureFromPath(taskPath, false);
+    pressure += unitContribution * kv.second;
   }
   return pressure;
 }
@@ -1338,22 +1387,7 @@ void LNS::updateMarketStateFromCurrentSolution() {
 
   unordered_map<uint64_t, int> vertexDemand;
   unordered_map<uint64_t, int> edgeDemand;
-  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    const AgentTaskPath& path = solution_.agents[agent].path;
-    if (path.empty()) {
-      continue;
-    }
-    for (int i = 0; i < (int)path.size(); i++) {
-      const int timestep = path.beginTime + i;
-      const int bucket = marketTimeBucket(timestep);
-      const int location = path[i].location;
-      vertexDemand[makeMarketVertexKey(location, bucket)]++;
-      if (i > 0) {
-        const int prevLocation = path[i - 1].location;
-        edgeDemand[makeMarketEdgeKey(prevLocation, location, bucket)]++;
-      }
-    }
-  }
+  buildMarketDemandFromCurrentOccupancy(vertexDemand, edgeDemand);
 
   const double eta =
       market_.eta / std::sqrt(1.0 + (double)market_.stats.updates);

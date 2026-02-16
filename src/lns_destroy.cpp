@@ -14,6 +14,13 @@ void LNS::clearNeighborhood() {
 void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
   PLOGD << "Using market tatonnement removal\n";
 
+  if (!market_.heuristics) {
+    PLOGW << "marketTatonnementRemoval requested while market heuristics are "
+             "disabled; falling back to random removal\n";
+    randomRemoval();
+    return;
+  }
+
   clearNeighborhood();
 
   const int taskCount = instance_.getTasksNum();
@@ -43,8 +50,17 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
     }
   }
 
-  vector<pair<int, double>> rankedTasks;
+  struct RankedTask {
+    int task = UNASSIGNED;
+    double burden = 0.0;
+    double tieBreak = 0.0;
+  };
+  vector<RankedTask> rankedTasks;
   rankedTasks.reserve(taskCount);
+  vector<double> rawExposure(taskCount, 0.0);
+  vector<double> rawWait(taskCount, 0.0);
+  vector<double> rawRoot(taskCount, 0.0);
+  double maxExposure = 0.0, maxWait = 0.0, maxRoot = 0.0;
   const int currentIter = (int)iterationStats.size();
   for (int task = 0; task < taskCount; task++) {
     const int agent = taskToAgent[task];
@@ -61,14 +77,13 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
     const double root = (blocker >= 0 && blocker < taskCount)
                             ? blockedWaitSum[blocker]
                             : 0.0;
-    double burden = market_.destroyWeightPrice * exposure +
-                    market_.destroyWeightWait * wait +
-                    market_.destroyWeightRoot * root;
-    if (task < (int)market_.taskCooldownUntilIter.size() &&
-        market_.taskCooldownUntilIter[task] > currentIter) {
-      burden *= 0.25;
-    }
-    rankedTasks.emplace_back(task, burden);
+    rawExposure[task] = max(0.0, exposure);
+    rawWait[task] = max(0.0, wait);
+    rawRoot[task] = max(0.0, root);
+    maxExposure = max(maxExposure, rawExposure[task]);
+    maxWait = max(maxWait, rawWait[task]);
+    maxRoot = max(maxRoot, rawRoot[task]);
+    rankedTasks.push_back(RankedTask{task, 0.0, 0.0});
   }
 
   if (rankedTasks.empty()) {
@@ -76,12 +91,35 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
     return;
   }
 
+  std::uniform_real_distribution<double> tieBreakDist(0.0, 1.0);
+  const double invExposure = (maxExposure > 0.0) ? (1.0 / maxExposure) : 0.0;
+  const double invWait = (maxWait > 0.0) ? (1.0 / maxWait) : 0.0;
+  const double invRoot = (maxRoot > 0.0) ? (1.0 / maxRoot) : 0.0;
+  for (auto& entry : rankedTasks) {
+    const int task = entry.task;
+    const double normExposure = rawExposure[task] * invExposure;
+    const double normWait = rawWait[task] * invWait;
+    const double normRoot = rawRoot[task] * invRoot;
+    double burden = market_.destroyWeightPrice * normExposure +
+                    market_.destroyWeightWait * normWait +
+                    market_.destroyWeightRoot * normRoot;
+    if (task < (int)market_.taskCooldownUntilIter.size() &&
+        market_.taskCooldownUntilIter[task] > currentIter) {
+      burden *= 0.25;
+    }
+    entry.burden = burden;
+    entry.tieBreak = tieBreakDist(rng_);
+  }
+
   std::sort(rankedTasks.begin(), rankedTasks.end(),
-            [](const pair<int, double>& lhs, const pair<int, double>& rhs) {
-              if (lhs.second != rhs.second) {
-                return lhs.second > rhs.second;
+            [](const RankedTask& lhs, const RankedTask& rhs) {
+              if (lhs.burden != rhs.burden) {
+                return lhs.burden > rhs.burden;
               }
-              return lhs.first < rhs.first;
+              if (lhs.tieBreak != rhs.tieBreak) {
+                return lhs.tieBreak > rhs.tieBreak;
+              }
+              return lhs.task < rhs.task;
             });
 
   vector<char> selected(taskCount, 0);
@@ -125,8 +163,8 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
   seedPoolTasks.reserve(seedPoolSize);
   seedPoolWeights.reserve(seedPoolSize);
   for (int i = 0; i < seedPoolSize; i++) {
-    seedPoolTasks.push_back(rankedTasks[i].first);
-    seedPoolWeights.push_back(max(1e-6, rankedTasks[i].second + 1e-6));
+    seedPoolTasks.push_back(rankedTasks[i].task);
+    seedPoolWeights.push_back(max(1e-6, rankedTasks[i].burden + 1e-6));
   }
 
   auto expandAncestors = [&](int rootTask, int maxDepth, int* closureCount) {
@@ -1059,12 +1097,21 @@ void LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
   // Sample the destroy heuristic and extract the neighborhood.
   // When market heuristics are disabled, exclude marketTatonnementRemoval from
   // ALNS sampling entirely.
+  const bool marketWarmupReady =
+      !market_.heuristics || market_.destroyWarmupUpdates <= 0 ||
+      market_.stats.updates >=
+          static_cast<int64_t>(market_.destroyWarmupUpdates);
+  if (market_.heuristics && !marketWarmupReady) {
+    market_.stats.destroyWarmupSkipped++;
+  }
+
   vector<int> eligibleHeuristics;
   eligibleHeuristics.reserve(adaptiveLNS_.numDestroyHeuristics);
   for (int i = 0; i < adaptiveLNS_.numDestroyHeuristics; i++) {
-    if (!market_.heuristics &&
-        i == DestroyHeuristic::marketTatonnementRemoval) {
-      continue;
+    if (i == DestroyHeuristic::marketTatonnementRemoval) {
+      if (!market_.heuristics || !marketWarmupReady) {
+        continue;
+      }
     }
     eligibleHeuristics.push_back(i);
   }

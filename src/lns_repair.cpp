@@ -716,9 +716,7 @@ bool LNS::computeRegretForTask(
 }
 
 int LNS::computeTaskPrecedenceWaitFromWorkspace(
-    int task, int taskLocation, const RegretWorkspace& workspace,
-    const vector<pair<int, int>>& precedenceConstraints) const {
-  (void)precedenceConstraints;
+    int task, int taskLocation, const RegretWorkspace& workspace) const {
   if (task < 0 || task >= instance_.getTasksNum()) {
     return 0;
   }
@@ -1587,9 +1585,8 @@ std::variant<bool, Utility> LNS::insertTask(
           taskPathsFor(regretPacket.agent)[insertedTaskPosition];
       const double newExposure =
           computeMarketExposureFromPath(insertedTaskPath, true);
-      const int newWait = computeTaskPrecedenceWaitFromWorkspace(
-          task, taskLocation, workspace,
-          *precedenceConstraints);
+      const int newWait =
+          computeTaskPrecedenceWaitFromWorkspace(task, taskLocation, workspace);
       deltaExposure = newExposure - oldExposure;
       deltaWait = (double)newWait - (double)oldWait;
     }

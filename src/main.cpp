@@ -177,6 +177,9 @@ int main(int argc, char** argv) {
       {"marketCooldownIters", 3,
        "Cooldown iterations before re-selecting a task in market destroy",
        &LNSParams::Market::cooldownIters},
+      {"marketDestroyWarmupUpdates", 3,
+       "Minimum market update count before ALNS can sample market_tatonnement (0 disables warmup gate)",
+       &LNSParams::Market::destroyWarmupUpdates},
       {"marketDUp", 1, "Ancestor expansion depth for market destroy",
        &LNSParams::Market::dUp},
       {"marketDDown", 1, "Successor expansion depth for market destroy",
@@ -477,14 +480,26 @@ int main(int argc, char** argv) {
     PLOGE << "marketRandomDestroyQuota must be in [0, 1]\n";
     return 1;
   }
-  if (marketCli.cooldownIters < 0 || marketCli.dUp < 0 || marketCli.dDown < 0 ||
-      marketCli.closureCap < 0) {
-    PLOGE << "marketCooldownIters, marketDUp, marketDDown and marketClosureCap must be non-negative\n";
+  if (marketCli.cooldownIters < 0 || marketCli.destroyWarmupUpdates < 0 ||
+      marketCli.dUp < 0 || marketCli.dDown < 0 || marketCli.closureCap < 0) {
+    PLOGE << "marketCooldownIters, marketDestroyWarmupUpdates, marketDUp, "
+             "marketDDown and marketClosureCap must be non-negative\n";
     return 1;
   }
   if (marketCli.tieBreakEpsSoc < 0.0 || marketCli.lambdaPrice < 0.0 ||
       marketCli.lambdaWait < 0.0) {
     PLOGE << "marketTieBreakEpsSoc, marketLambdaPrice and marketLambdaWait must be non-negative\n";
+    return 1;
+  }
+  if (marketCli.destroyWeightPrice < 0.0 || marketCli.destroyWeightWait < 0.0 ||
+      marketCli.destroyWeightRoot < 0.0) {
+    PLOGE << "marketDestroyWeightPrice, marketDestroyWeightWait and "
+             "marketDestroyWeightRoot must be non-negative\n";
+    return 1;
+  }
+  if (destroyHeuristic == "market_tatonnement" && !marketCli.heuristics) {
+    PLOGE << "destroyHeuristic='market_tatonnement' requires "
+             "--marketHeuristics\n";
     return 1;
   }
 

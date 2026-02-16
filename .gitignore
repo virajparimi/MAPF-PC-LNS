@@ -5,3 +5,6 @@ cmake-build-*/
 .vscode/
 experiment*/
 docs/
+datasets/
+baselines/
+archives/original_paper_logs/
