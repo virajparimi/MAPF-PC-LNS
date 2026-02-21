@@ -35,6 +35,9 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
   vector<TaskScheduleMetrics> perTask;
   vector<double> blockedWaitSum;
   computeTaskScheduleMetrics(perTask, &blockedWaitSum);
+  unordered_map<uint64_t, int> vertexDemand;
+  unordered_map<uint64_t, int> edgeDemand;
+  buildMarketDemandFromCurrentOccupancy(vertexDemand, edgeDemand);
   const auto& predecessors = instance_.getAncestorsRef();
   const auto& successors = instance_.getSuccessorsRef();
   vector<int> taskToAgent(taskCount, UNASSIGNED);
@@ -57,10 +60,10 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
   };
   vector<RankedTask> rankedTasks;
   rankedTasks.reserve(taskCount);
-  vector<double> rawExposure(taskCount, 0.0);
+  vector<double> rawRelief(taskCount, 0.0);
   vector<double> rawWait(taskCount, 0.0);
   vector<double> rawRoot(taskCount, 0.0);
-  double maxExposure = 0.0, maxWait = 0.0, maxRoot = 0.0;
+  double maxRelief = 0.0, maxWait = 0.0, maxRoot = 0.0;
   const int currentIter = (int)iterationStats.size();
   for (int task = 0; task < taskCount; task++) {
     const int agent = taskToAgent[task];
@@ -70,17 +73,19 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
       continue;
     }
     const AgentTaskPath& taskPath = solution_.agents[agent].taskPaths[pos];
-    const double exposure =
-        taskPath.empty() ? 0.0 : computeMarketExposureFromPath(taskPath, true);
+    const double relief = taskPath.empty()
+                              ? 0.0
+                              : computeMarketMarginalReliefFromPath(
+                                    taskPath, vertexDemand, edgeDemand, true);
     const double wait = perTask[task].valid ? (double)perTask[task].waitPrec : 0.0;
     const int blocker = perTask[task].blocker;
     const double root = (blocker >= 0 && blocker < taskCount)
                             ? blockedWaitSum[blocker]
                             : 0.0;
-    rawExposure[task] = max(0.0, exposure);
+    rawRelief[task] = max(0.0, relief);
     rawWait[task] = max(0.0, wait);
     rawRoot[task] = max(0.0, root);
-    maxExposure = max(maxExposure, rawExposure[task]);
+    maxRelief = max(maxRelief, rawRelief[task]);
     maxWait = max(maxWait, rawWait[task]);
     maxRoot = max(maxRoot, rawRoot[task]);
     rankedTasks.push_back(RankedTask{task, 0.0, 0.0});
@@ -92,15 +97,15 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
   }
 
   std::uniform_real_distribution<double> tieBreakDist(0.0, 1.0);
-  const double invExposure = (maxExposure > 0.0) ? (1.0 / maxExposure) : 0.0;
+  const double invRelief = (maxRelief > 0.0) ? (1.0 / maxRelief) : 0.0;
   const double invWait = (maxWait > 0.0) ? (1.0 / maxWait) : 0.0;
   const double invRoot = (maxRoot > 0.0) ? (1.0 / maxRoot) : 0.0;
   for (auto& entry : rankedTasks) {
     const int task = entry.task;
-    const double normExposure = rawExposure[task] * invExposure;
+    const double normRelief = rawRelief[task] * invRelief;
     const double normWait = rawWait[task] * invWait;
     const double normRoot = rawRoot[task] * invRoot;
-    double burden = market_.destroyWeightPrice * normExposure +
+    double burden = market_.destroyWeightPrice * normRelief +
                     market_.destroyWeightWait * normWait +
                     market_.destroyWeightRoot * normRoot;
     if (task < (int)market_.taskCooldownUntilIter.size() &&
@@ -1056,8 +1061,10 @@ void LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
 
   adaptiveLNS_.alnsCounter++;
 
-  // Cannot update the successes in the first iteration!
-  if (iterationStats.size() > 1) {
+  // Cannot update ALNS scores before a destroy heuristic has been sampled at
+  // least once in this run.
+  if (iterationStats.size() > 1 &&
+      !adaptiveLNS_.destroyHeuristicHistory.empty()) {
     // Incorporate the results of the heuristic performance in the last iteration
     switch (iterationStats.back().quality) {
       case bestSolutionYet:
@@ -1101,15 +1108,30 @@ void LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
       !market_.heuristics || market_.destroyWarmupUpdates <= 0 ||
       market_.stats.updates >=
           static_cast<int64_t>(market_.destroyWarmupUpdates);
-  if (market_.heuristics && !marketWarmupReady) {
-    market_.stats.destroyWarmupSkipped++;
+  const bool marketStableReady = marketDestroyStabilityReady();
+  const bool marketNotReady = (!marketWarmupReady || !marketStableReady);
+  if (market_.heuristics && marketNotReady) {
+    if (!marketWarmupReady) {
+      market_.stats.destroyWarmupSkipped++;
+    } else {
+      market_.stats.destroyUnstableSkipped++;
+    }
   }
 
   vector<int> eligibleHeuristics;
   eligibleHeuristics.reserve(adaptiveLNS_.numDestroyHeuristics);
   for (int i = 0; i < adaptiveLNS_.numDestroyHeuristics; i++) {
+    if (!alnsEnablePrecedenceAwareDestroy_ &&
+        (i == DestroyHeuristic::precedenceWaitRemoval ||
+         i == DestroyHeuristic::lowSlackRemoval)) {
+      continue;
+    }
     if (i == DestroyHeuristic::marketTatonnementRemoval) {
-      if (!market_.heuristics || !marketWarmupReady) {
+      if (!market_.heuristics) {
+        continue;
+      }
+      if (!market_.destroySoftGate &&
+          (!marketWarmupReady || !marketStableReady)) {
         continue;
       }
     }
@@ -1138,9 +1160,21 @@ void LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
     const bool suppressZeroSuccessHeuristic =
         hasPositiveRecentSuccess &&
         adaptiveLNS_.used[i] >= kMinUsedBeforeSuppression &&
-        adaptiveLNS_.success[i] <= kSuccessEpsilon;
+        adaptiveLNS_.success[i] <= kSuccessEpsilon &&
+        !(i == DestroyHeuristic::marketTatonnementRemoval &&
+          market_.destroySoftGate);
     if (suppressZeroSuccessHeuristic) {
       effectiveWeight = 0.0;
+    }
+    if (i == DestroyHeuristic::marketTatonnementRemoval &&
+        market_.destroySoftGate && marketNotReady) {
+      if (!marketWarmupReady) {
+        effectiveWeight *= market_.destroyWarmupWeightScale;
+      }
+      if (!marketStableReady) {
+        effectiveWeight *= market_.destroyUnstableWeightScale;
+      }
+      effectiveWeight = max(effectiveWeight, market_.destroyMinAlnsWeight);
     }
     eligibleWeights.push_back(effectiveWeight);
   }

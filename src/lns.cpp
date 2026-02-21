@@ -11,6 +11,7 @@
 #define MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL 0
 #endif
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <filesystem>
 #include <numeric>
@@ -783,8 +784,75 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   shawTemporalWeight_ = parameters.core.shawTemporalWeight;
   lnsConflictWeight_ = parameters.core.lnsConflictWeight;
   lnsCostWeight_ = parameters.core.lnsCostWeight;
+  rejectInvalidCandidates_ = parameters.core.rejectInvalidCandidates;
+  utilityUseConflictEventCount_ = parameters.core.utilityUseConflictEventCount;
+  acceptanceFeasibilityFirstPrecedenceDebt_ =
+      parameters.core.acceptanceFeasibilityFirstPrecedenceDebt;
+  acceptanceInvalidSpatialWeight_ =
+      parameters.core.acceptanceInvalidSpatialWeight;
+  acceptanceInvalidPrecedenceDebtWeight_ =
+      parameters.core.acceptanceInvalidPrecedenceDebtWeight;
+  acceptanceInvalidSocTieBreakWeight_ =
+      parameters.core.acceptanceInvalidSocTieBreakWeight;
+  acceptanceUseDedicatedInvalidTemperature_ =
+      parameters.core.acceptanceUseDedicatedInvalidTemperature;
+  acceptanceInvalidTemperatureScale_ =
+      parameters.core.acceptanceInvalidTemperatureScale;
+  acceptanceInvalidTemperatureFloor_ =
+      parameters.core.acceptanceInvalidTemperatureFloor;
+  if (!std::isfinite(acceptanceInvalidSpatialWeight_)) {
+    acceptanceInvalidSpatialWeight_ = 1.0;
+  }
+  if (!std::isfinite(acceptanceInvalidPrecedenceDebtWeight_)) {
+    acceptanceInvalidPrecedenceDebtWeight_ = 1.0;
+  }
+  if (!std::isfinite(acceptanceInvalidSocTieBreakWeight_)) {
+    acceptanceInvalidSocTieBreakWeight_ = 0.0;
+  }
+  if (!std::isfinite(acceptanceInvalidTemperatureScale_)) {
+    acceptanceInvalidTemperatureScale_ = 0.25;
+  }
+  if (!std::isfinite(acceptanceInvalidTemperatureFloor_)) {
+    acceptanceInvalidTemperatureFloor_ = 1e-3;
+  }
+  acceptanceInvalidSpatialWeight_ = max(0.0, acceptanceInvalidSpatialWeight_);
+  acceptanceInvalidPrecedenceDebtWeight_ =
+      max(0.0, acceptanceInvalidPrecedenceDebtWeight_);
+  acceptanceInvalidSocTieBreakWeight_ =
+      max(0.0, acceptanceInvalidSocTieBreakWeight_);
+  acceptanceInvalidTemperatureScale_ = max(1e-9, acceptanceInvalidTemperatureScale_);
+  acceptanceInvalidTemperatureFloor_ = max(1e-9, acceptanceInvalidTemperatureFloor_);
+  invalidTemperatureInitialized_ = false;
+  invalidTemperature_ = 0.0;
+  invalidInitialTemperature_ = 0.0;
+  invalidMaxTemperature_ = std::numeric_limits<double>::infinity();
+  invalidGreatDelugeDecay_ = 0.0;
+  if (acceptanceFeasibilityFirstPrecedenceDebt_ &&
+      acceptanceInvalidSpatialWeight_ == 0.0 &&
+      acceptanceInvalidPrecedenceDebtWeight_ == 0.0 &&
+      acceptanceInvalidSocTieBreakWeight_ == 0.0) {
+    PLOGW << "acceptanceFeasibilityFirstPrecedenceDebt enabled with all "
+             "invalid-score weights at 0; defaulting precedence-debt weight "
+             "to 1.0\n";
+    acceptanceInvalidPrecedenceDebtWeight_ = 1.0;
+  }
   initialSolutionStrategy = parameters.core.initialSolutionStrategy;
   initialSolutionFallback = parameters.core.initialSolutionFallback;
+  initialPortfolioTimeFraction_ =
+      parameters.core.initialPortfolioTimeFraction;
+  initialPortfolioMinArmTimeSec_ =
+      parameters.core.initialPortfolioMinArmTimeSec;
+  initialPortfolioStopOnFirstFeasible_ =
+      parameters.core.initialPortfolioStopOnFirstFeasible;
+  if (!std::isfinite(initialPortfolioTimeFraction_)) {
+    initialPortfolioTimeFraction_ = 0.10;
+  }
+  if (!std::isfinite(initialPortfolioMinArmTimeSec_)) {
+    initialPortfolioMinArmTimeSec_ = 1.0;
+  }
+  initialPortfolioTimeFraction_ =
+      min(1.0, max(0.0, initialPortfolioTimeFraction_));
+  initialPortfolioMinArmTimeSec_ = max(1e-6, initialPortfolioMinArmTimeSec_);
   initialSolutionRequested_ = initialSolutionStrategy;
   initialSolutionEffective_ = initialSolutionStrategy;
   initialSolutionFallbackUsed_ = false;
@@ -815,16 +883,54 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   }
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
+  repairHeuristic = parameters.core.repairHeuristic;
+  if (repairHeuristic != "regret" &&
+      repairHeuristic != "market_shortlist_regret") {
+    PLOGW << "Unknown repairHeuristic '" << repairHeuristic
+          << "'; defaulting to 'regret'\n";
+    repairHeuristic = "regret";
+  }
   regretType = parameters.core.regretType;
   regretCandidateTopK_ = std::max(0, parameters.core.regretCandidateTopK);
+  adaptiveRegretTopK_ = parameters.core.adaptiveRegretTopK;
+  if (adaptiveRegretTopK_ && regretCandidateTopK_ <= 0) {
+    PLOGW << "adaptiveRegretTopK requires regretCandidateTopK > 0; disabling adaptive regret Top-K\n";
+    adaptiveRegretTopK_ = false;
+  }
+  adaptiveRegretTopKCurrent_ = regretCandidateTopK_;
+  adaptiveRegretTopKLastUsed_ = adaptiveRegretTopKCurrent_;
+  regretShortlistUseNormalizedWaitProxy_ =
+      parameters.core.regretShortlistUseNormalizedWaitProxy;
+  regretShortlistUseNormalizedSuccessorPressure_ =
+      parameters.core.regretShortlistUseNormalizedSuccessorPressure;
+  regretShortlistClampSuccessorToPrecedenceRelease_ =
+      parameters.core.regretShortlistClampSuccessorToPrecedenceRelease;
+  regretShortlistUseDescendantWeightedSuccessorPressure_ =
+      parameters.core.regretShortlistUseDescendantWeightedSuccessorPressure;
+  regretShortlistSuccessorPressureDepthDecay_ =
+      parameters.core.regretShortlistSuccessorPressureDepthDecay;
+  regretShortlistSuccessorPressureMaxDepth_ =
+      std::max(0, parameters.core.regretShortlistSuccessorPressureMaxDepth);
+  regretShortlistDiagnostics_ = parameters.core.regretShortlistDiagnostics;
+  if (!std::isfinite(regretShortlistSuccessorPressureDepthDecay_)) {
+    regretShortlistSuccessorPressureDepthDecay_ = 0.5;
+  }
+  regretShortlistSuccessorPressureDepthDecay_ =
+      min(1.0, max(0.0, regretShortlistSuccessorPressureDepthDecay_));
+  buildSuccessorPressureStaticSignals();
   maxCascadeFactor_ = parameters.core.maxCascadeFactor;
   if (!std::isfinite(maxCascadeFactor_)) {
     maxCascadeFactor_ = 3.0;
   }
   maxCascadeFactor_ = max(0.0, maxCascadeFactor_);
   maxCascadeTasks_ = std::max(0, parameters.core.maxCascadeTasks);
+  adaptiveCascadeBudget_ = parameters.core.adaptiveCascadeBudget;
+  adaptiveCascadeBudgetCurrent_ = cascadeTaskBudget();
+  adaptiveCascadeBudgetLastUsed_ = adaptiveCascadeBudgetCurrent_;
   repairIncludeNonAncestorAgents_ =
       parameters.core.repairIncludeNonAncestorAgents;
+  alnsEnablePrecedenceAwareDestroy_ =
+      parameters.core.alnsEnablePrecedenceAwareDestroy;
   if (parameters.lowLevel.planner == "sipps") {
     lowLevelPlannerType_ = LowLevelPlannerType::sipps;
   } else {
@@ -833,16 +939,20 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   lowLevelSegmentTimeout_ = max(0.0, parameters.lowLevel.segmentTimeout);
   plannerParityCheck_ = parameters.lowLevel.parityCheck;
   plannerParityMaxLogs_ = parameters.lowLevel.parityMaxLogs;
+  mlastarIncrementalFocalRefresh_ =
+      parameters.lowLevel.mlastarIncrementalFocalRefresh;
   partialSolutionRestore_ = parameters.core.partialSolutionRestore;
   market_.heuristics = parameters.market.heuristics;
   market_.bucketDt = max(1, parameters.market.bucketDt);
   market_.vertexBucketCapacity = max(1, parameters.market.vertexBucketCapacity);
   market_.edgeBucketCapacity = max(1, parameters.market.edgeBucketCapacity);
   market_.updateOnAcceptedOnly = parameters.market.updateOnAcceptedOnly;
+  market_.updateFromCandidate = parameters.market.updateFromCandidate;
   market_.updatePeriodAccepted = max(1, parameters.market.updatePeriodAccepted);
   market_.eta = max(0.0, parameters.market.eta);
   market_.rho = parameters.market.rho;
   market_.priceCap = max(0.0, parameters.market.priceCap);
+  market_.priceInit = max(0.0, parameters.market.priceInit);
   market_.gamma = max(0.0, parameters.market.gamma);
   market_.acceptanceGuards = parameters.market.acceptanceGuards;
   market_.tauP = max(0.0, parameters.market.tauP);
@@ -851,6 +961,22 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   market_.destroyWeightWait = max(0.0, parameters.market.destroyWeightWait);
   market_.destroyWeightRoot = max(0.0, parameters.market.destroyWeightRoot);
   market_.destroyWarmupUpdates = max(0, parameters.market.destroyWarmupUpdates);
+  market_.destroyRequireStable = parameters.market.destroyRequireStable;
+  market_.destroySoftGate = parameters.market.destroySoftGate;
+  market_.destroyWarmupWeightScale =
+      max(0.0, parameters.market.destroyWarmupWeightScale);
+  market_.destroyUnstableWeightScale =
+      max(0.0, parameters.market.destroyUnstableWeightScale);
+  market_.destroyMinAlnsWeight =
+      max(0.0, parameters.market.destroyMinAlnsWeight);
+  market_.stabilityEmaAlpha =
+      min(1.0, max(0.0, parameters.market.stabilityEmaAlpha));
+  market_.stabilityMaxRelPriceDelta =
+      max(0.0, parameters.market.stabilityMaxRelPriceDelta);
+  market_.stabilityMaxTopMassDelta =
+      max(0.0, parameters.market.stabilityMaxTopMassDelta);
+  market_.stabilityMinContendedJaccard =
+      min(1.0, max(0.0, parameters.market.stabilityMinContendedJaccard));
   market_.seedTopFrac = min(1.0, max(0.0, parameters.market.seedTopFrac));
   market_.randomDestroyQuota =
       min(1.0, max(0.0, parameters.market.randomDestroyQuota));
@@ -860,6 +986,8 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   market_.closureCap = parameters.market.closureCap;
   market_.repairTieBreak = parameters.market.repairTieBreak;
   market_.repairBlend = parameters.market.repairBlend;
+  market_.repairNormalizeByObservedPrice =
+      parameters.market.repairNormalizeByObservedPrice;
   market_.tieBreakEpsSoc = max(0.0, parameters.market.tieBreakEpsSoc);
   market_.lambdaPrice = max(0.0, parameters.market.lambdaPrice);
   market_.lambdaWait = max(0.0, parameters.market.lambdaWait);
@@ -875,6 +1003,11 @@ LNS::LNS(int numOfIterations, const Instance& instance,
     market_.repairTieBreak = true;
   }
   market_.taskCooldownUntilIter.assign(instance_.getTasksNum(), 0);
+  market_.stats.reset();
+  market_.prevContendedVertices.clear();
+  market_.prevContendedEdges.clear();
+  market_.hasStabilityBaseline = false;
+  market_.candidateUpdateConsumed = false;
 
   // Ensure both working solutions use the selected low-level planner.
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
@@ -893,6 +1026,86 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   regretSecondBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
 }
 
+void LNS::buildSuccessorPressureStaticSignals() {
+  const int taskCount = instance_.getTasksNum();
+  successorPressureStaticSignalsByTask_.assign(taskCount, {});
+  const auto& successors = instance_.getSuccessorsRef();
+
+  for (int task = 0; task < taskCount; task++) {
+    auto& signals = successorPressureStaticSignalsByTask_[task];
+    if (task < 0 || task >= (int)successors.size()) {
+      continue;
+    }
+
+    if (!regretShortlistUseDescendantWeightedSuccessorPressure_) {
+      signals.reserve(successors[task].size());
+      for (int successor : successors[task]) {
+        if (successor < 0 || successor >= taskCount) {
+          continue;
+        }
+        signals.push_back({successor, 1, 1.0});
+      }
+      continue;
+    }
+
+    vector<int> minDepth(taskCount, -1);
+    std::deque<int> frontier;
+    for (int successor : successors[task]) {
+      if (successor < 0 || successor >= taskCount) {
+        continue;
+      }
+      if (minDepth[successor] == -1 || minDepth[successor] > 1) {
+        minDepth[successor] = 1;
+        frontier.push_back(successor);
+      }
+    }
+
+    while (!frontier.empty()) {
+      const int current = frontier.front();
+      frontier.pop_front();
+      const int currentDepth = minDepth[current];
+      if (currentDepth <= 0) {
+        continue;
+      }
+      if (regretShortlistSuccessorPressureMaxDepth_ > 0 &&
+          currentDepth >= regretShortlistSuccessorPressureMaxDepth_) {
+        continue;
+      }
+      if (current < 0 || current >= (int)successors.size()) {
+        continue;
+      }
+      for (int next : successors[current]) {
+        if (next < 0 || next >= taskCount) {
+          continue;
+        }
+        const int candidateDepth = currentDepth + 1;
+        if (regretShortlistSuccessorPressureMaxDepth_ > 0 &&
+            candidateDepth > regretShortlistSuccessorPressureMaxDepth_) {
+          continue;
+        }
+        if (minDepth[next] == -1 || candidateDepth < minDepth[next]) {
+          minDepth[next] = candidateDepth;
+          frontier.push_back(next);
+        }
+      }
+    }
+
+    for (int descendant = 0; descendant < taskCount; descendant++) {
+      const int depth = minDepth[descendant];
+      if (depth <= 0) {
+        continue;
+      }
+      const double weight =
+          std::pow(regretShortlistSuccessorPressureDepthDecay_,
+                   static_cast<double>(depth - 1));
+      if (weight <= 0.0) {
+        continue;
+      }
+      signals.push_back({descendant, depth, weight});
+    }
+  }
+}
+
 std::shared_ptr<SingleAgentSolver> LNS::createSharedPlanner(int agent) const {
   std::shared_ptr<SingleAgentSolver> planner;
   switch (lowLevelPlannerType_) {
@@ -902,7 +1115,8 @@ std::shared_ptr<SingleAgentSolver> LNS::createSharedPlanner(int agent) const {
       break;
     case LowLevelPlannerType::mlastar:
     default:
-      planner = std::make_shared<MultiLabelSpaceTimeAStar>(instance_, agent);
+      planner = std::make_shared<MultiLabelSpaceTimeAStar>(
+          instance_, agent, true, mlastarIncrementalFocalRefresh_);
       break;
   }
   planner->setSegmentTimeout(lowLevelSegmentTimeout_);
@@ -919,7 +1133,8 @@ std::unique_ptr<SingleAgentSolver> LNS::createLocalPlanner(int agent) const {
       break;
     case LowLevelPlannerType::mlastar:
     default:
-      planner = std::make_unique<MultiLabelSpaceTimeAStar>(instance_, agent, false);
+      planner = std::make_unique<MultiLabelSpaceTimeAStar>(
+          instance_, agent, false, mlastarIncrementalFocalRefresh_);
       break;
   }
   planner->setSegmentTimeout(lowLevelSegmentTimeout_);
@@ -1121,6 +1336,97 @@ double LNS::computeMarketExposureFromPath(const AgentTaskPath& taskPath,
   // Normalize only over resources with positive congestion-weighted
   // contribution, so long uncongested paths do not dominate the score.
   return totalExposure / max(1, activeResourceCount);
+}
+
+double LNS::computeMarketMarginalReliefFromPath(
+    const AgentTaskPath& taskPath,
+    const unordered_map<uint64_t, int>& vertexDemand,
+    const unordered_map<uint64_t, int>& edgeDemand, bool normalized) const {
+  if (taskPath.empty()) {
+    return 0.0;
+  }
+
+  unordered_map<uint64_t, int> vertexUsage;
+  unordered_map<uint64_t, int> edgeUsage;
+  vertexUsage.reserve(taskPath.size());
+  edgeUsage.reserve(taskPath.size());
+
+  for (int i = 0; i < (int)taskPath.size(); i++) {
+    const int timestep = taskPath.beginTime + i;
+    const int bucket = marketTimeBucket(timestep);
+    const int location = taskPath[i].location;
+    vertexUsage[makeMarketVertexKey(location, bucket)]++;
+
+    if (i > 0) {
+      const int prevLocation = taskPath[i - 1].location;
+      edgeUsage[makeMarketEdgeKey(prevLocation, location, bucket)]++;
+    }
+  }
+
+  auto computeCategoryRelief =
+      [](const unordered_map<uint64_t, int>& usage,
+         const unordered_map<uint64_t, int>& demand,
+         const unordered_map<uint64_t, double>& prices,
+         const unordered_map<uint64_t, double>& excessHat,
+         int capacity, double* totalRelief,
+         int* activeResources) {
+        const int safeCapacity = max(1, capacity);
+        for (const auto& kv : usage) {
+          const uint64_t key = kv.first;
+          const int usageCount = kv.second;
+          if (usageCount <= 0) {
+            continue;
+          }
+
+          const auto pIt = prices.find(key);
+          if (pIt == prices.end()) {
+            continue;
+          }
+          const auto eIt = excessHat.find(key);
+          if (eIt == excessHat.end()) {
+            continue;
+          }
+          const double excessWeight = max(0.0, eIt->second);
+          if (excessWeight <= 0.0) {
+            continue;
+          }
+          const double unitPressure = pIt->second * excessWeight;
+          if (unitPressure <= 0.0) {
+            continue;
+          }
+
+          const auto dIt = demand.find(key);
+          const int currentDemand = (dIt == demand.end()) ? 0 : dIt->second;
+          if (currentDemand <= safeCapacity) {
+            continue;
+          }
+
+          const int oldExcess = max(0, currentDemand - safeCapacity);
+          const int newExcess =
+              max(0, currentDemand - usageCount - safeCapacity);
+          const int relievedExcess = oldExcess - newExcess;
+          if (relievedExcess <= 0) {
+            continue;
+          }
+
+          *totalRelief += unitPressure * relievedExcess;
+          (*activeResources)++;
+        }
+      };
+
+  double totalRelief = 0.0;
+  int activeResources = 0;
+  computeCategoryRelief(vertexUsage, vertexDemand, market_.vertexPrices,
+                        market_.vertexExcessHat, market_.vertexBucketCapacity,
+                        &totalRelief, &activeResources);
+  computeCategoryRelief(edgeUsage, edgeDemand, market_.edgePrices,
+                        market_.edgeExcessHat, market_.edgeBucketCapacity,
+                        &totalRelief, &activeResources);
+
+  if (!normalized) {
+    return totalRelief;
+  }
+  return totalRelief / max(1, activeResources);
 }
 
 int LNS::computeTaskPrecedenceWaitFromState(
@@ -1380,6 +1686,24 @@ bool LNS::passMarketAcceptanceGuards(double previousPressure,
   return pressureOK && waitOK;
 }
 
+bool LNS::marketDestroyStabilityReady() const {
+  if (!market_.heuristics || !market_.destroyRequireStable) {
+    return true;
+  }
+  if (!market_.hasStabilityBaseline || market_.stats.updates < 2) {
+    return false;
+  }
+  if (!std::isfinite(market_.stats.priceRelL1DeltaEma) ||
+      !std::isfinite(market_.stats.topPriceMassDeltaEma) ||
+      !std::isfinite(market_.stats.contendedJaccardEma)) {
+    return false;
+  }
+  return market_.stats.priceRelL1DeltaEma <= market_.stabilityMaxRelPriceDelta &&
+         market_.stats.topPriceMassDeltaEma <= market_.stabilityMaxTopMassDelta &&
+         market_.stats.contendedJaccardEma >=
+             market_.stabilityMinContendedJaccard;
+}
+
 void LNS::updateMarketStateFromCurrentSolution() {
   if (!market_.heuristics) {
     return;
@@ -1395,11 +1719,18 @@ void LNS::updateMarketStateFromCurrentSolution() {
   int64_t contendedResources = 0;
   double contendedPriceSum = 0.0;
   double maxPrice = 0.0;
+  double totalAbsPriceDelta = 0.0;
+  double totalOldPriceMass = 0.0;
+  unordered_set<uint64_t> contendedVertices;
+  unordered_set<uint64_t> contendedEdges;
+  contendedVertices.reserve(vertexDemand.size());
+  contendedEdges.reserve(edgeDemand.size());
 
   auto updateCategory = [&](const unordered_map<uint64_t, int>& demand,
                             unordered_map<uint64_t, double>& prices,
                             unordered_map<uint64_t, double>& excessHat,
-                            int bucketCapacity) {
+                            int bucketCapacity,
+                            unordered_set<uint64_t>* contendedKeys) {
     vector<uint64_t> keys;
     keys.reserve(demand.size() + prices.size() + excessHat.size());
     for (const auto& kv : demand) {
@@ -1429,15 +1760,18 @@ void LNS::updateMarketStateFromCurrentSolution() {
       const double oldHat = (itOldHat == excessHat.end()) ? 0.0 : itOldHat->second;
       const double newHat = market_.rho * oldHat + (1.0 - market_.rho) * excess;
 
-      constexpr double kPriceInit = 1e-3;
       constexpr double kExcessHatEps = 1e-9;
       double newPrice = oldPrice;
       if (newHat > kExcessHatEps) {
-        const double basePrice = (oldPrice > 0.0) ? oldPrice : kPriceInit;
+        const double basePrice =
+            (oldPrice > 0.0) ? oldPrice : market_.priceInit;
         newPrice = min(market_.priceCap, basePrice * std::exp(eta * newHat));
       } else {
         newPrice = oldPrice * max(0.0, 1.0 - market_.gamma);
       }
+
+      totalAbsPriceDelta += std::abs(newPrice - oldPrice);
+      totalOldPriceMass += oldPrice;
 
       if (newPrice > 1e-9 || newHat > 1e-9) {
         nextPrices[key] = newPrice;
@@ -1447,6 +1781,9 @@ void LNS::updateMarketStateFromCurrentSolution() {
         contendedResources++;
         contendedPriceSum += newPrice;
         maxPrice = max(maxPrice, newPrice);
+        if (contendedKeys != nullptr) {
+          contendedKeys->insert(key);
+        }
       }
     }
 
@@ -1455,9 +1792,9 @@ void LNS::updateMarketStateFromCurrentSolution() {
   };
 
   updateCategory(vertexDemand, market_.vertexPrices, market_.vertexExcessHat,
-                 market_.vertexBucketCapacity);
+                 market_.vertexBucketCapacity, &contendedVertices);
   updateCategory(edgeDemand, market_.edgePrices, market_.edgeExcessHat,
-                 market_.edgeBucketCapacity);
+                 market_.edgeBucketCapacity, &contendedEdges);
 
   vector<double> allPrices;
   allPrices.reserve(market_.vertexPrices.size() + market_.edgePrices.size());
@@ -1485,6 +1822,67 @@ void LNS::updateMarketStateFromCurrentSolution() {
     topPriceMassFrac = topMass / totalPriceMass;
   }
 
+  const double relPriceL1Delta =
+      (totalOldPriceMass > 1e-9)
+          ? (totalAbsPriceDelta / totalOldPriceMass)
+          : ((totalAbsPriceDelta > 1e-9) ? 1.0 : 0.0);
+  const double previousTopPriceMassFrac = market_.stats.topPriceMassFrac;
+  const double topPriceMassDelta =
+      (market_.stats.updates > 0)
+          ? std::abs(topPriceMassFrac - previousTopPriceMassFrac)
+          : 0.0;
+  double contendedJaccard = 1.0;
+  if (market_.hasStabilityBaseline) {
+    const auto computeIntersectionSize =
+        [](const unordered_set<uint64_t>& lhs,
+           const unordered_set<uint64_t>& rhs) -> size_t {
+      if (lhs.empty() || rhs.empty()) {
+        return 0;
+      }
+      const unordered_set<uint64_t>* smaller = &lhs;
+      const unordered_set<uint64_t>* larger = &rhs;
+      if (lhs.size() > rhs.size()) {
+        smaller = &rhs;
+        larger = &lhs;
+      }
+      size_t intersection = 0;
+      for (uint64_t key : *smaller) {
+        if (larger->find(key) != larger->end()) {
+          intersection++;
+        }
+      }
+      return intersection;
+    };
+    const size_t intersectionVertices = computeIntersectionSize(
+        market_.prevContendedVertices, contendedVertices);
+    const size_t unionVertices = market_.prevContendedVertices.size() +
+                                 contendedVertices.size() -
+                                 intersectionVertices;
+    const size_t intersectionEdges =
+        computeIntersectionSize(market_.prevContendedEdges, contendedEdges);
+    const size_t unionEdges = market_.prevContendedEdges.size() +
+                              contendedEdges.size() - intersectionEdges;
+    const size_t intersectionTotal = intersectionVertices + intersectionEdges;
+    const size_t unionTotal = unionVertices + unionEdges;
+    contendedJaccard =
+        (unionTotal == 0)
+            ? 1.0
+            : ((double)intersectionTotal / (double)unionTotal);
+  }
+  const auto emaUpdate = [&](double previous, double sample) -> double {
+    if (!market_.hasStabilityBaseline) {
+      return sample;
+    }
+    const double alpha = market_.stabilityEmaAlpha;
+    return (1.0 - alpha) * previous + alpha * sample;
+  };
+  const double priceRelL1DeltaEma =
+      emaUpdate(market_.stats.priceRelL1DeltaEma, relPriceL1Delta);
+  const double topPriceMassDeltaEma =
+      emaUpdate(market_.stats.topPriceMassDeltaEma, topPriceMassDelta);
+  const double contendedJaccardEma =
+      emaUpdate(market_.stats.contendedJaccardEma, contendedJaccard);
+
   const TaskAssignmentIndex currentIndex =
       buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
   vector<TaskScheduleMetrics> perTask;
@@ -1506,12 +1904,33 @@ void LNS::updateMarketStateFromCurrentSolution() {
                              : 0.0;
   market_.stats.maxPrice = maxPrice;
   market_.stats.topPriceMassFrac = topPriceMassFrac;
+  market_.stats.priceRelL1Delta = relPriceL1Delta;
+  market_.stats.priceRelL1DeltaEma = priceRelL1DeltaEma;
+  market_.stats.topPriceMassDelta = topPriceMassDelta;
+  market_.stats.topPriceMassDeltaEma = topPriceMassDeltaEma;
+  market_.stats.contendedJaccard = contendedJaccard;
+  market_.stats.contendedJaccardEma = contendedJaccardEma;
   market_.stats.totalPrecedenceWait = totalWait;
   market_.stats.maxPrecedenceWait = maxWait;
+  market_.prevContendedVertices.swap(contendedVertices);
+  market_.prevContendedEdges.swap(contendedEdges);
+  market_.hasStabilityBaseline = true;
 }
 
-void LNS::maybeUpdateMarketState(bool accepted) {
+void LNS::maybeUpdateMarketState(bool accepted, bool candidateStateUpdate) {
   if (!market_.heuristics) {
+    return;
+  }
+  if (candidateStateUpdate) {
+    if (market_.updateOnAcceptedOnly || !market_.updateFromCandidate) {
+      return;
+    }
+    market_.candidateUpdateConsumed = true;
+    market_.updateCounter++;
+    if (market_.updateCounter % market_.updatePeriodAccepted != 0) {
+      return;
+    }
+    updateMarketStateFromCurrentSolution();
     return;
   }
   if (market_.updateOnAcceptedOnly) {
@@ -1523,6 +1942,9 @@ void LNS::maybeUpdateMarketState(bool accepted) {
       return;
     }
   } else {
+    if (market_.updateFromCandidate && market_.candidateUpdateConsumed) {
+      return;
+    }
     market_.updateCounter++;
     if (market_.updateCounter % market_.updatePeriodAccepted != 0) {
       return;
@@ -1532,7 +1954,8 @@ void LNS::maybeUpdateMarketState(bool accepted) {
 }
 
 
-bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
+bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
+                                        int solverTimeoutSec) {
 
   // Reset solution state in case this is called more than once.
   Solution freshSolution(instance_);
@@ -1577,7 +2000,7 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant) {
       "-m", instance_.getMapName(),
       "-a", instance_.getAgentTaskFName(),
       "-k", std::to_string(instance_.getAgentNum()),
-      "-t", "120",
+      "-t", std::to_string(max(1, solverTimeoutSec)),
       "-d", std::to_string(seed_),
       "--solver", solver,
   };

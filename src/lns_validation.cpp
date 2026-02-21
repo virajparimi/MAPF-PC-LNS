@@ -165,9 +165,13 @@ void LNS::addConflictingTask(int agent, int timestep, ConflictMap* out) const {
   out->emplace(task, Conflicts(task, agent, taskIdx));
 }
 
-bool LNS::validateSolution(ConflictMap* conflictedTasks) {
+bool LNS::validateSolution(ConflictMap* conflictedTasks,
+                           ValidationStats* stats) {
 
   bool result = true;
+  if (stats != nullptr) {
+    *stats = ValidationStats{};
+  }
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPosition =
       mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
@@ -183,6 +187,9 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
     if (taskAgent == UNASSIGNED) {
       PLOGE << "validateSolution: missing agent assignment for task "
             << task << "\n";
+      if (stats != nullptr) {
+        stats->structuralViolations++;
+      }
       return false;
     }
     int taskPosition = (task >= 0 && task < (int)taskToPosition.size())
@@ -192,12 +199,18 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
         taskPosition >= (int)solution_.agents[taskAgent].taskPaths.size()) {
       PLOGE << "validateSolution: invalid local index " << taskPosition
             << " for task " << task << " on agent " << taskAgent << "\n";
+      if (stats != nullptr) {
+        stats->structuralViolations++;
+      }
       return false;
     }
     if (solution_.agents[taskAgent].taskPaths[taskPosition].empty()) {
       PLOGE << "validateSolution: empty path for task " << task
             << " on agent " << taskAgent << " at local index "
             << taskPosition << "\n";
+      if (stats != nullptr) {
+        stats->structuralViolations++;
+      }
       result = false;
       return result;
     }
@@ -212,6 +225,9 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
       PLOGE << "validateSolution: missing agent for precedence pair ("
             << precedenceConstraint.first << ", "
             << precedenceConstraint.second << ")\n";
+      if (stats != nullptr) {
+        stats->structuralViolations++;
+      }
       return false;
     }
     int taskPositionA = (precedenceConstraint.first >= 0 &&
@@ -228,14 +244,29 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
       PLOGE << "validateSolution: invalid local task index for precedence pair ("
             << precedenceConstraint.first << ", "
             << precedenceConstraint.second << ")\n";
+      if (stats != nullptr) {
+        stats->structuralViolations++;
+      }
       return false;
     }
 
-    if (solution_.agents[agentA].path.timeStamps[taskPositionA] >=
-        solution_.agents[agentB].path.timeStamps[taskPositionB]) {
+    const int predecessorFinish =
+        solution_.agents[agentA].path.timeStamps[taskPositionA];
+    const int successorFinish =
+        solution_.agents[agentB].path.timeStamps[taskPositionB];
+    if (stats != nullptr) {
+      stats->precedencePairsChecked++;
+      const int edgeDebt = max(0, predecessorFinish - successorFinish + 1);
+      stats->precedenceDebt += edgeDebt;
+    }
+
+    if (predecessorFinish >= successorFinish) {
       PLOGE << "Temporal conflict between agent " << agentA << " doing task "
             << precedenceConstraint.first << " and agent " << agentB
             << " doing task " << precedenceConstraint.second << "\n";
+      if (stats != nullptr) {
+        stats->precedenceViolations++;
+      }
       result = false;
       if (conflictedTasks == nullptr) {
         return false;
@@ -303,6 +334,9 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
                 << ", a" << agentI << "=" << occupancySourceName(sourceI)
                 << ", a" << agentJ << "=" << occupancySourceName(sourceJ)
                 << "]\n";
+          if (stats != nullptr) {
+            stats->vertexCollisions++;
+          }
           result = false;
           if (conflictedTasks == nullptr) {
             return false;
@@ -359,6 +393,9 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks) {
               << ", a" << agent << "=" << occupancySourceName(sourceA)
               << ", a" << otherAgent << "=" << occupancySourceName(sourceB)
               << "]\n";
+        if (stats != nullptr) {
+          stats->edgeSwapCollisions++;
+        }
         result = false;
         if (conflictedTasks == nullptr) {
           return false;

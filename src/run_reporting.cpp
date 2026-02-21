@@ -202,11 +202,13 @@ void printAdaptiveLNSPerformance(const LNS& lns,
   std::cout << "Adaptive LNS performance:\n";
   std::cout << std::left << std::setw(18) << "Heuristic" << std::right
             << std::setw(9) << "Share%" << std::setw(10) << "Selected"
+            << std::setw(11) << "PropBetter" << std::setw(10) << "PropEq"
+            << std::setw(11) << "PropWorse" << std::setw(11) << "AccWorse"
             << std::setw(10) << "Accept%" << std::setw(12) << "BestUpd%"
             << std::setw(12) << "FailFind%" << std::setw(12) << "Cascade%"
             << std::setw(15) << "AvgDelta(all)" << std::setw(15)
             << "AvgDelta(acc)" << '\n';
-  std::cout << std::string(113, '-') << '\n';
+  std::cout << std::string(156, '-') << '\n';
 
   std::cout << std::fixed << std::setprecision(2);
   const double historySize =
@@ -219,6 +221,10 @@ void printAdaptiveLNSPerformance(const LNS& lns,
     const int64_t bestUpdates = adaptiveLNS.bestUpdates[i];
     const int64_t couldNotFind = adaptiveLNS.couldNotFind[i];
     const int64_t cascadeAborted = adaptiveLNS.cascadeAborted[i];
+    const int64_t proposedBetter = adaptiveLNS.proposedBetter[i];
+    const int64_t proposedEqual = adaptiveLNS.proposedEqual[i];
+    const int64_t proposedWorse = adaptiveLNS.proposedWorse[i];
+    const int64_t acceptedWorse = adaptiveLNS.acceptedWorse[i];
     const double acceptRate =
         selected > 0 ? (double)accepted / (double)selected : 0.0;
     const double bestRate =
@@ -235,6 +241,9 @@ void printAdaptiveLNSPerformance(const LNS& lns,
     std::cout << std::left << std::setw(18)
               << heuristicName((DestroyHeuristic)i) << std::right
               << std::setw(9) << (share * 100.0) << std::setw(10) << selected
+              << std::setw(11) << proposedBetter << std::setw(10)
+              << proposedEqual << std::setw(11) << proposedWorse
+              << std::setw(11) << acceptedWorse
               << std::setw(10) << (acceptRate * 100.0) << std::setw(12)
               << (bestRate * 100.0) << std::setw(12)
               << (couldNotFindRate * 100.0) << std::setw(12)
@@ -314,6 +323,11 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
           ? static_cast<double>(lowLevelStats.budgetExhausted) /
                 static_cast<double>(lowLevelStats.calls)
           : 0.0;
+  const LNS::AcceptanceDiagnostics acceptanceDiag =
+      lns.getAcceptanceDiagnostics();
+  auto average = [](double sum, int64_t count) {
+    return count > 0 ? sum / static_cast<double>(count) : 0.0;
+  };
 
   std::cout << "\n=== Run Summary ===\n";
   printMetric("Requested initial solution",
@@ -334,6 +348,87 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Total feasible iterations", stats.numFeasibleIterations);
   printMetric("Solution cost", solution.sumOfCosts);
   printMetric("Number of failures", lns.numOfFailures);
+  printMetric("Reject invalid candidates",
+              lns.rejectInvalidCandidatesEnabled() ? "true" : "false");
+  printMetric("Utility uses conflict events",
+              lns.utilityUsesConflictEventCount() ? "true" : "false");
+  printMetric("Acceptance feasibility-first debt",
+              lns.acceptanceUsesFeasibilityFirstPrecedenceDebt() ? "true"
+                                                                 : "false");
+  printMetric("Acceptance dedicated invalid temperature",
+              lns.acceptanceUsesDedicatedInvalidTemperature() ? "true"
+                                                              : "false");
+  printMetric("MLA* incremental focal refresh",
+              lns.mlastarIncrementalFocalRefreshEnabled() ? "true" : "false");
+  printMetric("Invalid candidate rejections",
+              lns.invalidCandidateRejections);
+  printMetric("Market guard rejections", lns.marketGuardRejections);
+  printMetric("FF decisions", acceptanceDiag.feasibilityFirstDecisions);
+  printMetric("FF invalid->valid accepted",
+              acceptanceDiag.invalidToValidAccepted);
+  printMetric("FF valid->invalid compared",
+              acceptanceDiag.validToInvalidCompared);
+  printMetric("FF valid->invalid accepted",
+              acceptanceDiag.validToInvalidAccepted);
+  printMetric("FF valid->invalid rejected",
+              acceptanceDiag.validToInvalidRejected);
+  printMetric("FF invalid-vs-invalid compared",
+              acceptanceDiag.invalidVsInvalidComparisons);
+  printMetric("FF invalid-vs-invalid accepted",
+              acceptanceDiag.invalidVsInvalidAccepted);
+  printMetric("FF invalid-vs-invalid rejected",
+              acceptanceDiag.invalidVsInvalidRejected);
+  printMetric("FF avg previous invalid score",
+              average(acceptanceDiag.previousInvalidScoreSum,
+                      acceptanceDiag.invalidVsInvalidComparisons));
+  printMetric("FF avg candidate invalid score",
+              average(acceptanceDiag.candidateInvalidScoreSum,
+                      acceptanceDiag.invalidVsInvalidComparisons));
+  printMetric("FF avg previous spatial(norm)",
+              average(acceptanceDiag.previousSpatialNormSum,
+                      acceptanceDiag.invalidVsInvalidComparisons));
+  printMetric("FF avg candidate spatial(norm)",
+              average(acceptanceDiag.candidateSpatialNormSum,
+                      acceptanceDiag.invalidVsInvalidComparisons));
+  printMetric("FF avg previous precedenceDebt(norm)",
+              average(acceptanceDiag.previousPrecedenceDebtNormSum,
+                      acceptanceDiag.invalidVsInvalidComparisons));
+  printMetric("FF avg candidate precedenceDebt(norm)",
+              average(acceptanceDiag.candidatePrecedenceDebtNormSum,
+                      acceptanceDiag.invalidVsInvalidComparisons));
+  printMetric("FF avg previous soc(norm)",
+              average(acceptanceDiag.previousSocNormSum,
+                      acceptanceDiag.invalidVsInvalidComparisons));
+  printMetric("FF avg candidate soc(norm)",
+              average(acceptanceDiag.candidateSocNormSum,
+                      acceptanceDiag.invalidVsInvalidComparisons));
+  printMetric("FF invalid-score compared",
+              acceptanceDiag.invalidScoreComparisons);
+  printMetric("FF invalid-score accepted",
+              acceptanceDiag.invalidScoreAccepted);
+  printMetric("FF invalid-score rejected",
+              acceptanceDiag.invalidScoreRejected);
+  printMetric("FF invalid-score worse compared",
+              acceptanceDiag.invalidScoreWorseComparisons);
+  printMetric("FF invalid-score worse accepted",
+              acceptanceDiag.invalidScoreWorseAccepted);
+  printMetric("FF avg invalid-score delta",
+              average(acceptanceDiag.invalidScoreDeltaSum,
+                      acceptanceDiag.invalidScoreComparisons));
+  printMetric("FF avg invalid-score abs delta",
+              average(acceptanceDiag.invalidScoreAbsDeltaSum,
+                      acceptanceDiag.invalidScoreComparisons));
+  printMetric("FF avg invalid-temp before",
+              average(acceptanceDiag.invalidAcceptanceTempBeforeSum,
+                      acceptanceDiag.invalidScoreComparisons));
+  printMetric("FF avg invalid-temp after",
+              average(acceptanceDiag.invalidAcceptanceTempAfterSum,
+                      acceptanceDiag.invalidScoreComparisons));
+  printMetric("FF dedicated invalid-temp init count",
+              acceptanceDiag.invalidDedicatedTempInitCount);
+  printMetric("FF avg dedicated invalid-temp init",
+              average(acceptanceDiag.invalidDedicatedInitTempSum,
+                      acceptanceDiag.invalidDedicatedTempInitCount));
   printMetric("Success", success ? "true" : "false");
 
   std::cout << "\n=== Low-Level Planner Throughput ===\n";
@@ -384,6 +479,11 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
           ? (double)cascadeStats.closureAddedSum /
                 (double)cascadeStats.prepareCalls
           : 0.0;
+  const double avgCascadeBudgetUsed =
+      cascadeStats.prepareCalls > 0
+          ? (double)cascadeStats.budgetUsedSum /
+                (double)cascadeStats.prepareCalls
+          : 0.0;
   const double avgClosureFracOfTasks =
       (cascadeStats.prepareCalls > 0 && totalTasks > 0)
           ? (double)cascadeStats.closureAddedSum /
@@ -391,7 +491,20 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
           : 0.0;
 
   std::cout << "\n=== Cascade Stats ===\n";
-  printMetric("Cascade budget (added tasks)", lns.getCascadeTaskBudget());
+  printMetric("Cascade adaptive budget enabled",
+              lns.isAdaptiveCascadeBudgetEnabled() ? "true" : "false");
+  printMetric("Cascade budget baseline (added tasks)", lns.getCascadeTaskBudget());
+  printMetric("Cascade budget current (added tasks)",
+              lns.getAdaptiveCascadeBudgetCurrent());
+  printMetric("Cascade budget avg used", avgCascadeBudgetUsed);
+  printMetric("Cascade budget min used",
+              cascadeStats.prepareCalls > 0 ? cascadeStats.budgetUsedMin : 0);
+  printMetric("Cascade budget max used",
+              cascadeStats.prepareCalls > 0 ? cascadeStats.budgetUsedMax : 0);
+  printMetric("Cascade budget increases",
+              cascadeStats.adaptiveBudgetIncreases);
+  printMetric("Cascade budget decreases",
+              cascadeStats.adaptiveBudgetDecreases);
   printMetric("prepareNextIteration calls", cascadeStats.prepareCalls);
   printMetric("Cascade budget aborts", cascadeStats.budgetAborts);
   printMetric("Cascade abort rate", cascadeAbortRate);
@@ -453,10 +566,17 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
     std::cout << "\n=== Market Stats ===\n";
     printMetric("Updates", marketStats.updates);
     printMetric("Destroy warmup skipped", marketStats.destroyWarmupSkipped);
+    printMetric("Destroy unstable skipped", marketStats.destroyUnstableSkipped);
     printMetric("Contended resources", marketStats.contendedResources);
     printMetric("Mean price (contended)", marketStats.meanPriceContended);
     printMetric("Max price", marketStats.maxPrice);
     printMetric("Top price-mass fraction", marketStats.topPriceMassFrac);
+    printMetric("Price rel-L1 delta", marketStats.priceRelL1Delta);
+    printMetric("Price rel-L1 delta EMA", marketStats.priceRelL1DeltaEma);
+    printMetric("Top price-mass delta", marketStats.topPriceMassDelta);
+    printMetric("Top price-mass delta EMA", marketStats.topPriceMassDeltaEma);
+    printMetric("Contended Jaccard", marketStats.contendedJaccard);
+    printMetric("Contended Jaccard EMA", marketStats.contendedJaccardEma);
     printMetric("Total precedence wait", marketStats.totalPrecedenceWait);
     printMetric("Max precedence wait", marketStats.maxPrecedenceWait);
   }
@@ -480,6 +600,34 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
               regretStats.candidateInsertionsTried);
   printMetric("Candidate insertions feasible",
               regretStats.candidateInsertionsFeasible);
+  printMetric("Shortlist agent evals", regretStats.shortlistAgentEvaluations);
+  printMetric("Shortlist fallback evals",
+              regretStats.shortlistFallbackEvaluations);
+  printMetric("Shortlist fallback recovered",
+              regretStats.shortlistFallbackRecovered);
+  printMetric("Adaptive regret Top-K enabled",
+              lns.isAdaptiveRegretTopKEnabled() ? "true" : "false");
+  printMetric("Adaptive regret Top-K current", lns.getAdaptiveRegretTopKCurrent());
+  if (regretStats.adaptiveTopKEvaluations > 0) {
+    const double adaptiveTopKAvg =
+        (double)regretStats.adaptiveTopKUsedSum /
+        (double)regretStats.adaptiveTopKEvaluations;
+    printMetric("Adaptive regret Top-K evals",
+                regretStats.adaptiveTopKEvaluations);
+    printMetric("Adaptive regret Top-K avg used", adaptiveTopKAvg);
+    printMetric("Adaptive regret Top-K min used",
+                regretStats.adaptiveTopKUsedMin);
+    printMetric("Adaptive regret Top-K max used",
+                regretStats.adaptiveTopKUsedMax);
+    printMetric("Adaptive regret Top-K increases",
+                regretStats.adaptiveTopKIncreases);
+    printMetric("Adaptive regret Top-K decreases",
+                regretStats.adaptiveTopKDecreases);
+    printMetric("Adaptive regret Top-K no-feasible signals",
+                regretStats.adaptiveTopKNoFeasibleSignals);
+    printMetric("Adaptive regret Top-K fallback-recovered signals",
+                regretStats.adaptiveTopKFallbackRecoverySignals);
+  }
   printMetric("Workspace agents cloned", regretStats.workspaceAgentsCloned);
   printMetric("Max cloned agents/task",
               regretStats.workspaceMaxClonedPerTask);
@@ -487,6 +635,188 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Repair neighborhoods", regretStats.neighborhoods);
   printMetric("Avg removed tasks/neighborhood", avgRemovedTasks);
   printMetric("Max removed tasks/neighborhood", regretStats.removedTasksMax);
+  if (regretStats.waitProxyDiagEvaluations > 0) {
+    const double waitPositiveEvalRate =
+        (double)regretStats.waitProxyDiagPositiveEvals /
+        (double)regretStats.waitProxyDiagEvaluations;
+    const double waitVaryingEvalRate =
+        (double)regretStats.waitProxyDiagVaryingEvals /
+        (double)regretStats.waitProxyDiagEvaluations;
+    const double normalizedActiveEvalRate =
+        (double)regretStats.waitProxyDiagNormalizedActiveEvals /
+        (double)regretStats.waitProxyDiagEvaluations;
+    const double waitNonZeroCandidateRate =
+        regretStats.waitProxyDiagFiniteCandidates > 0
+            ? (double)regretStats.waitProxyDiagNonZeroCandidates /
+                  (double)regretStats.waitProxyDiagFiniteCandidates
+            : 0.0;
+    const double top1ChangedRate =
+        (double)regretStats.waitProxyDiagTop1Changed /
+        (double)regretStats.waitProxyDiagEvaluations;
+    const double topKChangedRate =
+        (double)regretStats.waitProxyDiagTopKChanged /
+        (double)regretStats.waitProxyDiagEvaluations;
+    const double avgTopKOverlap =
+        regretStats.waitProxyDiagTopKOverlapFracSum /
+        (double)regretStats.waitProxyDiagEvaluations;
+    const double avgAbsWaitZ =
+        regretStats.waitProxyDiagMeanAbsWaitZSum /
+        (double)regretStats.waitProxyDiagEvaluations;
+    const double avgAbsDistanceZ =
+        regretStats.waitProxyDiagMeanAbsDistanceZSum /
+        (double)regretStats.waitProxyDiagEvaluations;
+    const double waitToDistanceZRatio =
+        avgAbsDistanceZ > 1e-12 ? avgAbsWaitZ / avgAbsDistanceZ : 0.0;
+    printMetric("Wait-proxy diag evals", regretStats.waitProxyDiagEvaluations);
+    printMetric("Wait-proxy finite candidates",
+                regretStats.waitProxyDiagFiniteCandidates);
+    printMetric("Wait-proxy nonzero candidates",
+                regretStats.waitProxyDiagNonZeroCandidates);
+    printMetric("Wait-proxy positive eval rate", waitPositiveEvalRate);
+    printMetric("Wait-proxy varying eval rate", waitVaryingEvalRate);
+    printMetric("Wait-proxy normalized-active eval rate",
+                normalizedActiveEvalRate);
+    printMetric("Wait-proxy nonzero candidate rate",
+                waitNonZeroCandidateRate);
+    printMetric("Wait-proxy top1 changed rate", top1ChangedRate);
+    printMetric("Wait-proxy topK changed rate", topKChangedRate);
+    printMetric("Wait-proxy avg topK overlap", avgTopKOverlap);
+    printMetric("Wait-proxy avg |z_wait|", avgAbsWaitZ);
+    printMetric("Wait-proxy avg |z_dist|", avgAbsDistanceZ);
+    printMetric("Wait-proxy |z_wait|/|z_dist|", waitToDistanceZRatio);
+  }
+  if (regretStats.successorPressureDiagEvaluations > 0) {
+    const double successorPositiveEvalRate =
+        (double)regretStats.successorPressureDiagPositiveEvals /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorVaryingEvalRate =
+        (double)regretStats.successorPressureDiagVaryingEvals /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorNormalizedActiveEvalRate =
+        (double)regretStats.successorPressureDiagNormalizedActiveEvals /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorNonZeroCandidateRate =
+        regretStats.successorPressureDiagFiniteCandidates > 0
+            ? (double)regretStats.successorPressureDiagNonZeroCandidates /
+                  (double)regretStats.successorPressureDiagFiniteCandidates
+            : 0.0;
+    const double successorTop1ChangedRate =
+        (double)regretStats.successorPressureDiagTop1Changed /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorTopKChangedRate =
+        (double)regretStats.successorPressureDiagTopKChanged /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorAvgTopKOverlap =
+        regretStats.successorPressureDiagTopKOverlapFracSum /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorAvgAbsPressureZ =
+        regretStats.successorPressureDiagMeanAbsPressureZSum /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorAvgAbsDistanceZ =
+        regretStats.successorPressureDiagMeanAbsDistanceZSum /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorToDistanceZRatio =
+        successorAvgAbsDistanceZ > 1e-12
+            ? successorAvgAbsPressureZ / successorAvgAbsDistanceZ
+            : 0.0;
+    const int64_t successorSignalCount =
+        regretStats.successorPressureDiagDepth1Signals +
+        regretStats.successorPressureDiagDepthGt1Signals;
+    const double successorPrevFallbackPerEval =
+        (double)regretStats.successorPressureDiagPrevFallbackCount /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorPrevFallbackPerSignal =
+        successorSignalCount > 0
+            ? (double)regretStats.successorPressureDiagPrevFallbackCount /
+                  (double)successorSignalCount
+            : 0.0;
+    const double successorPrecedenceClampPerEval =
+        (double)regretStats.successorPressureDiagPrecedenceClampCount /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorPrecedenceClampPerSignal =
+        successorSignalCount > 0
+            ? (double)regretStats.successorPressureDiagPrecedenceClampCount /
+                  (double)successorSignalCount
+            : 0.0;
+    const double successorPrecedenceClampAvgDelta =
+        regretStats.successorPressureDiagPrecedenceClampCount > 0
+            ? regretStats.successorPressureDiagPrecedenceClampDeltaSum /
+                  (double)regretStats.successorPressureDiagPrecedenceClampCount
+            : 0.0;
+    const double successorDepth1SignalsPerEval =
+        (double)regretStats.successorPressureDiagDepth1Signals /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorDepthGt1SignalsPerEval =
+        (double)regretStats.successorPressureDiagDepthGt1Signals /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorDescendantActiveEvalRate =
+        (double)regretStats.successorPressureDiagDescendantActiveEvals /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorAvgDepth1Contribution =
+        regretStats.successorPressureDiagMeanDepth1ContributionSum /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorAvgDepthGt1Contribution =
+        regretStats.successorPressureDiagMeanDepthGt1ContributionSum /
+        (double)regretStats.successorPressureDiagEvaluations;
+    const double successorDescendantContributionShare =
+        (successorAvgDepth1Contribution + successorAvgDepthGt1Contribution) > 1e-12
+            ? successorAvgDepthGt1Contribution /
+                  (successorAvgDepth1Contribution +
+                   successorAvgDepthGt1Contribution)
+            : 0.0;
+    printMetric("Successor-pressure diag evals",
+                regretStats.successorPressureDiagEvaluations);
+    printMetric("Successor-pressure finite candidates",
+                regretStats.successorPressureDiagFiniteCandidates);
+    printMetric("Successor-pressure nonzero candidates",
+                regretStats.successorPressureDiagNonZeroCandidates);
+    printMetric("Successor-pressure positive eval rate",
+                successorPositiveEvalRate);
+    printMetric("Successor-pressure varying eval rate",
+                successorVaryingEvalRate);
+    printMetric("Successor-pressure normalized-active eval rate",
+                successorNormalizedActiveEvalRate);
+    printMetric("Successor-pressure nonzero candidate rate",
+                successorNonZeroCandidateRate);
+    printMetric("Successor-pressure top1 changed rate",
+                successorTop1ChangedRate);
+    printMetric("Successor-pressure topK changed rate",
+                successorTopKChangedRate);
+    printMetric("Successor-pressure avg topK overlap",
+                successorAvgTopKOverlap);
+    printMetric("Successor-pressure avg |z_succ|",
+                successorAvgAbsPressureZ);
+    printMetric("Successor-pressure avg |z_dist|",
+                successorAvgAbsDistanceZ);
+    printMetric("Successor-pressure |z_succ|/|z_dist|",
+                successorToDistanceZRatio);
+    printMetric("Successor-pressure prev fallback count",
+                regretStats.successorPressureDiagPrevFallbackCount);
+    printMetric("Successor-pressure prev fallback per eval",
+                successorPrevFallbackPerEval);
+    printMetric("Successor-pressure prev fallback per signal",
+                successorPrevFallbackPerSignal);
+    printMetric("Successor-pressure precedence clamp count",
+                regretStats.successorPressureDiagPrecedenceClampCount);
+    printMetric("Successor-pressure precedence clamp per eval",
+                successorPrecedenceClampPerEval);
+    printMetric("Successor-pressure precedence clamp per signal",
+                successorPrecedenceClampPerSignal);
+    printMetric("Successor-pressure precedence clamp avg delta",
+                successorPrecedenceClampAvgDelta);
+    printMetric("Successor-pressure depth1 signals/eval",
+                successorDepth1SignalsPerEval);
+    printMetric("Successor-pressure depth>1 signals/eval",
+                successorDepthGt1SignalsPerEval);
+    printMetric("Successor-pressure descendant-active eval rate",
+                successorDescendantActiveEvalRate);
+    printMetric("Successor-pressure avg depth1 contribution",
+                successorAvgDepth1Contribution);
+    printMetric("Successor-pressure avg depth>1 contribution",
+                successorAvgDepthGt1Contribution);
+    printMetric("Successor-pressure descendant contribution share",
+                successorDescendantContributionShare);
+  }
 
   if (!incrementalRegret) {
     return;

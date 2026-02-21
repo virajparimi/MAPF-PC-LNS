@@ -1,6 +1,8 @@
 #pragma once
 
 #include <deque>
+#include <limits>
+#include <map>
 #include <plog/Log.h>
 #include <memory>
 #include "astar.hpp"
@@ -13,6 +15,8 @@ class MultiLabelAStarNode : public LLNode {
                compare<LLNode::OpenCompareNode>>::handle_type openHandle;
   pairing_heap<MultiLabelAStarNode*,
                compare<LLNode::FocalCompareNode>>::handle_type focalHandle;
+  bool inFocal = false;
+  int indexedFVal = std::numeric_limits<int>::min();
 
   MultiLabelAStarNode() = default;
 
@@ -61,12 +65,16 @@ class MultiLabelAStarNode : public LLNode {
 class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
  private:
   int agent_ = UNASSIGNED;
+  bool incrementalFocalRefresh_ = false;
   pairing_heap<MultiLabelAStarNode*,
                compare<MultiLabelAStarNode::OpenCompareNode>>
       openList_;
   pairing_heap<MultiLabelAStarNode*,
                compare<MultiLabelAStarNode::FocalCompareNode>>
       focalList_;
+  // Optional f-value buckets for incremental focal refresh. Stale entries are
+  // tolerated and filtered lazily on promotion.
+  std::map<int, std::vector<MultiLabelAStarNode*>> openByF_;
 
   int minFVal_{}, lowerBound_{};
 
@@ -77,6 +85,7 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
 
   void releaseNodes();
   void updateFocalList();
+  void registerOpenNodeByF(MultiLabelAStarNode* node);
   inline MultiLabelAStarNode* popNode();
   inline void pushNode(MultiLabelAStarNode* node);
   void updatePath(const LLNode* goal, Path& path);
@@ -85,11 +94,15 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
 
  public:
   MultiLabelSpaceTimeAStar(const Instance& instance, int agent,
-                           bool initializeHeuristics = true)
-      : SingleAgentSolver(instance, agent, initializeHeuristics), agent_(agent) {}
+                           bool initializeHeuristics = true,
+                           bool incrementalFocalRefresh = true)
+      : SingleAgentSolver(instance, agent, initializeHeuristics),
+        agent_(agent),
+        incrementalFocalRefresh_(incrementalFocalRefresh) {}
   std::shared_ptr<SingleAgentSolver> cloneForAgent(int agent) const override {
     auto cloned =
-        std::make_shared<MultiLabelSpaceTimeAStar>(instance, agent, false);
+        std::make_shared<MultiLabelSpaceTimeAStar>(
+            instance, agent, false, incrementalFocalRefresh_);
     copyPlannerStateTo(*cloned);
     if (agent != agent_) {
       // Cross-agent clone should keep the target agent's own goal model.

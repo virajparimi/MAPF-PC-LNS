@@ -7,6 +7,7 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <unordered_set>
 #include <utility>
 #include "common.hpp"
 #include "constrainttable.hpp"
@@ -32,10 +33,17 @@ enum DestroyHeuristic {
 struct MarketStats {
   int64_t updates = 0;
   int64_t destroyWarmupSkipped = 0;
+  int64_t destroyUnstableSkipped = 0;
   int64_t contendedResources = 0;
   double meanPriceContended = 0.0;
   double maxPrice = 0.0;
   double topPriceMassFrac = 0.0;
+  double priceRelL1Delta = 0.0;
+  double priceRelL1DeltaEma = 0.0;
+  double topPriceMassDelta = 0.0;
+  double topPriceMassDeltaEma = 0.0;
+  double contendedJaccard = 1.0;
+  double contendedJaccardEma = 1.0;
   double totalPrecedenceWait = 0.0;
   double maxPrecedenceWait = 0.0;
 
@@ -580,7 +588,8 @@ struct ALNS {
   double reactionFactor = 0.35;
   vector<double> weights, used, success;
   vector<int64_t> selections, accepted, rejected, feasible, bestUpdates,
-      improvedAccepted, downgradedAccepted, couldNotFind, cascadeAborted;
+      improvedAccepted, downgradedAccepted, couldNotFind, cascadeAborted,
+      proposedBetter, proposedEqual, proposedWorse, acceptedWorse;
   vector<double> deltaSocAll, deltaSocAccepted;
 
   ALNS() {
@@ -596,6 +605,10 @@ struct ALNS {
     downgradedAccepted.assign(numDestroyHeuristics, 0);
     couldNotFind.assign(numDestroyHeuristics, 0);
     cascadeAborted.assign(numDestroyHeuristics, 0);
+    proposedBetter.assign(numDestroyHeuristics, 0);
+    proposedEqual.assign(numDestroyHeuristics, 0);
+    proposedWorse.assign(numDestroyHeuristics, 0);
+    acceptedWorse.assign(numDestroyHeuristics, 0);
     deltaSocAll.assign(numDestroyHeuristics, 0.0);
     deltaSocAccepted.assign(numDestroyHeuristics, 0.0);
   }
@@ -613,10 +626,43 @@ struct LNSParams {
     double shawTemporalWeight = 3.0;
     double lnsConflictWeight = 0.75;
     double lnsCostWeight = 0.25;
+    // If true, reject invalid candidates before SA/TA/OBA/GDA acceptance.
+    bool rejectInvalidCandidates = false;
+    // If true, utility uses raw conflict event count (vertex + edge-swap +
+    // precedence violations). If false, utility uses conflicting-task count.
+    bool utilityUseConflictEventCount = true;
+    // If true, acceptance uses feasibility-first ordering:
+    // valid dominates invalid, invalid-vs-invalid compares a precedence-debt
+    // score instead of utility that mixes potentially noisy invalid SoC.
+    bool acceptanceFeasibilityFirstPrecedenceDebt = false;
+    // Weight of spatial invalidity magnitude:
+    // vertex collisions + edge swaps + structural violations.
+    double acceptanceInvalidSpatialWeight = 1.0;
+    // Weight of temporal precedence debt magnitude.
+    double acceptanceInvalidPrecedenceDebtWeight = 1.0;
+    // Optional tie-break term for invalid-vs-invalid scoring.
+    // Default 0 keeps invalid scoring independent of SoC.
+    double acceptanceInvalidSocTieBreakWeight = 0.0;
+    // If true, feasibility-first invalid-score transitions (valid->invalid and
+    // invalid->invalid) use a dedicated acceptance temperature state instead of
+    // sharing the utility-based SA/TA/OBA/GDA temperature.
+    bool acceptanceUseDedicatedInvalidTemperature = false;
+    // Scale used to initialize dedicated invalid temperature from score
+    // magnitude: T0 = scale * max(1, |prevScore|, |candScore|, |delta|).
+    double acceptanceInvalidTemperatureScale = 0.25;
+    // Lower bound for dedicated invalid temperature initialization/recovery.
+    double acceptanceInvalidTemperatureFloor = 1e-3;
     string initialSolutionStrategy;
     // Fallback strategy when initialSolutionStrategy fails.
     // Supported: "greedy", "none".
     string initialSolutionFallback = "greedy";
+    // Portfolio warm-start budget as a fraction of total cutoff.
+    // Used only when initialSolutionStrategy == "portfolio".
+    double initialPortfolioTimeFraction = 0.10;
+    // Minimum per-arm budget (seconds) in portfolio mode.
+    double initialPortfolioMinArmTimeSec = 1.0;
+    // If true, portfolio stops after the first feasible arm.
+    bool initialPortfolioStopOnFirstFeasible = false;
     // Final-goal occupancy policy used when reserving completed task paths in
     // constraint tables:
     // - "stay": reserve final goal indefinitely (legacy behavior)
@@ -638,21 +684,58 @@ struct LNSParams {
     int greedySegmentDiagnosticsTopK = 10;
     string destroyHeuristic;
     string acceptanceCriteria;
+    // Repair heuristic:
+    // - "regret": classic regret repair
+    // - "market_shortlist_regret": market-aware shortlist for candidate
+    //   insertion ranking with exhaustive fallback when shortlist finds none
+    string repairHeuristic = "regret";
     string regretType;
     bool incrementalRegret = false;
     // Add occupancy constraints from non-ancestor agents during repair
     // planning. This reduces collision-heavy candidates at the cost of extra
     // low-level constraint processing.
     bool repairIncludeNonAncestorAgents = true;
+    // If false, ALNS excludes precedence_wait and low_slack destroy operators.
+    bool alnsEnablePrecedenceAwareDestroy = true;
     // Candidate insertion budget per (task, agent) regret evaluation.
     // 0 means evaluate all candidate positions.
     int regretCandidateTopK = 0;
+    // If true, adapt regret shortlist Top-K online from feasibility/fallback
+    // feedback. Requires regretCandidateTopK > 0.
+    bool adaptiveRegretTopK = false;
+    // When shortlist is active with repairHeuristic='regret', add a normalized
+    // precedence wait-proxy term to shortlist ranking. This only affects
+    // shortlist ordering, not full low-level feasibility checks.
+    bool regretShortlistUseNormalizedWaitProxy = false;
+    // When shortlist is active with repairHeuristic='regret', add a normalized
+    // successor-pressure term that estimates downstream precedence-delay impact
+    // of each candidate insertion position.
+    bool regretShortlistUseNormalizedSuccessorPressure = false;
+    // When computing successor-pressure from partially removed states, clamp
+    // successor start estimates to precedence release lower bounds derived from
+    // the mixed workspace/previous assignment state.
+    bool regretShortlistClampSuccessorToPrecedenceRelease = true;
+    // When true, successor-pressure uses all reachable descendants with
+    // depth-decayed weights (instead of immediate successors only).
+    bool regretShortlistUseDescendantWeightedSuccessorPressure = false;
+    // Depth-decay factor used in descendant-weighted successor-pressure:
+    // weight(depth) = decay^(depth-1), with depth=1 for immediate successors.
+    double regretShortlistSuccessorPressureDepthDecay = 0.5;
+    // Maximum descendant depth considered by descendant-weighted
+    // successor-pressure (0 = unlimited).
+    int regretShortlistSuccessorPressureMaxDepth = 0;
+    // Emit regret shortlist diagnostics for wait-proxy signal strength and
+    // ranking impact (top-1/top-K changes under normalized wait-proxy blend).
+    bool regretShortlistDiagnostics = false;
     // Hard cap on precedence successor-closure growth in prepareNextIteration.
     // If maxCascadeTasks == 0, use:
     //   max(maxCascadeFactor * neighborSize, neighborSize + 10)
     // If maxCascadeFactor <= 0 and maxCascadeTasks == 0, cap is disabled.
     double maxCascadeFactor = 3.0;
     int maxCascadeTasks = 0;
+    // If true, adapt cascade budget online using closure pressure and abort
+    // feedback. No additional tuning knobs are required.
+    bool adaptiveCascadeBudget = false;
     // Enable touched-agent-scoped rollback restore.
     // Full-copy restore remains the default/fallback behavior.
     bool partialSolutionRestore = false;
@@ -666,6 +749,9 @@ struct LNSParams {
     double segmentTimeout = 600.0;
     bool parityCheck = false;
     int parityMaxLogs = 10;
+    // If true, MLA* refreshes focal from f-buckets instead of scanning the
+    // whole open list when the focal bound increases.
+    bool mlastarIncrementalFocalRefresh = true;
   } lowLevel;
 
   struct Market {
@@ -674,10 +760,15 @@ struct LNSParams {
     int vertexBucketCapacity = 2;
     int edgeBucketCapacity = 2;
     bool updateOnAcceptedOnly = true;
+    // When updateOnAcceptedOnly=false, update prices from the current
+    // candidate solution before accept/reject restores.
+    bool updateFromCandidate = false;
     int updatePeriodAccepted = 1;
     double eta = 0.05;
     double rho = 0.9;
     double priceCap = 50.0;
+    // Seed price used when a newly contended resource has no prior price.
+    double priceInit = 0.05;
     double gamma = 0.01;
     bool acceptanceGuards = false;
     double tauP = 0.0;
@@ -689,6 +780,20 @@ struct LNSParams {
     // this many market price updates have been performed.
     // 0 disables warmup gating.
     int destroyWarmupUpdates = 3;
+    // Optional stability gate for ALNS selection of market destroy.
+    bool destroyRequireStable = false;
+    // When true, keep market destroy eligible during warmup/instability but
+    // downweight it instead of excluding it.
+    bool destroySoftGate = false;
+    double destroyWarmupWeightScale = 0.20;
+    double destroyUnstableWeightScale = 0.20;
+    double destroyMinAlnsWeight = 0.05;
+    // EMA alpha for stability diagnostics in [0, 1].
+    double stabilityEmaAlpha = 0.25;
+    // Stability thresholds (active when destroyRequireStable=true).
+    double stabilityMaxRelPriceDelta = 0.35;
+    double stabilityMaxTopMassDelta = 0.08;
+    double stabilityMinContendedJaccard = 0.50;
     double seedTopFrac = 0.2;
     double randomDestroyQuota = 0.15;
     int cooldownIters = 3;
@@ -697,6 +802,9 @@ struct LNSParams {
     int closureCap = 0;
     bool repairTieBreak = false;
     bool repairBlend = false;
+    // Normalize market shortlist price term by observed live price scale
+    // (instead of static priceCap) to avoid near-zero signals.
+    bool repairNormalizeByObservedPrice = true;
     double tieBreakEpsSoc = 0.0;
     double lambdaPrice = 0.0;
     double lambdaWait = 0.0;
@@ -724,6 +832,47 @@ class LNS {
     int64_t agentEvaluations = 0;
     int64_t candidateInsertionsTried = 0;
     int64_t candidateInsertionsFeasible = 0;
+    int64_t shortlistAgentEvaluations = 0;
+    int64_t shortlistFallbackEvaluations = 0;
+    int64_t shortlistFallbackRecovered = 0;
+    int64_t adaptiveTopKEvaluations = 0;
+    int64_t adaptiveTopKUsedSum = 0;
+    int64_t adaptiveTopKUsedMin = std::numeric_limits<int64_t>::max();
+    int64_t adaptiveTopKUsedMax = 0;
+    int64_t adaptiveTopKIncreases = 0;
+    int64_t adaptiveTopKDecreases = 0;
+    int64_t adaptiveTopKNoFeasibleSignals = 0;
+    int64_t adaptiveTopKFallbackRecoverySignals = 0;
+    int64_t waitProxyDiagEvaluations = 0;
+    int64_t waitProxyDiagFiniteCandidates = 0;
+    int64_t waitProxyDiagNonZeroCandidates = 0;
+    int64_t waitProxyDiagPositiveEvals = 0;
+    int64_t waitProxyDiagVaryingEvals = 0;
+    int64_t waitProxyDiagNormalizedActiveEvals = 0;
+    int64_t waitProxyDiagTop1Changed = 0;
+    int64_t waitProxyDiagTopKChanged = 0;
+    double waitProxyDiagTopKOverlapFracSum = 0.0;
+    double waitProxyDiagMeanAbsWaitZSum = 0.0;
+    double waitProxyDiagMeanAbsDistanceZSum = 0.0;
+    int64_t successorPressureDiagEvaluations = 0;
+    int64_t successorPressureDiagFiniteCandidates = 0;
+    int64_t successorPressureDiagNonZeroCandidates = 0;
+    int64_t successorPressureDiagPositiveEvals = 0;
+    int64_t successorPressureDiagVaryingEvals = 0;
+    int64_t successorPressureDiagNormalizedActiveEvals = 0;
+    int64_t successorPressureDiagTop1Changed = 0;
+    int64_t successorPressureDiagTopKChanged = 0;
+    double successorPressureDiagTopKOverlapFracSum = 0.0;
+    double successorPressureDiagMeanAbsPressureZSum = 0.0;
+    double successorPressureDiagMeanAbsDistanceZSum = 0.0;
+    int64_t successorPressureDiagPrevFallbackCount = 0;
+    int64_t successorPressureDiagPrecedenceClampCount = 0;
+    double successorPressureDiagPrecedenceClampDeltaSum = 0.0;
+    int64_t successorPressureDiagDepth1Signals = 0;
+    int64_t successorPressureDiagDepthGt1Signals = 0;
+    int64_t successorPressureDiagDescendantActiveEvals = 0;
+    double successorPressureDiagMeanDepth1ContributionSum = 0.0;
+    double successorPressureDiagMeanDepthGt1ContributionSum = 0.0;
     int64_t workspaceAgentsCloned = 0;
     int64_t workspaceMaxClonedPerTask = 0;
     int64_t neighborhoods = 0;
@@ -751,6 +900,11 @@ class LNS {
   struct CascadeStats {
     int64_t prepareCalls = 0;
     int64_t budgetAborts = 0;
+    int64_t budgetUsedSum = 0;
+    int64_t budgetUsedMin = std::numeric_limits<int64_t>::max();
+    int64_t budgetUsedMax = 0;
+    int64_t adaptiveBudgetIncreases = 0;
+    int64_t adaptiveBudgetDecreases = 0;
     int64_t seedTasksSum = 0;
     int64_t closureTasksSum = 0;
     int64_t closureAddedSum = 0;
@@ -789,6 +943,7 @@ class LNS {
   double lowLevelSegmentTimeout_ = 600.0;
   bool plannerParityCheck_ = false;
   int plannerParityMaxLogs_ = 10;
+  bool mlastarIncrementalFocalRefresh_ = true;
   bool partialSolutionRestore_ = false;
   struct MarketState : LNSParams::Market {
     // Runtime-only market state. Configuration fields are inherited from
@@ -802,6 +957,10 @@ class LNS {
     unordered_map<uint64_t, double> edgePrices;
     unordered_map<uint64_t, double> vertexExcessHat;
     unordered_map<uint64_t, double> edgeExcessHat;
+    unordered_set<uint64_t> prevContendedVertices;
+    unordered_set<uint64_t> prevContendedEdges;
+    bool hasStabilityBaseline = false;
+    bool candidateUpdateConsumed = false;
     vector<int> taskCooldownUntilIter;
     MarketStats stats;
   };
@@ -855,9 +1014,31 @@ class LNS {
   ALNS adaptiveLNS_;
   int neighborSize_;
   int regretCandidateTopK_ = 0;
+  bool adaptiveRegretTopK_ = false;
+  int adaptiveRegretTopKCurrent_ = 0;
+  int adaptiveRegretTopKLastUsed_ = 0;
+  bool regretShortlistUseNormalizedWaitProxy_ = false;
+  bool regretShortlistUseNormalizedSuccessorPressure_ = false;
+  bool regretShortlistClampSuccessorToPrecedenceRelease_ = true;
+  bool regretShortlistUseDescendantWeightedSuccessorPressure_ = false;
+  double regretShortlistSuccessorPressureDepthDecay_ = 0.5;
+  int regretShortlistSuccessorPressureMaxDepth_ = 0;
+  bool regretShortlistDiagnostics_ = false;
+  struct SuccessorPressureStaticSignal {
+    int successorTask = UNASSIGNED;
+    int depth = 1;
+    double weight = 1.0;
+  };
+  vector<vector<SuccessorPressureStaticSignal>>
+      successorPressureStaticSignalsByTask_;
+  void buildSuccessorPressureStaticSignals();
   double maxCascadeFactor_ = 3.0;
   int maxCascadeTasks_ = 0;
+  bool adaptiveCascadeBudget_ = false;
+  int adaptiveCascadeBudgetCurrent_ = 0;
+  int adaptiveCascadeBudgetLastUsed_ = 0;
   bool repairIncludeNonAncestorAgents_ = true;
+  bool alnsEnablePrecedenceAwareDestroy_ = true;
   bool useTerminalPathsInValidation_ = false;
   bool lastPrepareAbortedByCascade_ = false;
   int lastPrepareSeedTasks_ = 0;
@@ -910,13 +1091,66 @@ class LNS {
   string initialSolutionEffective_;
   bool initialSolutionFallbackUsed_ = false;
   string initialSolutionFallbackReason_;
+  double initialPortfolioTimeFraction_ = 0.10;
+  double initialPortfolioMinArmTimeSec_ = 1.0;
+  bool initialPortfolioStopOnFirstFeasible_ = false;
+  bool rejectInvalidCandidates_ = false;
+  bool utilityUseConflictEventCount_ = true;
+  bool acceptanceFeasibilityFirstPrecedenceDebt_ = false;
+  double acceptanceInvalidSpatialWeight_ = 1.0;
+  double acceptanceInvalidPrecedenceDebtWeight_ = 1.0;
+  double acceptanceInvalidSocTieBreakWeight_ = 0.0;
+  bool acceptanceUseDedicatedInvalidTemperature_ = false;
+  double acceptanceInvalidTemperatureScale_ = 0.25;
+  double acceptanceInvalidTemperatureFloor_ = 1e-3;
+  double invalidTemperature_ = 0.0;
+  double invalidInitialTemperature_ = 0.0;
+  double invalidMaxTemperature_ = std::numeric_limits<double>::infinity();
+  double invalidGreatDelugeDecay_ = 0.0;
+  bool invalidTemperatureInitialized_ = false;
+
+ public:
+  struct AcceptanceDiagnostics {
+    int64_t feasibilityFirstDecisions = 0;
+    int64_t invalidToValidAccepted = 0;
+    int64_t validToInvalidCompared = 0;
+    int64_t validToInvalidAccepted = 0;
+    int64_t validToInvalidRejected = 0;
+    int64_t invalidVsInvalidComparisons = 0;
+    int64_t invalidVsInvalidAccepted = 0;
+    int64_t invalidVsInvalidRejected = 0;
+    double previousInvalidScoreSum = 0.0;
+    double candidateInvalidScoreSum = 0.0;
+    double previousSpatialNormSum = 0.0;
+    double candidateSpatialNormSum = 0.0;
+    double previousPrecedenceDebtNormSum = 0.0;
+    double candidatePrecedenceDebtNormSum = 0.0;
+    double previousSocNormSum = 0.0;
+    double candidateSocNormSum = 0.0;
+    int64_t invalidScoreComparisons = 0;
+    int64_t invalidScoreAccepted = 0;
+    int64_t invalidScoreRejected = 0;
+    int64_t invalidScoreWorseComparisons = 0;
+    int64_t invalidScoreWorseAccepted = 0;
+    double invalidScoreDeltaSum = 0.0;
+    double invalidScoreAbsDeltaSum = 0.0;
+    double invalidAcceptanceTempBeforeSum = 0.0;
+    double invalidAcceptanceTempAfterSum = 0.0;
+    int64_t invalidDedicatedTempInitCount = 0;
+    double invalidDedicatedInitTempSum = 0.0;
+  };
+
+ private:
+  AcceptanceDiagnostics acceptanceDiagnostics_;
 
  public:
   double runtime = 0;
   int numOfFailures = 0, sumOfCosts = 0;
+  int64_t invalidCandidateRejections = 0;
+  int64_t marketGuardRejections = 0;
   vector<IterationStats> iterationStats;
   string initialSolutionStrategy, initialSolutionFallback, destroyHeuristic,
-      acceptanceCriteria,
+      acceptanceCriteria, repairHeuristic,
       regretType;
 
  private:
@@ -938,6 +1172,24 @@ class LNS {
       const LNSParams& parameters);
 
   inline const Instance& getInstance() const { return instance_; }
+  inline bool rejectInvalidCandidatesEnabled() const {
+    return rejectInvalidCandidates_;
+  }
+  inline bool utilityUsesConflictEventCount() const {
+    return utilityUseConflictEventCount_;
+  }
+  inline bool acceptanceUsesFeasibilityFirstPrecedenceDebt() const {
+    return acceptanceFeasibilityFirstPrecedenceDebt_;
+  }
+  inline bool acceptanceUsesDedicatedInvalidTemperature() const {
+    return acceptanceUseDedicatedInvalidTemperature_;
+  }
+  AcceptanceDiagnostics getAcceptanceDiagnostics() const {
+    return acceptanceDiagnostics_;
+  }
+  inline bool mlastarIncrementalFocalRefreshEnabled() const {
+    return mlastarIncrementalFocalRefresh_;
+  }
 
   bool run();
 
@@ -945,7 +1197,8 @@ class LNS {
   bool buildPrioritizedInitialSolution();
   // Precedence-feasible initial solution that ignores inter-agent collisions.
   bool buildGreedySolutionPrecedenceOnly();
-  bool buildGreedySolutionWithMAPFPC(const string& variant);
+  bool buildGreedySolutionWithMAPFPC(const string& variant,
+                                     int solverTimeoutSec = 120);
   bool planTerminalReposition(const vector<int>& agentsToPlan,
                               bool fullRebuild);
 
@@ -968,7 +1221,24 @@ class LNS {
   // explicit terminalPath when includeTerminal is true.
   int getAgentOccupancyHorizon(int agent,
                                bool includeTerminal = true) const;
-  bool validateSolution(ConflictMap* conflictedTasks = nullptr);
+  struct ValidationStats {
+    int precedenceViolations = 0;
+    int vertexCollisions = 0;
+    int edgeSwapCollisions = 0;
+    int structuralViolations = 0;
+    int64_t precedenceDebt = 0;
+    int64_t precedencePairsChecked = 0;
+
+    inline int totalConflictEvents() const {
+      return precedenceViolations + vertexCollisions + edgeSwapCollisions +
+             structuralViolations;
+    }
+    inline int spatialConflictEvents() const {
+      return vertexCollisions + edgeSwapCollisions + structuralViolations;
+    }
+  };
+  bool validateSolution(ConflictMap* conflictedTasks = nullptr,
+                        ValidationStats* stats = nullptr);
   void addConflictingTask(int agent, int timestep, ConflictMap* out) const;
 
   bool buildConstraintTable(ConstraintTable& constraintTable, int task);
@@ -1044,6 +1314,15 @@ class LNS {
   int lastPrepareClosureAdded() const { return lastPrepareClosureAdded_; }
   const CascadeStats& getCascadeStatsRef() const { return cascadeStats_; }
   int getCascadeTaskBudget() const { return cascadeTaskBudget(); }
+  bool isAdaptiveCascadeBudgetEnabled() const { return adaptiveCascadeBudget_; }
+  int getAdaptiveCascadeBudgetCurrent() const {
+    return adaptiveCascadeBudget_ ? adaptiveCascadeBudgetCurrent_
+                                  : cascadeTaskBudget();
+  }
+  bool isAdaptiveRegretTopKEnabled() const { return adaptiveRegretTopK_; }
+  int getAdaptiveRegretTopKCurrent() const {
+    return adaptiveRegretTopK_ ? adaptiveRegretTopKCurrent_ : regretCandidateTopK_;
+  }
   const SolutionRestoreStats& getSolutionRestoreStats() const {
     return solutionRestoreStats_;
   }
@@ -1103,6 +1382,18 @@ class LNS {
   bool thresholdAcceptance();
   bool oldBachelorsAcceptance();
   bool greatDelugeAlgorithm();
+  bool acceptScoreWithCurrentCriterion(
+      double candidateScore, double previousScore,
+      double* temperatureOverride = nullptr,
+      double* initialTemperatureOverride = nullptr,
+      double* maxTemperatureOverride = nullptr,
+      double* greatDelugeDecayOverride = nullptr);
+  double computeInvalidAcceptanceScore(
+      const ValidationStats& selfStats, int selfSoc,
+      const ValidationStats& peerStats, int peerSoc, double* spatialNorm,
+      double* precedenceDebtNorm, double* socNorm) const;
+  void ensureInvalidAcceptanceTemperatureInitialized(double previousScore,
+                                                     double candidateScore);
 
   int marketTimeBucket(int timestep) const;
   uint64_t makeMarketVertexKey(int location, int bucket) const;
@@ -1111,6 +1402,11 @@ class LNS {
       vector<TaskScheduleMetrics>& perTask,
       vector<double>* blockedWaitSum = nullptr) const;
   double computeTaskMarketExposure(int task, bool normalized) const;
+  double computeMarketMarginalReliefFromPath(
+      const AgentTaskPath& taskPath,
+      const unordered_map<uint64_t, int>& vertexDemand,
+      const unordered_map<uint64_t, int>& edgeDemand,
+      bool normalized) const;
   double computeSolutionMarketPressure() const;
   double computeSolutionPrecedenceWait() const;
   bool passMarketAcceptanceGuards(double previousPressure,
@@ -1118,8 +1414,10 @@ class LNS {
                                   double previousWait,
                                   double candidateWait,
                                   bool candidateIsWorse) const;
+  bool marketDestroyStabilityReady() const;
   void updateMarketStateFromCurrentSolution();
-  void maybeUpdateMarketState(bool accepted);
+  void maybeUpdateMarketState(bool accepted,
+                              bool candidateStateUpdate = false);
   double computeMarketExposureFromPath(const AgentTaskPath& taskPath,
                                        bool normalized) const;
   void buildMarketDemandFromCurrentOccupancy(

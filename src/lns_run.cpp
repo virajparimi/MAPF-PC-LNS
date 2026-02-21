@@ -97,9 +97,166 @@ bool LNS::greatDelugeAlgorithm() {
   return accepted;
 }
 
-bool LNS::run() {
+bool LNS::acceptScoreWithCurrentCriterion(
+    double candidateScore, double previousScore, double* temperatureOverride,
+    double* initialTemperatureOverride, double* maxTemperatureOverride,
+    double* greatDelugeDecayOverride) {
+  constexpr double kMinTemperature = 1e-9;
+  double& activeTemperature =
+      (temperatureOverride != nullptr) ? *temperatureOverride : temperature_;
+  const double activeInitialTemperature =
+      (initialTemperatureOverride != nullptr) ? *initialTemperatureOverride
+                                              : initialTemperature_;
+  double& activeMaxTemperature =
+      (maxTemperatureOverride != nullptr) ? *maxTemperatureOverride
+                                          : maxTemperature_;
+  double& activeGreatDelugeDecay =
+      (greatDelugeDecayOverride != nullptr) ? *greatDelugeDecayOverride
+                                            : greatDelugeDecay_;
 
-  auto runInitialSolutionStrategy = [&](const string& strategy) -> bool {
+  if (acceptanceCriteria == "SA") {
+    if (!std::isfinite(activeTemperature) ||
+        activeTemperature <= std::numeric_limits<double>::epsilon()) {
+      const double fallbackTemperature =
+          max(kMinTemperature, max(activeInitialTemperature, 1.0));
+      activeTemperature = fallbackTemperature;
+      const bool accepted = candidateScore <= previousScore;
+      activeTemperature =
+          max(kMinTemperature, activeTemperature * coolingCoefficient_);
+      return accepted;
+    }
+
+    if (candidateScore <= previousScore) {
+      activeTemperature *= coolingCoefficient_;
+      return true;
+    }
+
+    const double exponent = (previousScore - candidateScore) / activeTemperature;
+    constexpr double kMinExpArg = -700.0;
+    const double acceptanceProb = std::exp(std::max(exponent, kMinExpArg));
+    std::uniform_real_distribution<double> unit01(0.0, 1.0);
+    const bool accepted = unit01(rng_) < acceptanceProb;
+    activeTemperature *= coolingCoefficient_;
+    return accepted;
+  }
+
+  if (acceptanceCriteria == "TA") {
+    const bool accepted = (candidateScore - previousScore) <= activeTemperature;
+    activeTemperature *= coolingCoefficient_;
+    return accepted;
+  }
+
+  if (acceptanceCriteria == "OBA") {
+    if ((candidateScore - previousScore) < activeTemperature) {
+      activeTemperature *= coolingCoefficient_;
+      return true;
+    }
+    const double reheated = activeTemperature * heatingCoefficient_;
+    activeTemperature = std::min(reheated, activeMaxTemperature);
+    return false;
+  }
+
+  if (acceptanceCriteria == "GDA") {
+    if ((candidateScore - previousScore) < activeTemperature) {
+      activeTemperature = max(0.0, activeTemperature - activeGreatDelugeDecay);
+      return true;
+    }
+    return false;
+  }
+
+  PLOGE << "Unknown acceptance criteria: " << acceptanceCriteria << "\n";
+  return false;
+}
+
+void LNS::ensureInvalidAcceptanceTemperatureInitialized(double previousScore,
+                                                        double candidateScore) {
+  constexpr double kMinTemperature = 1e-9;
+  const bool initialized =
+      std::isfinite(invalidTemperature_) &&
+      invalidTemperature_ > std::numeric_limits<double>::epsilon();
+  if (invalidTemperatureInitialized_ && initialized) {
+    return;
+  }
+
+  const double absPrevious = std::abs(previousScore);
+  const double absCandidate = std::abs(candidateScore);
+  const double absDelta = std::abs(candidateScore - previousScore);
+  const double scoreScale = max(1.0, max(absPrevious, max(absCandidate, absDelta)));
+  const double minTemperature =
+      max(kMinTemperature, acceptanceInvalidTemperatureFloor_);
+  double initTemperature = acceptanceInvalidTemperatureScale_ * scoreScale;
+  if (!std::isfinite(initTemperature) || initTemperature < minTemperature) {
+    initTemperature = minTemperature;
+  }
+  if (acceptanceCriteria == "SA") {
+    initTemperature /= log(2);
+  }
+  invalidTemperature_ = max(minTemperature, initTemperature);
+  invalidInitialTemperature_ = invalidTemperature_;
+  invalidMaxTemperature_ = max(invalidInitialTemperature_, 1.0) * 1000.0;
+  if (numOfIterations_ > 0) {
+    invalidGreatDelugeDecay_ = invalidInitialTemperature_ / max(1, numOfIterations_);
+  } else {
+    invalidGreatDelugeDecay_ = invalidInitialTemperature_ / 1000.0;
+  }
+  if (!std::isfinite(invalidGreatDelugeDecay_) ||
+      invalidGreatDelugeDecay_ < 0.0) {
+    invalidGreatDelugeDecay_ = 0.0;
+  }
+  invalidTemperatureInitialized_ = true;
+  acceptanceDiagnostics_.invalidDedicatedTempInitCount++;
+  acceptanceDiagnostics_.invalidDedicatedInitTempSum += invalidInitialTemperature_;
+}
+
+double LNS::computeInvalidAcceptanceScore(
+    const ValidationStats& selfStats, int selfSoc,
+    const ValidationStats& peerStats, int peerSoc, double* spatialNorm,
+    double* precedenceDebtNorm, double* socNorm) const {
+  const double selfSpatial =
+      static_cast<double>(selfStats.spatialConflictEvents());
+  const double peerSpatial =
+      static_cast<double>(peerStats.spatialConflictEvents());
+  const double spatialScale = max(1.0, max(selfSpatial, peerSpatial));
+  const double selfSpatialNorm = selfSpatial / spatialScale;
+
+  const double selfDebt = static_cast<double>(selfStats.precedenceDebt);
+  const double peerDebt = static_cast<double>(peerStats.precedenceDebt);
+  const double debtScale = max(1.0, max(selfDebt, peerDebt));
+  const double selfDebtNorm = selfDebt / debtScale;
+
+  const double selfSocAbs = std::abs(static_cast<double>(selfSoc));
+  const double peerSocAbs = std::abs(static_cast<double>(peerSoc));
+  const double socScale = max(1.0, max(selfSocAbs, peerSocAbs));
+  const double selfSocNorm = selfSocAbs / socScale;
+
+  if (spatialNorm != nullptr) {
+    *spatialNorm = selfSpatialNorm;
+  }
+  if (precedenceDebtNorm != nullptr) {
+    *precedenceDebtNorm = selfDebtNorm;
+  }
+  if (socNorm != nullptr) {
+    *socNorm = selfSocNorm;
+  }
+
+  return acceptanceInvalidSpatialWeight_ * selfSpatialNorm +
+         acceptanceInvalidPrecedenceDebtWeight_ * selfDebtNorm +
+         acceptanceInvalidSocTieBreakWeight_ * selfSocNorm;
+}
+
+bool LNS::run() {
+  invalidCandidateRejections = 0;
+  marketGuardRejections = 0;
+  acceptanceDiagnostics_ = AcceptanceDiagnostics{};
+  invalidTemperatureInitialized_ = false;
+  invalidTemperature_ = 0.0;
+  invalidInitialTemperature_ = 0.0;
+  invalidMaxTemperature_ = std::numeric_limits<double>::infinity();
+  invalidGreatDelugeDecay_ = 0.0;
+
+  auto runInitialSolutionStrategy =
+      [&](const string& strategy,
+          std::optional<double> armBudgetSec = std::nullopt) -> bool {
     if (strategy == "greedy") {
       // Run the greedy task assignment and subsequent path finding algorithm.
       return buildGreedySolution();
@@ -115,18 +272,135 @@ bool LNS::run() {
     }
     if (strategy.find("sota") != string::npos) {
       // Run the greedy task assignment and use CBS-PC for finding agent paths.
-      return buildGreedySolutionWithMAPFPC(strategy);
+      int mapfPcTimeoutSec = 120;
+      if (armBudgetSec.has_value() && std::isfinite(*armBudgetSec) &&
+          *armBudgetSec > 0.0) {
+        mapfPcTimeoutSec = max(1, (int)std::ceil(*armBudgetSec));
+      }
+      return buildGreedySolutionWithMAPFPC(strategy, mapfPcTimeoutSec);
     }
     PLOGE << "Unknown initial solution strategy '" << strategy << "'\n";
     return false;
   };
+
+  auto runInitialSolutionStrategyWithBudget =
+      [&](const string& strategy,
+          std::optional<double> armBudgetSec = std::nullopt) -> bool {
+    const double savedTimeLimit = timeLimit_;
+    if (armBudgetSec.has_value() && std::isfinite(*armBudgetSec) &&
+        *armBudgetSec > 0.0) {
+      const double elapsedBeforeArm = elapsedRuntimeSec();
+      const double armDeadline = elapsedBeforeArm + *armBudgetSec;
+      timeLimit_ = min(savedTimeLimit, armDeadline);
+    }
+    const bool success = runInitialSolutionStrategy(strategy, armBudgetSec);
+    timeLimit_ = savedTimeLimit;
+    return success;
+  };
+
+  struct InitialCheckpoint {
+    double runtimeSec = 0.0;
+    string label;
+    int soc = 0;
+    bool feasible = false;
+    IterationQuality quality = IterationQuality::none;
+  };
+  vector<InitialCheckpoint> initialCheckpoints;
 
   initialSolutionRequested_ = initialSolutionStrategy;
   initialSolutionEffective_ = initialSolutionStrategy;
   initialSolutionFallbackUsed_ = false;
   initialSolutionFallbackReason_ = "none";
 
-  bool success = runInitialSolutionStrategy(initialSolutionStrategy);
+  bool success = false;
+  if (initialSolutionStrategy == "portfolio") {
+    // Anytime-safe portfolio: fixed arm order, fixed budget from cutoff.
+    const vector<string> portfolioArms = {"prioritized", "sota_pbs",
+                                          "sota_cbs"};
+    const double remainingBudget = remainingRuntimeBudgetSec();
+    double portfolioBudgetSec =
+        std::min(remainingBudget,
+                 max(0.0, timeLimit_ * initialPortfolioTimeFraction_));
+    if (portfolioBudgetSec <= 0.0 && remainingBudget > 0.0) {
+      // Ensure at least one short arm when portfolio is explicitly requested.
+      portfolioBudgetSec =
+          std::min(remainingBudget, initialPortfolioMinArmTimeSec_);
+    }
+
+    bool haveBestPortfolioSolution = false;
+    int bestPortfolioSoc = std::numeric_limits<int>::max();
+    string bestPortfolioArm;
+    Solution bestPortfolioSolution(instance_);
+
+    for (int i = 0; i < (int)portfolioArms.size(); i++) {
+      if (runtimeBudgetExhausted() || portfolioBudgetSec <= 0.0) {
+        break;
+      }
+      const int armsLeft = (int)portfolioArms.size() - i;
+      const double fairShare = portfolioBudgetSec / max(1, armsLeft);
+      double armBudgetSec =
+          std::max(initialPortfolioMinArmTimeSec_, fairShare);
+      armBudgetSec = std::min(armBudgetSec, portfolioBudgetSec);
+      armBudgetSec = std::min(armBudgetSec, remainingRuntimeBudgetSec());
+      if (armBudgetSec <= 0.0) {
+        break;
+      }
+
+      const string& arm = portfolioArms[i];
+      const double armStartSec = elapsedRuntimeSec();
+      const bool armSuccess =
+          runInitialSolutionStrategyWithBudget(arm, armBudgetSec);
+      const double armEndSec = elapsedRuntimeSec();
+      const double consumedBudget = max(0.0, armEndSec - armStartSec);
+      portfolioBudgetSec = max(0.0, portfolioBudgetSec - consumedBudget);
+
+      bool armFeasible = false;
+      int armSoc = 0;
+      IterationQuality armQuality = IterationQuality::none;
+      if (armSuccess) {
+        armSoc = solution_.sumOfCosts;
+        ValidationStats armValidationStats;
+        ConflictMap armPotentialNeighborhood;
+        const bool previousTerminalValidationFlag =
+            useTerminalPathsInValidation_;
+        useTerminalPathsInValidation_ = false;
+        armFeasible = validateSolution(&armPotentialNeighborhood,
+                                       &armValidationStats);
+        useTerminalPathsInValidation_ = previousTerminalValidationFlag;
+        if (armFeasible && armSoc < bestPortfolioSoc) {
+          bestPortfolioSoc = armSoc;
+          bestPortfolioArm = arm;
+          bestPortfolioSolution = solution_;
+          haveBestPortfolioSolution = true;
+          armQuality = IterationQuality::bestSolutionYet;
+        }
+      }
+
+      InitialCheckpoint checkpoint;
+      checkpoint.runtimeSec = armEndSec;
+      checkpoint.label = "InitPortfolio:" + arm;
+      checkpoint.soc = armSoc;
+      checkpoint.feasible = armFeasible;
+      checkpoint.quality = armQuality;
+      initialCheckpoints.push_back(std::move(checkpoint));
+
+      if (initialPortfolioStopOnFirstFeasible_ && haveBestPortfolioSolution) {
+        break;
+      }
+    }
+
+    if (haveBestPortfolioSolution) {
+      solution_ = bestPortfolioSolution;
+      initialSolutionEffective_ = "portfolio(" + bestPortfolioArm + ")";
+      initialSolutionFallbackReason_ = "none";
+      success = true;
+    } else {
+      initialSolutionFallbackReason_ = "portfolio_no_feasible_arm";
+      success = false;
+    }
+  } else {
+    success = runInitialSolutionStrategy(initialSolutionStrategy);
+  }
 
   if (!success && initialSolutionStrategy != "greedy") {
     if (initialSolutionFallback == "greedy") {
@@ -135,7 +409,7 @@ bool LNS::run() {
       initialSolutionFallbackUsed_ = true;
       initialSolutionEffective_ = "greedy";
       initialSolutionFallbackReason_ = "requested_strategy_failed";
-      success = runInitialSolutionStrategy("greedy");
+      success = runInitialSolutionStrategyWithBudget("greedy");
       if (!success) {
         initialSolutionFallbackReason_ = "fallback_greedy_failed";
       }
@@ -149,7 +423,7 @@ bool LNS::run() {
       initialSolutionFallbackUsed_ = true;
       initialSolutionEffective_ = "greedy";
       initialSolutionFallbackReason_ = "unknown_fallback_defaulted_to_greedy";
-      success = runInitialSolutionStrategy("greedy");
+      success = runInitialSolutionStrategyWithBudget("greedy");
       if (!success) {
         initialSolutionFallbackReason_ = "fallback_greedy_failed";
       }
@@ -181,19 +455,21 @@ bool LNS::run() {
   }
 
   ConflictMap potentialNeighborhood;  // Need for the conflict removal case
+  ValidationStats currentValidationStats;
   useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
-  bool valid = validateSolution(&potentialNeighborhood);
+  bool currentSolutionValid =
+      validateSolution(&potentialNeighborhood, &currentValidationStats);
   useTerminalPathsInValidation_ = false;
 
   bool feasibleSolutionUpdated = false;
-  if (valid) {
+  if (currentSolutionValid) {
     feasibleSolutionUpdated = true;
     extractFeasibleSolution();
   }
 
   if (market_.heuristics) {
     updateMarketStateFromCurrentSolution();
-    if (valid) {
+    if (currentSolutionValid) {
       market_.bestPressure = computeSolutionMarketPressure();
       market_.bestWait = computeSolutionPrecedenceWait();
     }
@@ -212,11 +488,21 @@ bool LNS::run() {
     iterationStats.push_back(stat);
   };
 
-  appendIterationStat(IterationStats(
-      initialSolutionRuntime_, initialSolutionEffective_,
-      instance_.getAgentNum(),
-      instance_.getTasksNum(), solution_.sumOfCosts, feasibleSolutionUpdated,
-      bestSolutionYet));
+  bool checkpointHasFeasible = false;
+  for (const auto& checkpoint : initialCheckpoints) {
+    checkpointHasFeasible = checkpointHasFeasible || checkpoint.feasible;
+    appendIterationStat(IterationStats(
+        checkpoint.runtimeSec, checkpoint.label, instance_.getAgentNum(),
+        instance_.getTasksNum(), checkpoint.soc, checkpoint.feasible,
+        checkpoint.quality));
+  }
+  if (initialCheckpoints.empty() ||
+      (!checkpointHasFeasible && feasibleSolutionUpdated)) {
+    appendIterationStat(IterationStats(
+        initialSolutionRuntime_, initialSolutionEffective_,
+        instance_.getAgentNum(), instance_.getTasksNum(), solution_.sumOfCosts,
+        feasibleSolutionUpdated, bestSolutionYet));
+  }
 
   ConflictMap oldNeighborhood;
 
@@ -228,11 +514,14 @@ bool LNS::run() {
   const int metricsWindowSize =
       (numOfIterations_ > 0) ? max(2, numOfIterations_)
                              : kDefaultMetricsWindowSize;
+  const int initialConflictSignal =
+      utilityUseConflictEventCount_
+          ? currentValidationStats.totalConflictEvents()
+                                    : (int)potentialNeighborhood.size();
   MovingMetrics metrics(metricsWindowSize, lnsConflictWeight_, lnsCostWeight_,
-                        (int)potentialNeighborhood.size(),
-                        solution_.sumOfCosts);
-  solution_.utility = metrics.computeMovingMetrics(
-      (int)potentialNeighborhood.size(), solution_.sumOfCosts);
+                        initialConflictSignal, solution_.sumOfCosts);
+  solution_.utility =
+      metrics.computeMovingMetrics(initialConflictSignal, solution_.sumOfCosts);
 
   constexpr double kMinTemperature = 1e-9;
   const double toleranceScale = tolerance_ / 100.0;
@@ -241,8 +530,8 @@ bool LNS::run() {
     // Moving utility can be ~0 at initialization when the rolling window is
     // prefilled with the same initial sample. Use a scale-aware fallback so
     // TA/SA are not effectively frozen from the first iteration.
-    const double conflictScale = max(
-        1.0, std::abs(static_cast<double>(potentialNeighborhood.size())));
+    const double conflictScale =
+        max(1.0, std::abs(static_cast<double>(initialConflictSignal)));
     const double costScale =
         max(1.0, std::abs(static_cast<double>(solution_.sumOfCosts)));
     const double blendedScale =
@@ -275,7 +564,11 @@ bool LNS::run() {
   while (runtime < timeLimit_ &&
          static_cast<int64_t>(iterationStats.size()) < iterationLimit) {
     iterationRollbackHintAgents_.clear();
+    market_.candidateUpdateConsumed = false;
     const int previousSocForIter = previousSolution_.sumOfCosts;
+    const bool previousValidForIter = currentSolutionValid;
+    const ValidationStats previousValidationStatsForIter =
+        currentValidationStats;
     const double previousPressureForIter =
         market_.heuristics ? computeSolutionMarketPressure() : 0.0;
     const double previousWaitForIter =
@@ -654,24 +947,34 @@ bool LNS::run() {
     PLOGD << "Old sum of costs = " << previousSolution_.sumOfCosts << "\n";
     PLOGD << "New sum of costs = " << solution_.sumOfCosts << "\n";
 
-    PLOGD << "Number of conflicts in old solution: "
-          << (int)potentialNeighborhood.size() << "\n";
+    const int previousConflictSignalForIter =
+        utilityUseConflictEventCount_
+            ? previousValidationStatsForIter.totalConflictEvents()
+                                      : (int)potentialNeighborhood.size();
+    PLOGD << "Conflict signal in old solution: "
+          << previousConflictSignalForIter << "\n";
 
     // Extract the set of conflicting tasks
     potentialNeighborhood.clear();
+    ValidationStats candidateValidationStats;
     useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
-    valid = validateSolution(&potentialNeighborhood);
+    const bool candidateValid =
+        validateSolution(&potentialNeighborhood, &candidateValidationStats);
     useTerminalPathsInValidation_ = false;
 
-    PLOGD << "Number of conflicts in new solution: "
-          << potentialNeighborhood.size() << "\n";
+    const int candidateConflictSignal =
+        utilityUseConflictEventCount_
+            ? candidateValidationStats.totalConflictEvents()
+                                      : (int)potentialNeighborhood.size();
+    PLOGD << "Conflict signal in new solution: " << candidateConflictSignal
+          << "\n";
 
     // Accept the solution only if the new one has higher utility compared to the old solution where utility is a weighted combination of the number of conflicts and sum of costs.
     // Compute the utility of this solution
-    solution_.utility = metrics.computeMovingMetrics(
-        (int)potentialNeighborhood.size(), solution_.sumOfCosts);
+    solution_.utility =
+        metrics.computeMovingMetrics(candidateConflictSignal, solution_.sumOfCosts);
 
-    if (!valid) {
+    if (!candidateValid) {
       // Solution was not valid as we found some conflicts!
       feasibleSolutionUpdated = false;
       PLOGE << "The solution was not valid!\n";
@@ -687,12 +990,11 @@ bool LNS::run() {
 
     // Ensure that we are either accepting or rejecting a solution here!
     const int proposedSocForIter = solution_.sumOfCosts;
-    const double candidatePressure =
-        market_.heuristics ? computeSolutionMarketPressure() : 0.0;
-    const double candidateWait =
-        market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
+    double candidatePressure = 0.0;
+    double candidateWait = 0.0;
     bool accepted = false;
     bool guardRejected = false;
+    bool acceptedAsWorse = false;
     auto advanceTemperatureOnGuardReject = [&]() {
       if (acceptanceCriteria == "SA" || acceptanceCriteria == "TA") {
         temperature_ *= coolingCoefficient_;
@@ -704,30 +1006,242 @@ bool LNS::run() {
       }
     };
     iterationRollbackHintAgents_ = buildRollbackAgentHints(rollbackBaseAgents);
-    if (market_.heuristics && market_.acceptanceGuards &&
-        !passMarketAcceptanceGuards(previousPressureForIter, candidatePressure,
-                                    previousWaitForIter, candidateWait,
-                                    previousSolution_.utility <
-                                        solution_.utility)) {
+    if (!candidateValid && rejectInvalidCandidates_) {
+      invalidCandidateRejections++;
       iterationRollbackHintAgents_ =
           buildRollbackAgentHints(rollbackBaseAgents);
       restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
       accepted = false;
       guardRejected = true;
       advanceTemperatureOnGuardReject();
-      PLOGD << "Rejecting this solution due to market acceptance guards\n";
+      PLOGD << "Rejecting invalid candidate before acceptance criteria\n";
     } else {
-      if (acceptanceCriteria == "SA") {
-        accepted = simulatedAnnealing();
-      } else if (acceptanceCriteria == "TA") {
-        accepted = thresholdAcceptance();
-      } else if (acceptanceCriteria == "OBA") {
-        accepted = oldBachelorsAcceptance();
-      } else if (acceptanceCriteria == "GDA") {
-        accepted = greatDelugeAlgorithm();
+      if (!candidateValid) {
+        PLOGD << "Invalid candidate forwarded to acceptance criteria\n";
+      }
+      candidatePressure =
+          market_.heuristics ? computeSolutionMarketPressure() : 0.0;
+      candidateWait = market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
+      if (market_.heuristics && !market_.updateOnAcceptedOnly &&
+          market_.updateFromCandidate) {
+        maybeUpdateMarketState(false, true);
+      }
+      if (market_.heuristics && market_.acceptanceGuards &&
+          !passMarketAcceptanceGuards(previousPressureForIter, candidatePressure,
+                                      previousWaitForIter, candidateWait,
+                                      previousSolution_.utility <
+                                          solution_.utility)) {
+        marketGuardRejections++;
+        iterationRollbackHintAgents_ =
+            buildRollbackAgentHints(rollbackBaseAgents);
+        restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+        accepted = false;
+        guardRejected = true;
+        advanceTemperatureOnGuardReject();
+        PLOGD << "Rejecting this solution due to market acceptance guards\n";
       } else {
-        PLOGE << "Unknown acceptance criteria: " << acceptanceCriteria << "\n";
-        return false;
+        if (acceptanceFeasibilityFirstPrecedenceDebt_ &&
+            candidateValid && !previousValidForIter) {
+          acceptanceDiagnostics_.feasibilityFirstDecisions++;
+          acceptanceDiagnostics_.invalidToValidAccepted++;
+          accepted = true;
+          acceptedAsWorse = false;
+          PLOGD << "Feasibility-first acceptance: valid candidate accepted "
+                   "over invalid incumbent\n";
+        } else if (acceptanceFeasibilityFirstPrecedenceDebt_ &&
+                   !candidateValid && previousValidForIter) {
+          acceptanceDiagnostics_.feasibilityFirstDecisions++;
+          acceptanceDiagnostics_.validToInvalidCompared++;
+          double previousSpatialNorm = 0.0;
+          double previousDebtNorm = 0.0;
+          double previousSocNorm = 0.0;
+          double candidateSpatialNorm = 0.0;
+          double candidateDebtNorm = 0.0;
+          double candidateSocNorm = 0.0;
+
+          const double previousInvalidScore = computeInvalidAcceptanceScore(
+              previousValidationStatsForIter, previousSocForIter,
+              candidateValidationStats, proposedSocForIter,
+              &previousSpatialNorm, &previousDebtNorm, &previousSocNorm);
+          const double candidateInvalidScore = computeInvalidAcceptanceScore(
+              candidateValidationStats, proposedSocForIter,
+              previousValidationStatsForIter, previousSocForIter,
+              &candidateSpatialNorm, &candidateDebtNorm, &candidateSocNorm);
+          const double scoreDelta =
+              candidateInvalidScore - previousInvalidScore;
+          const bool candidateWorseInvalid = scoreDelta > 0.0;
+          double acceptanceTempBefore = temperature_;
+          if (acceptanceUseDedicatedInvalidTemperature_) {
+            ensureInvalidAcceptanceTemperatureInitialized(previousInvalidScore,
+                                                         candidateInvalidScore);
+            acceptanceTempBefore = invalidTemperature_;
+            accepted = acceptScoreWithCurrentCriterion(
+                candidateInvalidScore, previousInvalidScore, &invalidTemperature_,
+                &invalidInitialTemperature_, &invalidMaxTemperature_,
+                &invalidGreatDelugeDecay_);
+          } else {
+            accepted = acceptScoreWithCurrentCriterion(candidateInvalidScore,
+                                                       previousInvalidScore);
+          }
+          const double acceptanceTempAfter =
+              acceptanceUseDedicatedInvalidTemperature_ ? invalidTemperature_
+                                                        : temperature_;
+          acceptedAsWorse = candidateWorseInvalid;
+          acceptanceDiagnostics_.invalidScoreComparisons++;
+          acceptanceDiagnostics_.invalidScoreDeltaSum += scoreDelta;
+          acceptanceDiagnostics_.invalidScoreAbsDeltaSum +=
+              std::abs(scoreDelta);
+          acceptanceDiagnostics_.invalidAcceptanceTempBeforeSum +=
+              acceptanceTempBefore;
+          acceptanceDiagnostics_.invalidAcceptanceTempAfterSum +=
+              acceptanceTempAfter;
+          if (candidateWorseInvalid) {
+            acceptanceDiagnostics_.invalidScoreWorseComparisons++;
+          }
+          if (accepted) {
+            acceptanceDiagnostics_.invalidScoreAccepted++;
+            if (candidateWorseInvalid) {
+              acceptanceDiagnostics_.invalidScoreWorseAccepted++;
+            }
+            acceptanceDiagnostics_.validToInvalidAccepted++;
+            PLOGD << "Feasibility-first valid->invalid accepted by "
+                     "SA/TA/OBA/GDA (previous="
+                  << previousInvalidScore
+                  << ", candidate=" << candidateInvalidScore
+                  << ", temp_before=" << acceptanceTempBefore
+                  << ", temp_after=" << acceptanceTempAfter
+                  << ", dedicated_temp="
+                  << (acceptanceUseDedicatedInvalidTemperature_ ? "true"
+                                                                : "false")
+                  << ")\n";
+          } else {
+            acceptanceDiagnostics_.invalidScoreRejected++;
+            acceptanceDiagnostics_.validToInvalidRejected++;
+            iterationRollbackHintAgents_ =
+                buildRollbackAgentHints(rollbackBaseAgents);
+            restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+            PLOGD << "Feasibility-first valid->invalid rejected by "
+                     "SA/TA/OBA/GDA (previous="
+                  << previousInvalidScore
+                  << ", candidate=" << candidateInvalidScore
+                  << ", temp_before=" << acceptanceTempBefore
+                  << ", temp_after=" << acceptanceTempAfter
+                  << ", dedicated_temp="
+                  << (acceptanceUseDedicatedInvalidTemperature_ ? "true"
+                                                                : "false")
+                  << ")\n";
+          }
+        } else if (acceptanceFeasibilityFirstPrecedenceDebt_ &&
+                   !candidateValid && !previousValidForIter) {
+          acceptanceDiagnostics_.feasibilityFirstDecisions++;
+          acceptanceDiagnostics_.invalidVsInvalidComparisons++;
+          double previousSpatialNorm = 0.0;
+          double previousDebtNorm = 0.0;
+          double previousSocNorm = 0.0;
+          double candidateSpatialNorm = 0.0;
+          double candidateDebtNorm = 0.0;
+          double candidateSocNorm = 0.0;
+
+          const double previousInvalidScore = computeInvalidAcceptanceScore(
+              previousValidationStatsForIter, previousSocForIter,
+              candidateValidationStats, proposedSocForIter,
+              &previousSpatialNorm, &previousDebtNorm, &previousSocNorm);
+          const double candidateInvalidScore = computeInvalidAcceptanceScore(
+              candidateValidationStats, proposedSocForIter,
+              previousValidationStatsForIter, previousSocForIter,
+              &candidateSpatialNorm, &candidateDebtNorm, &candidateSocNorm);
+
+          acceptanceDiagnostics_.previousInvalidScoreSum += previousInvalidScore;
+          acceptanceDiagnostics_.candidateInvalidScoreSum += candidateInvalidScore;
+          acceptanceDiagnostics_.previousSpatialNormSum += previousSpatialNorm;
+          acceptanceDiagnostics_.candidateSpatialNormSum += candidateSpatialNorm;
+          acceptanceDiagnostics_.previousPrecedenceDebtNormSum +=
+              previousDebtNorm;
+          acceptanceDiagnostics_.candidatePrecedenceDebtNormSum +=
+              candidateDebtNorm;
+          acceptanceDiagnostics_.previousSocNormSum += previousSocNorm;
+          acceptanceDiagnostics_.candidateSocNormSum += candidateSocNorm;
+
+          const double scoreDelta =
+              candidateInvalidScore - previousInvalidScore;
+          const bool candidateWorseInvalid = scoreDelta > 0.0;
+          double acceptanceTempBefore = temperature_;
+          if (acceptanceUseDedicatedInvalidTemperature_) {
+            ensureInvalidAcceptanceTemperatureInitialized(previousInvalidScore,
+                                                         candidateInvalidScore);
+            acceptanceTempBefore = invalidTemperature_;
+            accepted = acceptScoreWithCurrentCriterion(
+                candidateInvalidScore, previousInvalidScore, &invalidTemperature_,
+                &invalidInitialTemperature_, &invalidMaxTemperature_,
+                &invalidGreatDelugeDecay_);
+          } else {
+            accepted = acceptScoreWithCurrentCriterion(candidateInvalidScore,
+                                                       previousInvalidScore);
+          }
+          const double acceptanceTempAfter =
+              acceptanceUseDedicatedInvalidTemperature_ ? invalidTemperature_
+                                                        : temperature_;
+          acceptedAsWorse = candidateWorseInvalid;
+          acceptanceDiagnostics_.invalidScoreComparisons++;
+          acceptanceDiagnostics_.invalidScoreDeltaSum += scoreDelta;
+          acceptanceDiagnostics_.invalidScoreAbsDeltaSum +=
+              std::abs(scoreDelta);
+          acceptanceDiagnostics_.invalidAcceptanceTempBeforeSum +=
+              acceptanceTempBefore;
+          acceptanceDiagnostics_.invalidAcceptanceTempAfterSum +=
+              acceptanceTempAfter;
+          if (candidateWorseInvalid) {
+            acceptanceDiagnostics_.invalidScoreWorseComparisons++;
+          }
+          if (accepted) {
+            acceptanceDiagnostics_.invalidScoreAccepted++;
+            if (candidateWorseInvalid) {
+              acceptanceDiagnostics_.invalidScoreWorseAccepted++;
+            }
+            acceptanceDiagnostics_.invalidVsInvalidAccepted++;
+            PLOGD << "Feasibility-first invalid acceptance score: previous="
+                  << previousInvalidScore
+                  << ", candidate=" << candidateInvalidScore
+                  << ", temp_before=" << acceptanceTempBefore
+                  << ", temp_after=" << acceptanceTempAfter
+                  << ", dedicated_temp="
+                  << (acceptanceUseDedicatedInvalidTemperature_ ? "true"
+                                                                : "false")
+                  << "\n";
+          } else {
+            acceptanceDiagnostics_.invalidScoreRejected++;
+            acceptanceDiagnostics_.invalidVsInvalidRejected++;
+            iterationRollbackHintAgents_ =
+                buildRollbackAgentHints(rollbackBaseAgents);
+            restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+            PLOGD << "Feasibility-first invalid rejection score: previous="
+                  << previousInvalidScore
+                  << ", candidate=" << candidateInvalidScore
+                  << ", temp_before=" << acceptanceTempBefore
+                  << ", temp_after=" << acceptanceTempAfter
+                  << ", dedicated_temp="
+                  << (acceptanceUseDedicatedInvalidTemperature_ ? "true"
+                                                                : "false")
+                  << "\n";
+          }
+        } else {
+          if (acceptanceCriteria == "SA") {
+            accepted = simulatedAnnealing();
+          } else if (acceptanceCriteria == "TA") {
+            accepted = thresholdAcceptance();
+          } else if (acceptanceCriteria == "OBA") {
+            accepted = oldBachelorsAcceptance();
+          } else if (acceptanceCriteria == "GDA") {
+            accepted = greatDelugeAlgorithm();
+          } else {
+            PLOGE << "Unknown acceptance criteria: " << acceptanceCriteria
+                  << "\n";
+            return false;
+          }
+          if (accepted) {
+            acceptedAsWorse = previousSolution_.utility < solution_.utility;
+          }
+        }
       }
     }
 
@@ -735,7 +1249,14 @@ bool LNS::run() {
         alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
       const double deltaSoc = (double)(previousSocForIter - proposedSocForIter);
       adaptiveLNS_.deltaSocAll[alnsHeuristicForIter] += deltaSoc;
-      if (valid) {
+      if (deltaSoc > 0.0) {
+        adaptiveLNS_.proposedBetter[alnsHeuristicForIter]++;
+      } else if (deltaSoc < 0.0) {
+        adaptiveLNS_.proposedWorse[alnsHeuristicForIter]++;
+      } else {
+        adaptiveLNS_.proposedEqual[alnsHeuristicForIter]++;
+      }
+      if (candidateValid) {
         adaptiveLNS_.feasible[alnsHeuristicForIter]++;
       }
       if (!accepted) {
@@ -743,7 +1264,10 @@ bool LNS::run() {
       } else {
         adaptiveLNS_.accepted[alnsHeuristicForIter]++;
         adaptiveLNS_.deltaSocAccepted[alnsHeuristicForIter] += deltaSoc;
-        if (previousSolution_.utility < solution_.utility) {
+        if (deltaSoc < 0.0) {
+          adaptiveLNS_.acceptedWorse[alnsHeuristicForIter]++;
+        }
+        if (acceptedAsWorse) {
           adaptiveLNS_.downgradedAccepted[alnsHeuristicForIter]++;
         } else {
           adaptiveLNS_.improvedAccepted[alnsHeuristicForIter]++;
@@ -762,7 +1286,7 @@ bool LNS::run() {
         // untouched and preserve previous solution.
       }
     } else {
-      if (previousSolution_.utility < solution_.utility) {
+      if (acceptedAsWorse) {
         // We accepted a potentially worse solution to get out of local minima
         quality = IterationQuality::downgradedButAccepted;
       } else {
@@ -770,6 +1294,8 @@ bool LNS::run() {
         quality = IterationQuality::improvedSolution;
       }
       previousSolution_ = solution_;
+      currentSolutionValid = candidateValid;
+      currentValidationStats = candidateValidationStats;
       if (market_.heuristics) {
         market_.bestPressure = min(market_.bestPressure, candidatePressure);
         market_.bestWait = min(market_.bestWait, candidateWait);
@@ -871,15 +1397,84 @@ bool LNS::prepareNextIteration() {
   cascadeStats_.closureAddedMax =
       max(cascadeStats_.closureAddedMax, (int64_t)closureAddedCount);
 
-  const int cascadeBudget = cascadeTaskBudget();
+  const int staticCascadeBudget = cascadeTaskBudget();
+  int cascadeBudget = staticCascadeBudget;
+  int adaptiveBudgetLower = 1;
+  int adaptiveBudgetUpper = staticCascadeBudget;
+  if (adaptiveCascadeBudget_) {
+    const bool explicitHardCap = (maxCascadeTasks_ > 0);
+    adaptiveBudgetUpper =
+        explicitHardCap ? staticCascadeBudget
+                        : max(staticCascadeBudget, instance_.getTasksNum());
+    adaptiveBudgetLower = max(1, min(staticCascadeBudget, closureSeedCount + 1));
+    if (adaptiveCascadeBudgetCurrent_ <= 0) {
+      adaptiveCascadeBudgetCurrent_ = staticCascadeBudget;
+    }
+    adaptiveCascadeBudgetCurrent_ =
+        min(adaptiveBudgetUpper, max(adaptiveBudgetLower,
+                                     adaptiveCascadeBudgetCurrent_));
+    cascadeBudget = adaptiveCascadeBudgetCurrent_;
+  }
+
+  cascadeStats_.budgetUsedSum += cascadeBudget;
+  if (cascadeStats_.prepareCalls == 1) {
+    cascadeStats_.budgetUsedMin = cascadeBudget;
+    cascadeStats_.budgetUsedMax = cascadeBudget;
+  } else {
+    cascadeStats_.budgetUsedMin =
+        min(cascadeStats_.budgetUsedMin, (int64_t)cascadeBudget);
+    cascadeStats_.budgetUsedMax =
+        max(cascadeStats_.budgetUsedMax, (int64_t)cascadeBudget);
+  }
+  adaptiveCascadeBudgetLastUsed_ = cascadeBudget;
+
   if (closureAddedCount > cascadeBudget) {
+    if (adaptiveCascadeBudget_) {
+      const int growthStep = max(1, adaptiveCascadeBudgetCurrent_ / 4);
+      const int targetBudget =
+          max(closureSeedCount + 1, adaptiveCascadeBudgetCurrent_ + growthStep);
+      const int nextBudget =
+          min(adaptiveBudgetUpper, max(adaptiveBudgetLower, targetBudget));
+      if (nextBudget > adaptiveCascadeBudgetCurrent_) {
+        cascadeStats_.adaptiveBudgetIncreases++;
+      }
+      adaptiveCascadeBudgetCurrent_ = nextBudget;
+    }
     lastPrepareAbortedByCascade_ = true;
     cascadeStats_.budgetAborts++;
     PLOGW << "prepareNextIteration: cascade budget exceeded (seed="
           << closureSeedCount << ", closure_total=" << closureTaskCount
           << ", closure_added=" << closureAddedCount
-          << ", budget=" << cascadeBudget << ")\n";
+          << ", budget=" << cascadeBudget << ", baseline="
+          << staticCascadeBudget << ")\n";
     return false;
+  }
+
+  if (adaptiveCascadeBudget_) {
+    int nextBudget = adaptiveCascadeBudgetCurrent_;
+    const double closurePressure =
+        (cascadeBudget > 0) ? ((double)closureAddedCount / (double)cascadeBudget)
+                            : 1.0;
+    if (closurePressure < 0.35) {
+      nextBudget = max(adaptiveBudgetLower, adaptiveCascadeBudgetCurrent_ - 1);
+    } else if (closurePressure > 0.85) {
+      nextBudget = min(adaptiveBudgetUpper, adaptiveCascadeBudgetCurrent_ + 1);
+    }
+
+    // Avoid shrinking budget immediately after a productive iteration.
+    if (!iterationStats.empty() &&
+        (iterationStats.back().quality == IterationQuality::bestSolutionYet ||
+         iterationStats.back().quality == IterationQuality::improvedSolution) &&
+        nextBudget < adaptiveCascadeBudgetCurrent_) {
+      nextBudget = adaptiveCascadeBudgetCurrent_;
+    }
+
+    if (nextBudget > adaptiveCascadeBudgetCurrent_) {
+      cascadeStats_.adaptiveBudgetIncreases++;
+    } else if (nextBudget < adaptiveCascadeBudgetCurrent_) {
+      cascadeStats_.adaptiveBudgetDecreases++;
+    }
+    adaptiveCascadeBudgetCurrent_ = nextBudget;
   }
 
   lnsNeighborhood_.removedTasks = std::move(closureRemovedTasks);

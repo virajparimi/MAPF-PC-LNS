@@ -49,6 +49,40 @@ int main(int argc, char** argv) {
       "Top-K insertion positions per (task,agent) during regret evaluation "
       "(0 = evaluate all positions)");
   desc.add_options()(
+      "adaptiveRegretTopK",
+      po::value<bool>()->default_value(false),
+      "Enable adaptive regret shortlist Top-K (requires regretCandidateTopK > 0)");
+  desc.add_options()(
+      "regretShortlistUseNormalizedWaitProxy",
+      po::value<bool>()->default_value(false),
+      "For repairHeuristic='regret' shortlist mode, add normalized wait-proxy "
+      "to shortlist ranking");
+  desc.add_options()(
+      "regretShortlistUseNormalizedSuccessorPressure",
+      po::value<bool>()->default_value(false),
+      "For repairHeuristic='regret' shortlist mode, add normalized successor-pressure "
+      "to shortlist ranking");
+  desc.add_options()(
+      "regretShortlistClampSuccessorToPrecedenceRelease",
+      po::value<bool>()->default_value(true),
+      "Clamp successor-pressure successor timing estimates to precedence release lower bounds");
+  desc.add_options()(
+      "regretShortlistUseDescendantWeightedSuccessorPressure",
+      po::value<bool>()->default_value(false),
+      "Use descendant-weighted successor-pressure (depth-decayed over precedence descendants)");
+  desc.add_options()(
+      "regretShortlistSuccessorPressureDepthDecay",
+      po::value<double>()->default_value(0.5),
+      "Depth-decay factor for descendant-weighted successor-pressure, weight(d)=decay^(d-1)");
+  desc.add_options()(
+      "regretShortlistSuccessorPressureMaxDepth",
+      po::value<int>()->default_value(0),
+      "Max descendant depth used in descendant-weighted successor-pressure (0 = unlimited)");
+  desc.add_options()(
+      "regretShortlistDiagnostics",
+      po::value<bool>()->default_value(false),
+      "Emit regret shortlist diagnostics for wait-proxy ranking impact");
+  desc.add_options()(
       "maxCascadeFactor",
       po::value<double>()->default_value(3.0),
       "Multiplier for successor-closure cap in prepareNextIteration "
@@ -59,6 +93,10 @@ int main(int argc, char** argv) {
       "Absolute cap for successor-closure added tasks in "
       "prepareNextIteration (0 = use maxCascadeFactor formula)");
   desc.add_options()(
+      "adaptiveCascadeBudget",
+      po::value<bool>()->default_value(false),
+      "Enable adaptive successor-closure budget in prepareNextIteration");
+  desc.add_options()(
       "partialSolutionRestore",
       po::value<bool>()->default_value(false),
       "Use touched-agent-scoped rollback restore instead of always copying "
@@ -67,6 +105,10 @@ int main(int argc, char** argv) {
       "repairIncludeNonAncestorAgents",
       po::value<bool>()->default_value(true),
       "Include non-ancestor agent paths in repair constraint tables");
+  desc.add_options()(
+      "alnsEnablePrecedenceAwareDestroy",
+      po::value<bool>()->default_value(true),
+      "Allow ALNS to sample precedence_wait and low_slack destroy operators");
   desc.add_options()("severity,d", po::value<int>()->default_value(0),
                      "Debugging level");
   desc.add_options()("initialSolution,s",
@@ -76,6 +118,19 @@ int main(int argc, char** argv) {
       "initialFallback",
       po::value<string>()->default_value("greedy"),
       "Fallback when initial solution fails: 'greedy' or 'none'");
+  desc.add_options()(
+      "initialPortfolioTimeFraction",
+      po::value<double>()->default_value(0.10),
+      "Portfolio warm-start budget fraction in [0,1] "
+      "(used when initialSolution='portfolio')");
+  desc.add_options()(
+      "initialPortfolioMinArmTimeSec",
+      po::value<double>()->default_value(1.0),
+      "Minimum per-arm budget in portfolio warm-start (seconds)");
+  desc.add_options()(
+      "initialPortfolioStopOnFirstFeasible",
+      po::value<bool>()->default_value(false),
+      "Stop portfolio warm-start after first feasible arm");
   desc.add_options()(
       "goalOccupationMode",
       po::value<string>()->default_value("stay"),
@@ -114,6 +169,46 @@ int main(int argc, char** argv) {
   desc.add_options()("acceptanceCriteria,c",
                      po::value<string>()->default_value("SA"),
                      "Acceptance criteria for new solutions");
+  desc.add_options()(
+      "repairHeuristic",
+      po::value<string>()->default_value("regret"),
+      "Repair heuristic to use: 'regret' or 'market_shortlist_regret'");
+  desc.add_options()(
+      "rejectInvalidCandidates",
+      po::value<bool>()->default_value(false),
+      "Hard-reject invalid candidates before acceptance criteria");
+  desc.add_options()(
+      "utilityUseConflictEventCount",
+      po::value<bool>()->default_value(true),
+      "Use conflict-event magnitude (vertex/swap/precedence) in utility instead of conflicting-task count");
+  desc.add_options()(
+      "acceptanceFeasibilityFirstPrecedenceDebt",
+      po::value<bool>()->default_value(false),
+      "Feasibility-first acceptance: valid dominates invalid; invalid-vs-invalid uses precedence-debt score");
+  desc.add_options()(
+      "acceptanceInvalidSpatialWeight",
+      po::value<double>()->default_value(1.0),
+      "Invalid-score weight for spatial conflicts (vertex + swap + structural)");
+  desc.add_options()(
+      "acceptanceInvalidPrecedenceDebtWeight",
+      po::value<double>()->default_value(1.0),
+      "Invalid-score weight for precedence-debt magnitude");
+  desc.add_options()(
+      "acceptanceInvalidSocTieBreakWeight",
+      po::value<double>()->default_value(0.0),
+      "Invalid-score SoC tie-break weight (default 0 keeps invalid scoring SoC-independent)");
+  desc.add_options()(
+      "acceptanceUseDedicatedInvalidTemperature",
+      po::value<bool>()->default_value(false),
+      "Use a dedicated SA/TA/OBA/GDA temperature state for feasibility-first invalid-score transitions");
+  desc.add_options()(
+      "acceptanceInvalidTemperatureScale",
+      po::value<double>()->default_value(0.25),
+      "Dedicated invalid-temperature scale: T0 = scale * max(1, |prev|, |cand|, |delta|)");
+  desc.add_options()(
+      "acceptanceInvalidTemperatureFloor",
+      po::value<double>()->default_value(1e-3),
+      "Lower bound for dedicated invalid-temperature initialization/recovery");
   desc.add_options()("genReport,g", po::bool_switch()->default_value(false),
                      "Whether to generate the report file that can be fed to "
                      "CBS-PC for verification");
@@ -149,6 +244,10 @@ int main(int argc, char** argv) {
       "lowLevelSegmentTimeout",
       po::value<double>()->default_value(600.0),
       "Per-segment timeout (seconds) for low-level planner searches");
+  desc.add_options()(
+      "mlastarIncrementalFocalRefresh",
+      po::value<bool>()->default_value(true),
+      "Enable incremental MLA* focal refresh using f-value buckets");
 
   struct MarketIntOptionSpec {
     const char* name;
@@ -195,8 +294,32 @@ int main(int argc, char** argv) {
        &LNSParams::Market::rho},
       {"marketPriceCap", 50.0, "Maximum market resource price",
        &LNSParams::Market::priceCap},
+      {"marketPriceInit", 0.05,
+       "Initial price for newly contended resources",
+       &LNSParams::Market::priceInit},
       {"marketGamma", 0.01, "Price evaporation factor per market update",
        &LNSParams::Market::gamma},
+      {"marketStabilityEmaAlpha", 0.25,
+       "EMA alpha for market stability diagnostics",
+       &LNSParams::Market::stabilityEmaAlpha},
+      {"marketStabilityMaxRelPriceDelta", 0.35,
+       "Max EMA-relative price L1 delta for ALNS market readiness",
+       &LNSParams::Market::stabilityMaxRelPriceDelta},
+      {"marketStabilityMaxTopMassDelta", 0.08,
+       "Max EMA top-price-mass delta for ALNS market readiness",
+       &LNSParams::Market::stabilityMaxTopMassDelta},
+      {"marketStabilityMinContendedJaccard", 0.50,
+       "Min EMA contended-resource Jaccard for ALNS market readiness",
+       &LNSParams::Market::stabilityMinContendedJaccard},
+      {"marketDestroyWarmupWeightScale", 0.20,
+       "ALNS weight multiplier applied to market destroy during warmup when soft gate is enabled",
+       &LNSParams::Market::destroyWarmupWeightScale},
+      {"marketDestroyUnstableWeightScale", 0.20,
+       "ALNS weight multiplier applied to market destroy during instability when soft gate is enabled",
+       &LNSParams::Market::destroyUnstableWeightScale},
+      {"marketDestroyMinAlnsWeight", 0.05,
+       "Minimum ALNS sampling weight for market destroy when soft gate is enabled",
+       &LNSParams::Market::destroyMinAlnsWeight},
       {"marketTauP", 0.0, "Acceptance guard threshold for market pressure",
        &LNSParams::Market::tauP},
       {"marketTauW", 0.0, "Acceptance guard threshold for precedence wait",
@@ -231,15 +354,27 @@ int main(int argc, char** argv) {
   desc.add_options()("marketUpdateOnAcceptedOnly",
                      po::value<bool>()->default_value(true),
                      "Update market prices only after accepted iterations");
+  desc.add_options()("marketUpdateFromCandidate",
+                     po::bool_switch()->default_value(false),
+                     "When updateOnAcceptedOnly=false, update prices from the candidate solution before accept/reject");
   desc.add_options()("marketAcceptanceGuards",
                      po::bool_switch()->default_value(false),
                      "Enable market pressure / precedence-wait acceptance guards");
+  desc.add_options()("marketDestroyRequireStable",
+                     po::bool_switch()->default_value(false),
+                     "Require market stability diagnostics before ALNS can sample market_tatonnement");
+  desc.add_options()("marketDestroySoftGate",
+                     po::bool_switch()->default_value(false),
+                     "Use soft ALNS downweighting (instead of exclusion) for market_tatonnement during warmup/instability");
   desc.add_options()("marketRepairTieBreak",
                      po::bool_switch()->default_value(false),
                      "Enable market-aware tie-break in repair when deltaSoC is near zero");
   desc.add_options()("marketRepairBlend",
                      po::bool_switch()->default_value(false),
                      "Enable blended market-aware repair score");
+  desc.add_options()("marketRepairNormalizeByObservedPrice",
+                     po::value<bool>()->default_value(true),
+                     "Normalize market shortlist prices by observed live price scale (fallback: price cap)");
   for (const auto& spec : kMarketIntOptions) {
     desc.add_options()(spec.name, po::value<int>()->default_value(spec.defaultValue),
                        spec.description);
@@ -310,20 +445,43 @@ int main(int argc, char** argv) {
   string initialSolutionStrategy = vm["initialSolution"].as<string>();
   if (initialSolutionStrategy != "greedy" &&
       initialSolutionStrategy != "prioritized" &&
+      initialSolutionStrategy != "portfolio" &&
       initialSolutionStrategy != "greedy_precedence_only" &&
       initialSolutionStrategy.find("sota") == string::npos) {
     PLOGE << "Incorrect initial solution strategy provided. Please choose from "
-             "'greedy', 'prioritized', 'greedy_precedence_only', 'sota_cbs' "
-             "or 'sota_pbs' options"
+             "'greedy', 'prioritized', 'portfolio', "
+             "'greedy_precedence_only', 'sota_cbs' or 'sota_pbs' options"
           << "\n";
     return 1;
   }
   const string initialSolutionFallback = vm["initialFallback"].as<string>();
+  const double initialPortfolioTimeFraction =
+      vm["initialPortfolioTimeFraction"].as<double>();
+  const double initialPortfolioMinArmTimeSec =
+      vm["initialPortfolioMinArmTimeSec"].as<double>();
+  const bool initialPortfolioStopOnFirstFeasible =
+      vm["initialPortfolioStopOnFirstFeasible"].as<bool>();
   if (initialSolutionFallback != "greedy" &&
       initialSolutionFallback != "none") {
     PLOGE << "Incorrect initial fallback strategy provided. Please choose "
              "from 'greedy' and 'none'\n";
     return 1;
+  }
+  if (!std::isfinite(initialPortfolioTimeFraction) ||
+      initialPortfolioTimeFraction < 0.0 ||
+      initialPortfolioTimeFraction > 1.0) {
+    PLOGE << "initialPortfolioTimeFraction must be finite and in [0, 1]\n";
+    return 1;
+  }
+  if (!std::isfinite(initialPortfolioMinArmTimeSec) ||
+      initialPortfolioMinArmTimeSec <= 0.0) {
+    PLOGE << "initialPortfolioMinArmTimeSec must be finite and > 0\n";
+    return 1;
+  }
+  if (initialSolutionStrategy != "portfolio" &&
+      initialPortfolioStopOnFirstFeasible) {
+    PLOGW << "initialPortfolioStopOnFirstFeasible is ignored unless "
+             "initialSolution='portfolio'\n";
   }
   string goalOccupationMode = vm["goalOccupationMode"].as<string>();
   if (goalOccupationMode != "stay" && goalOccupationMode != "tail" &&
@@ -389,6 +547,95 @@ int main(int argc, char** argv) {
              "Bachelor's Acceptance and GDA(Great Deluge Algorithm)\n";
     return 1;
   }
+  const string repairHeuristic = vm["repairHeuristic"].as<string>();
+  if (repairHeuristic != "regret" &&
+      repairHeuristic != "market_shortlist_regret") {
+    PLOGE << "The repair heuristic provided is not supported! Please choose "
+             "from 'regret' and 'market_shortlist_regret'\n";
+    return 1;
+  }
+  const bool rejectInvalidCandidates =
+      vm["rejectInvalidCandidates"].as<bool>();
+  const bool utilityUseConflictEventCount =
+      vm["utilityUseConflictEventCount"].as<bool>();
+  const bool acceptanceFeasibilityFirstPrecedenceDebt =
+      vm["acceptanceFeasibilityFirstPrecedenceDebt"].as<bool>();
+  const double acceptanceInvalidSpatialWeight =
+      vm["acceptanceInvalidSpatialWeight"].as<double>();
+  const double acceptanceInvalidPrecedenceDebtWeight =
+      vm["acceptanceInvalidPrecedenceDebtWeight"].as<double>();
+  const double acceptanceInvalidSocTieBreakWeight =
+      vm["acceptanceInvalidSocTieBreakWeight"].as<double>();
+  const bool acceptanceUseDedicatedInvalidTemperature =
+      vm["acceptanceUseDedicatedInvalidTemperature"].as<bool>();
+  const double acceptanceInvalidTemperatureScale =
+      vm["acceptanceInvalidTemperatureScale"].as<double>();
+  const double acceptanceInvalidTemperatureFloor =
+      vm["acceptanceInvalidTemperatureFloor"].as<double>();
+  if (!std::isfinite(acceptanceInvalidSpatialWeight) ||
+      acceptanceInvalidSpatialWeight < 0.0) {
+    PLOGE << "acceptanceInvalidSpatialWeight must be finite and non-negative\n";
+    return 1;
+  }
+  if (!std::isfinite(acceptanceInvalidPrecedenceDebtWeight) ||
+      acceptanceInvalidPrecedenceDebtWeight < 0.0) {
+    PLOGE << "acceptanceInvalidPrecedenceDebtWeight must be finite and "
+             "non-negative\n";
+    return 1;
+  }
+  if (!std::isfinite(acceptanceInvalidSocTieBreakWeight) ||
+      acceptanceInvalidSocTieBreakWeight < 0.0) {
+    PLOGE << "acceptanceInvalidSocTieBreakWeight must be finite and "
+             "non-negative\n";
+    return 1;
+  }
+  if (!std::isfinite(acceptanceInvalidTemperatureScale) ||
+      acceptanceInvalidTemperatureScale <= 0.0) {
+    PLOGE << "acceptanceInvalidTemperatureScale must be finite and > 0\n";
+    return 1;
+  }
+  if (!std::isfinite(acceptanceInvalidTemperatureFloor) ||
+      acceptanceInvalidTemperatureFloor <= 0.0) {
+    PLOGE << "acceptanceInvalidTemperatureFloor must be finite and > 0\n";
+    return 1;
+  }
+  if (acceptanceUseDedicatedInvalidTemperature &&
+      !acceptanceFeasibilityFirstPrecedenceDebt) {
+    PLOGW << "acceptanceUseDedicatedInvalidTemperature has no effect unless "
+             "acceptanceFeasibilityFirstPrecedenceDebt is enabled\n";
+  }
+  if (acceptanceFeasibilityFirstPrecedenceDebt &&
+      acceptanceInvalidSpatialWeight == 0.0 &&
+      acceptanceInvalidPrecedenceDebtWeight == 0.0 &&
+      acceptanceInvalidSocTieBreakWeight == 0.0) {
+    PLOGE << "With acceptanceFeasibilityFirstPrecedenceDebt enabled, at least "
+             "one invalid-score weight must be > 0\n";
+    return 1;
+  }
+  const bool regretShortlistUseNormalizedWaitProxy =
+      vm["regretShortlistUseNormalizedWaitProxy"].as<bool>();
+  const bool regretShortlistUseNormalizedSuccessorPressure =
+      vm["regretShortlistUseNormalizedSuccessorPressure"].as<bool>();
+  const bool regretShortlistClampSuccessorToPrecedenceRelease =
+      vm["regretShortlistClampSuccessorToPrecedenceRelease"].as<bool>();
+  const bool regretShortlistUseDescendantWeightedSuccessorPressure =
+      vm["regretShortlistUseDescendantWeightedSuccessorPressure"].as<bool>();
+  const double regretShortlistSuccessorPressureDepthDecay =
+      vm["regretShortlistSuccessorPressureDepthDecay"].as<double>();
+  const int regretShortlistSuccessorPressureMaxDepth =
+      vm["regretShortlistSuccessorPressureMaxDepth"].as<int>();
+  const bool regretShortlistDiagnostics =
+      vm["regretShortlistDiagnostics"].as<bool>();
+  if (!std::isfinite(regretShortlistSuccessorPressureDepthDecay) ||
+      regretShortlistSuccessorPressureDepthDecay < 0.0 ||
+      regretShortlistSuccessorPressureDepthDecay > 1.0) {
+    PLOGE << "regretShortlistSuccessorPressureDepthDecay must be in [0, 1]\n";
+    return 1;
+  }
+  if (regretShortlistSuccessorPressureMaxDepth < 0) {
+    PLOGE << "regretShortlistSuccessorPressureMaxDepth must be non-negative\n";
+    return 1;
+  }
 
   string regretType = vm["regretType"].as<string>();
   if (regretType != "absolute" && regretType != "relative") {
@@ -417,6 +664,8 @@ int main(int argc, char** argv) {
   const int plannerParityMaxLogs = vm["plannerParityMaxLogs"].as<int>();
   const double lowLevelSegmentTimeout =
       vm["lowLevelSegmentTimeout"].as<double>();
+  const bool mlastarIncrementalFocalRefresh =
+      vm["mlastarIncrementalFocalRefresh"].as<bool>();
   if (plannerParityMaxLogs <= 0) {
     PLOGE << "plannerParityMaxLogs must be a positive integer\n";
     return 1;
@@ -439,9 +688,14 @@ int main(int argc, char** argv) {
   LNSParams::Market marketCli;
   marketCli.heuristics = vm["marketHeuristics"].as<bool>();
   marketCli.updateOnAcceptedOnly = vm["marketUpdateOnAcceptedOnly"].as<bool>();
+  marketCli.updateFromCandidate = vm["marketUpdateFromCandidate"].as<bool>();
   marketCli.acceptanceGuards = vm["marketAcceptanceGuards"].as<bool>();
+  marketCli.destroyRequireStable = vm["marketDestroyRequireStable"].as<bool>();
+  marketCli.destroySoftGate = vm["marketDestroySoftGate"].as<bool>();
   marketCli.repairTieBreak = vm["marketRepairTieBreak"].as<bool>();
   marketCli.repairBlend = vm["marketRepairBlend"].as<bool>();
+  marketCli.repairNormalizeByObservedPrice =
+      vm["marketRepairNormalizeByObservedPrice"].as<bool>();
   for (const auto& spec : kMarketIntOptions) {
     marketCli.*(spec.field) = vm[spec.name].as<int>();
   }
@@ -463,8 +717,30 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (marketCli.eta < 0.0 || marketCli.priceCap < 0.0 ||
+      marketCli.priceInit < 0.0 ||
       marketCli.gamma < 0.0) {
-    PLOGE << "marketEta, marketPriceCap and marketGamma must be non-negative\n";
+    PLOGE << "marketEta, marketPriceCap, marketPriceInit and marketGamma "
+             "must be non-negative\n";
+    return 1;
+  }
+  if (marketCli.stabilityEmaAlpha < 0.0 || marketCli.stabilityEmaAlpha > 1.0) {
+    PLOGE << "marketStabilityEmaAlpha must be in [0, 1]\n";
+    return 1;
+  }
+  if (marketCli.stabilityMaxRelPriceDelta < 0.0 ||
+      marketCli.stabilityMaxTopMassDelta < 0.0) {
+    PLOGE << "marketStabilityMaxRelPriceDelta and marketStabilityMaxTopMassDelta must be non-negative\n";
+    return 1;
+  }
+  if (marketCli.destroyWarmupWeightScale < 0.0 ||
+      marketCli.destroyUnstableWeightScale < 0.0 ||
+      marketCli.destroyMinAlnsWeight < 0.0) {
+    PLOGE << "marketDestroyWarmupWeightScale, marketDestroyUnstableWeightScale and marketDestroyMinAlnsWeight must be non-negative\n";
+    return 1;
+  }
+  if (marketCli.stabilityMinContendedJaccard < 0.0 ||
+      marketCli.stabilityMinContendedJaccard > 1.0) {
+    PLOGE << "marketStabilityMinContendedJaccard must be in [0, 1]\n";
     return 1;
   }
   if (marketCli.rho <= 0.0 || marketCli.rho >= 1.0) {
@@ -509,11 +785,16 @@ int main(int argc, char** argv) {
   const int neighborSize = vm["neighborSize"].as<int>();
   const int maxIterations = vm["maxIterations"].as<int>();
   const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
+  const bool adaptiveRegretTopK = vm["adaptiveRegretTopK"].as<bool>();
   const double maxCascadeFactor = vm["maxCascadeFactor"].as<double>();
   const int maxCascadeTasks = vm["maxCascadeTasks"].as<int>();
+  const bool adaptiveCascadeBudget =
+      vm["adaptiveCascadeBudget"].as<bool>();
   const bool partialSolutionRestore = vm["partialSolutionRestore"].as<bool>();
   const bool repairIncludeNonAncestorAgents =
       vm["repairIncludeNonAncestorAgents"].as<bool>();
+  const bool alnsEnablePrecedenceAwareDestroy =
+      vm["alnsEnablePrecedenceAwareDestroy"].as<bool>();
   if (agentNum < 0) {
     PLOGE << "agentNum must be non-negative (0 means all agents from file)\n";
     return 1;
@@ -606,6 +887,12 @@ int main(int argc, char** argv) {
   parameters.core.timeLimit = cutoffTime;
   parameters.core.initialSolutionStrategy = initialSolutionStrategy;
   parameters.core.initialSolutionFallback = initialSolutionFallback;
+  parameters.core.initialPortfolioTimeFraction =
+      initialPortfolioTimeFraction;
+  parameters.core.initialPortfolioMinArmTimeSec =
+      initialPortfolioMinArmTimeSec;
+  parameters.core.initialPortfolioStopOnFirstFeasible =
+      initialPortfolioStopOnFirstFeasible;
   parameters.core.goalOccupationMode = goalOccupationMode;
   parameters.core.goalTailSteps = goalTailSteps;
   parameters.core.repositionMaxCandidates = repositionMaxCandidates;
@@ -615,14 +902,48 @@ int main(int argc, char** argv) {
   parameters.core.greedySegmentDiagnosticsTopK = greedySegmentDiagnosticsTopK;
   parameters.core.destroyHeuristic = destroyHeuristic;
   parameters.core.acceptanceCriteria = acceptanceCriteria;
+  parameters.core.repairHeuristic = repairHeuristic;
+  parameters.core.rejectInvalidCandidates = rejectInvalidCandidates;
+  parameters.core.utilityUseConflictEventCount = utilityUseConflictEventCount;
+  parameters.core.acceptanceFeasibilityFirstPrecedenceDebt =
+      acceptanceFeasibilityFirstPrecedenceDebt;
+  parameters.core.acceptanceInvalidSpatialWeight =
+      acceptanceInvalidSpatialWeight;
+  parameters.core.acceptanceInvalidPrecedenceDebtWeight =
+      acceptanceInvalidPrecedenceDebtWeight;
+  parameters.core.acceptanceInvalidSocTieBreakWeight =
+      acceptanceInvalidSocTieBreakWeight;
+  parameters.core.acceptanceUseDedicatedInvalidTemperature =
+      acceptanceUseDedicatedInvalidTemperature;
+  parameters.core.acceptanceInvalidTemperatureScale =
+      acceptanceInvalidTemperatureScale;
+  parameters.core.acceptanceInvalidTemperatureFloor =
+      acceptanceInvalidTemperatureFloor;
   parameters.core.regretType = regretType;
   parameters.core.incrementalRegret = incrementalRegret;
   parameters.core.regretCandidateTopK = regretCandidateTopK;
+  parameters.core.adaptiveRegretTopK = adaptiveRegretTopK;
+  parameters.core.regretShortlistUseNormalizedWaitProxy =
+      regretShortlistUseNormalizedWaitProxy;
+  parameters.core.regretShortlistUseNormalizedSuccessorPressure =
+      regretShortlistUseNormalizedSuccessorPressure;
+  parameters.core.regretShortlistClampSuccessorToPrecedenceRelease =
+      regretShortlistClampSuccessorToPrecedenceRelease;
+  parameters.core.regretShortlistUseDescendantWeightedSuccessorPressure =
+      regretShortlistUseDescendantWeightedSuccessorPressure;
+  parameters.core.regretShortlistSuccessorPressureDepthDecay =
+      regretShortlistSuccessorPressureDepthDecay;
+  parameters.core.regretShortlistSuccessorPressureMaxDepth =
+      regretShortlistSuccessorPressureMaxDepth;
+  parameters.core.regretShortlistDiagnostics = regretShortlistDiagnostics;
   parameters.core.maxCascadeFactor = maxCascadeFactor;
   parameters.core.maxCascadeTasks = maxCascadeTasks;
+  parameters.core.adaptiveCascadeBudget = adaptiveCascadeBudget;
   parameters.core.partialSolutionRestore = partialSolutionRestore;
   parameters.core.repairIncludeNonAncestorAgents =
       repairIncludeNonAncestorAgents;
+  parameters.core.alnsEnablePrecedenceAwareDestroy =
+      alnsEnablePrecedenceAwareDestroy;
   parameters.core.incrementalRegretMode = incrementalRegretMode;
   parameters.core.seed = seed;
 
@@ -630,6 +951,8 @@ int main(int argc, char** argv) {
   parameters.lowLevel.parityMaxLogs = plannerParityMaxLogs;
   parameters.lowLevel.planner = lowLevelPlanner;
   parameters.lowLevel.segmentTimeout = lowLevelSegmentTimeout;
+  parameters.lowLevel.mlastarIncrementalFocalRefresh =
+      mlastarIncrementalFocalRefresh;
 
   parameters.market = marketCli;
   auto lnsInstance =

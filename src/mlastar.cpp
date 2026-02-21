@@ -4,31 +4,56 @@
 #include "common.hpp"
 
 void MultiLabelSpaceTimeAStar::releaseNodes() {
-  openList_.clear();
-  focalList_.clear();
+  // Boost pairing_heap::clear() recursively disposes heap-node trees.
+  // Large/deep search frontiers can overflow the stack during teardown.
+  // Drain both heaps iteratively instead.
+  while (!openList_.empty()) {
+    openList_.pop();
+  }
+  while (!focalList_.empty()) {
+    focalList_.pop();
+  }
+  openByF_.clear();
   allNodesTable_.clear();
   allNodesStorage_.clear();
+}
+
+void MultiLabelSpaceTimeAStar::registerOpenNodeByF(MultiLabelAStarNode* node) {
+  if (!incrementalFocalRefresh_) {
+    return;
+  }
+  const int fVal = node->getFVal();
+  node->indexedFVal = fVal;
+  openByF_[fVal].push_back(node);
 }
 
 void MultiLabelSpaceTimeAStar::pushNode(MultiLabelAStarNode* node) {
   numGenerated++;
   node->inOpenlist = true;
   node->openHandle = openList_.push(node);
+  registerOpenNodeByF(node);
   if (node->getFVal() <= lowerBound_) {
-    node->focalHandle = focalList_.push(node);
+    if (!node->inFocal) {
+      node->focalHandle = focalList_.push(node);
+      node->inFocal = true;
+    }
   }
 }
 
 MultiLabelAStarNode* MultiLabelSpaceTimeAStar::popNode() {
-  if (focalList_.empty()) {
-    return nullptr;
+  while (!focalList_.empty()) {
+    MultiLabelAStarNode* node = focalList_.top();
+    focalList_.pop();
+    node->inFocal = false;
+    if (!node->inOpenlist) {
+      continue;
+    }
+    numExpanded++;
+    node->inOpenlist = false;
+    openList_.erase(node->openHandle);
+    return node;
   }
-  numExpanded++;
-  MultiLabelAStarNode* node = focalList_.top();
-  focalList_.pop();
-  node->inOpenlist = false;
-  openList_.erase(node->openHandle);
-  return node;
+  return nullptr;
 }
 
 void MultiLabelSpaceTimeAStar::updateFocalList() {
@@ -46,14 +71,43 @@ void MultiLabelSpaceTimeAStar::updateFocalList() {
       minFVal_ = newMinFVal;
       return;
     }
-    for (MultiLabelAStarNode* node : openList_) {
-      const int fVal = node->getFVal();
-      const bool newlyEligible =
-          (fVal > lowerBound_ && fVal <= newLowerBound);
-      const bool eligibleWhenEmpty =
-          (repopulatingFromEmpty && fVal <= newLowerBound);
-      if (newlyEligible || eligibleWhenEmpty) {
-        node->focalHandle = focalList_.push(node);
+
+    if (incrementalFocalRefresh_) {
+      auto begin = repopulatingFromEmpty ? openByF_.begin()
+                                         : openByF_.upper_bound(lowerBound_);
+      const auto end = openByF_.upper_bound(newLowerBound);
+      for (auto it = begin; it != end; ++it) {
+        const int bucketFVal = it->first;
+        for (MultiLabelAStarNode* node : it->second) {
+          if (node == nullptr || node->inFocal || !node->inOpenlist) {
+            continue;
+          }
+          const int currentFVal = node->getFVal();
+          if (node->indexedFVal != bucketFVal || currentFVal != bucketFVal) {
+            // Stale bucket entry from a prior in-place decrease-key update.
+            continue;
+          }
+          if (!repopulatingFromEmpty && currentFVal <= lowerBound_) {
+            continue;
+          }
+          if (currentFVal > newLowerBound) {
+            continue;
+          }
+          node->focalHandle = focalList_.push(node);
+          node->inFocal = true;
+        }
+      }
+    } else {
+      for (MultiLabelAStarNode* node : openList_) {
+        const int fVal = node->getFVal();
+        const bool newlyEligible =
+            (fVal > lowerBound_ && fVal <= newLowerBound);
+        const bool eligibleWhenEmpty =
+            (repopulatingFromEmpty && fVal <= newLowerBound);
+        if ((newlyEligible || eligibleWhenEmpty) && !node->inFocal) {
+          node->focalHandle = focalList_.push(node);
+          node->inFocal = true;
+        }
       }
     }
     minFVal_ = newMinFVal;
@@ -116,7 +170,9 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
   start->secondaryKey = -start->gVal;
 
   start->openHandle = openList_.push(start);
+  registerOpenNodeByF(start);
   start->focalHandle = focalList_.push(start);
+  start->inFocal = true;
 
   lowerBound_ = max(holdingTime - startTime, max(minFVal_, lb));
   const auto timedOut = [&]() -> bool {
@@ -240,13 +296,21 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
             updateOpen = true;
           }
           (*it)->overwriteSearchStateFrom(probe);
+          if (oldFVal != newFVal) {
+            registerOpenNodeByF(*it);
+          }
           if (updateOpen) {
             openList_.increase((*it)->openHandle);
           }
           if (addToFocal) {
-            (*it)->focalHandle = focalList_.push(*it);
+            if (!(*it)->inFocal) {
+              (*it)->focalHandle = focalList_.push(*it);
+              (*it)->inFocal = true;
+            } else {
+              updateInFocal = true;
+            }
           }
-          if (updateInFocal) {
+          if (updateInFocal && (*it)->inFocal) {
             focalList_.update((*it)->focalHandle);
           }
         }
