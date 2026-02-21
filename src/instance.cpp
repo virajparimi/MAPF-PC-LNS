@@ -1,78 +1,21 @@
 #include "instance.hpp"
-#include <boost/tokenizer.hpp>
-#include <fstream>
-#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
-#include "internal/parse_helpers.hpp"
 #include "utils.hpp"
 
-namespace {
-
-bool detectKivaMapFormat(const std::string& mapPath) {
-  using namespace boost;
-  std::ifstream file(mapPath.c_str());
-  if (!file.is_open()) {
-    return false;
-  }
-
-  std::string line;
-  if (!std::getline(file, line)) {
-    return false;
-  }
-
-  char_separator<char> sep(",");
-  tokenizer<char_separator<char>> tokenizer(line, sep);
-  auto it = tokenizer.begin();
-  const auto end = tokenizer.end();
-  int rows = 0, cols = 0;
-  if (!parse_helpers::parseNextInt(it, end, rows) ||
-      !parse_helpers::parseNextInt(it, end, cols) ||
-      rows <= 0 || cols <= 0) {
-    return false;
-  }
-
-  // Kiva map files contain three integer metadata lines after the first header
-  // line: workpoint count, agent count, and max time.
-  int metadata = 0;
-  for (int i = 0; i < 3; i++) {
-    if (!std::getline(file, line) ||
-        !parse_helpers::parseIntStrict(line, metadata)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-}  // namespace
-
 Instance::Instance(const string& mapFname, const string& agentTaskFname,
-                   int numOfAgents, int numOfTasks,
-                   bool strictKivaTaskIndices)
+                   int numOfAgents, int numOfTasks)
     : mapFname_(mapFname),
       agentTaskFname_(agentTaskFname),
       numOfAgents_(numOfAgents),
-      numOfTasks_(numOfTasks),
-      strictKivaTaskIndices_(strictKivaTaskIndices) {
-  const bool kivaFormat = detectKivaMapFormat(mapFname_);
-  bool succ = false;
-  if (kivaFormat) {
-    // We are going to work with KIVA instances
-    succ = loadKivaMap();
-  } else {
-    succ = loadMap();
-  }
+      numOfTasks_(numOfTasks) {
+  bool succ = loadMap();
   if (!succ) {
     throw std::runtime_error("Failed to load map '" + mapFname_ +
                              "'. See preceding log messages for details.");
   }
 
-  if (kivaFormat) {
-    // We are going to load KIVA tasks with implicit precedence constraints
-    succ = loadKivaTasks();
-  } else {
-    succ = loadAgentsAndTasks();
-  }
+  succ = loadAgentsAndTasks();
   if (!succ) {
     throw std::runtime_error(
         "Failed to load agent/task data '" + agentTaskFname_ +

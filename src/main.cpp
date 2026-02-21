@@ -9,7 +9,6 @@
 #include <cmath>
 #include <boost/program_options.hpp>
 #include "common.hpp"
-#include "report_exporter.hpp"
 #include "instance.hpp"
 #include "lns.hpp"
 #include "run_reporting.hpp"
@@ -35,11 +34,7 @@ int main(int argc, char** argv) {
                      "Number of agents to plan for");
   desc.add_options()("taskNum,l", po::value<int>()->default_value(0),
                      "Number of tasks to plan for");
-  desc.add_options()(
-      "kivaStrictTaskIndices", po::bool_switch()->default_value(false),
-      "Reject out-of-range Kiva task endpoint indices instead of modulo"
-      " wrapping");
-  desc.add_options()("neighborSize,n", po::value<int>()->default_value(8),
+  desc.add_options()("neighborSize,n", po::value<int>()->default_value(10),
                      "Size of the neighborhood");
   desc.add_options()("maxIterations,i", po::value<int>()->default_value(0),
                      "Maximum number of iterations");
@@ -112,11 +107,12 @@ int main(int argc, char** argv) {
   desc.add_options()("severity,d", po::value<int>()->default_value(0),
                      "Debugging level");
   desc.add_options()("initialSolution,s",
-                     po::value<string>()->default_value("greedy"),
-                     "Strategy for the initial solution");
+                     po::value<string>()->default_value("portfolio"),
+                     "Strategy for the initial solution (portfolio default for "
+                     "best final SoC; use greedy/prioritized for faster time-to-best)");
   desc.add_options()(
       "initialFallback",
-      po::value<string>()->default_value("greedy"),
+      po::value<string>()->default_value("none"),
       "Fallback when initial solution fails: 'greedy' or 'none'");
   desc.add_options()(
       "initialPortfolioTimeFraction",
@@ -209,9 +205,6 @@ int main(int argc, char** argv) {
       "acceptanceInvalidTemperatureFloor",
       po::value<double>()->default_value(1e-3),
       "Lower bound for dedicated invalid-temperature initialization/recovery");
-  desc.add_options()("genReport,g", po::bool_switch()->default_value(false),
-                     "Whether to generate the report file that can be fed to "
-                     "CBS-PC for verification");
   desc.add_options()("seed",
                      po::value<unsigned int>()->default_value(0),
                      "Random seed (0 = time-based)");
@@ -446,11 +439,10 @@ int main(int argc, char** argv) {
   if (initialSolutionStrategy != "greedy" &&
       initialSolutionStrategy != "prioritized" &&
       initialSolutionStrategy != "portfolio" &&
-      initialSolutionStrategy != "greedy_precedence_only" &&
       initialSolutionStrategy.find("sota") == string::npos) {
     PLOGE << "Incorrect initial solution strategy provided. Please choose from "
              "'greedy', 'prioritized', 'portfolio', "
-             "'greedy_precedence_only', 'sota_cbs' or 'sota_pbs' options"
+             "'sota_cbs' or 'sota_pbs' options"
           << "\n";
     return 1;
   }
@@ -781,7 +773,6 @@ int main(int argc, char** argv) {
 
   const int agentNum = vm["agentNum"].as<int>();
   const int taskNum = vm["taskNum"].as<int>();
-  const bool kivaStrictTaskIndices = vm["kivaStrictTaskIndices"].as<bool>();
   const int neighborSize = vm["neighborSize"].as<int>();
   const int maxIterations = vm["maxIterations"].as<int>();
   const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
@@ -851,8 +842,7 @@ int main(int argc, char** argv) {
   std::unique_ptr<Instance> instancePtr;
   try {
     instancePtr = std::make_unique<Instance>(
-        vm["map"].as<string>(), vm["agents"].as<string>(),
-        agentNum, taskNum, kivaStrictTaskIndices);
+        vm["map"].as<string>(), vm["agents"].as<string>(), agentNum, taskNum);
   } catch (const std::exception& e) {
     PLOGE << "Initialization failed: " << e.what() << "\n";
     return 1;
@@ -966,14 +956,6 @@ int main(int argc, char** argv) {
     std::cout << anytimeSolution.toString() << '\n';
   } else {
     PLOGE << "Anytime solution was not found!\n";
-  }
-
-  if (vm["genReport"].as<bool>()) {
-    CBSReportExporter reportExporter;
-    reportExporter.printStart();
-    const Solution& finalSolution = lnsInstance->getSolution();
-    reportExporter.writeReport(&instance, &finalSolution);
-    reportExporter.printSaveStatus();
   }
 
   const FeasibleTrajectoryStats feasibleStats =

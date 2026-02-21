@@ -17,11 +17,8 @@ class Instance {
   unordered_map<int, int> taskLocationToGlobalTask_;
   vector<vector<int>> ancestors_, successors_;
   vector<pair<int, int>> inputPrecedenceConstraints_;
-  bool strictKivaTaskIndices_ = false;
 
   bool loadMap();
-  bool loadKivaMap();
-  bool loadKivaTasks();
   bool loadAgentsAndTasks();
   void buildTaskLocationIndex();
   void printMap() const;
@@ -40,8 +37,7 @@ class Instance {
 
   Instance() = default;
   Instance(const string& mapFname, const string& agentTaskFname,
-           int numOfAgents = 0, int numOfTasks = 0,
-           bool strictKivaTaskIndices = false);
+           int numOfAgents = 0, int numOfTasks = 0);
 
   inline int getTaskLocations(int task) const {
     validateTaskIndex(task, "Instance::getTaskLocations");
