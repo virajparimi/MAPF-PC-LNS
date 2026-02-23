@@ -434,11 +434,20 @@ bool LNS::extractFeasibleSolution() {
     incumbentSolution_.numOfCols = instance_.numOfCols;
     incumbentSolution_.sumOfCosts = solution_.sumOfCosts;
     incumbentSolution_.agentPaths.resize(instance_.getAgentNum());
+    incumbentSolution_.agentTaskAssignments.resize(instance_.getAgentNum());
+    incumbentSolution_.agentTaskPaths.resize(instance_.getAgentNum());
+    incumbentSolution_.taskAgentMap = solution_.taskAgentMap;
     for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
       if (!solution_.agents[agent].taskAssignments.empty()) {
         incumbentSolution_.agentPaths[agent] = solution_.agents[agent].path;
+        incumbentSolution_.agentTaskAssignments[agent] =
+            solution_.agents[agent].taskAssignments;
+        incumbentSolution_.agentTaskPaths[agent] =
+            solution_.agents[agent].taskPaths;
       } else {
         incumbentSolution_.agentPaths[agent] = AgentTaskPath();
+        incumbentSolution_.agentTaskAssignments[agent].clear();
+        incumbentSolution_.agentTaskPaths[agent].clear();
       }
     }
     return true;

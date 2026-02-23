@@ -151,6 +151,10 @@ struct Agent {
     assert(std::find(taskAssignments.begin(), taskAssignments.end(), taskB) !=
            taskAssignments.end());
     intraPrecedenceConstraints.emplace_back(taskA, taskB);
+    // This eager path explicitly appends an intra-edge into the diagnostic
+    // cache, so this operation itself does not leave pending lazy updates.
+    // Note: intra-edge correctness for planning/validation is derived from
+    // taskAssignments order (not this cached vector) in buildFullPrecedenceConstraints.
     intraPrecedenceDirty = false;
   }
 
@@ -367,6 +371,10 @@ struct FeasibleSolution {
  public:
   int sumOfCosts{}, numOfCols{};
   vector<AgentTaskPath> agentPaths;
+  // Task-level data for reporting and diagnostics on the incumbent solution.
+  vector<vector<int>> agentTaskAssignments;
+  vector<vector<AgentTaskPath>> agentTaskPaths;
+  vector<int> taskAgentMap;
 
   inline int getRowCoordinate(int id) const { return id / numOfCols; }
   inline int getColCoordinate(int id) const { return id % numOfCols; }
@@ -613,4 +621,3 @@ struct ALNS {
     deltaSocAccepted.assign(numDestroyHeuristics, 0.0);
   }
 };
-

@@ -155,17 +155,19 @@ struct ScopedInsertTaskRollback {
 
 [[maybe_unused]] int resolveTaskEndTimeFromMixedState(
     int task, const LNS::RegretWorkspace& workspace,
-    const AssignmentLookup& workspaceIndex, const Solution& previousSolution,
+    const vector<int>& workspaceOwnerLookup,
+    const vector<int>& workspacePosLookup, const Solution& previousSolution,
     const Neighbor& neighborhood, bool* usedPreviousFallback) {
   if (usedPreviousFallback != nullptr) {
     *usedPreviousFallback = false;
   }
-  if (task < 0 || task >= (int)workspaceIndex.owner.size()) {
+  if (task < 0 || task >= (int)workspaceOwnerLookup.size() ||
+      task >= (int)workspacePosLookup.size()) {
     return -1;
   }
 
-  const int workspaceOwner = workspaceIndex.owner[task];
-  const int workspacePos = workspaceIndex.pos[task];
+  const int workspaceOwner = workspaceOwnerLookup[task];
+  const int workspacePos = workspacePosLookup[task];
   if (workspaceOwner != UNASSIGNED && workspaceOwner >= 0 &&
       workspaceOwner < workspace.numAgents() && workspacePos >= 0 &&
       workspacePos < (int)workspace.taskPaths(workspaceOwner).size()) {

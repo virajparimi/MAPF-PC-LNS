@@ -374,7 +374,9 @@ class LNS {
       TaskRegretPacket regretPacket, RegretWorkspace& workspace,
       vector<pair<int, int>>* precedenceConstraints,
       const TaskBaselineMetrics& baselineMetrics,
-      pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes);
+      pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes,
+      const vector<int>* assignmentOwnerLookup = nullptr,
+      const vector<int>* assignmentPosLookup = nullptr);
 
   bool recomputeRegretsForTasks(const vector<int>& tasks);
   std::optional<Regret> popNextValidRegret();

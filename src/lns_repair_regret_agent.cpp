@@ -12,7 +12,9 @@ void LNS::computeRegretForTaskWithAgent(
     TaskRegretPacket regretPacket, RegretWorkspace& workspace,
     vector<pair<int, int>>* precedenceConstraints,
     const TaskBaselineMetrics& baselineMetrics,
-    pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes) {
+    pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes,
+    const vector<int>* assignmentOwnerLookup,
+    const vector<int>* assignmentPosLookup) {
   if (runtimeBudgetExhausted()) {
     return;
   }
@@ -125,8 +127,17 @@ void LNS::computeRegretForTaskWithAgent(
     vector<ResolvedSuccessorSignal> successorSignals;
     if (task >= 0 && task < (int)staticSuccessors.size() &&
         task < (int)successorPressureStaticSignalsByTask_.size()) {
-      const AssignmentLookup workspaceIndex =
-          buildAssignmentLookup(workspace, instance_.getTasksNum());
+      const int taskCount = instance_.getTasksNum();
+      AssignmentLookup builtWorkspaceIndex;
+      const vector<int>* ownerLookup = assignmentOwnerLookup;
+      const vector<int>* posLookup = assignmentPosLookup;
+      if (ownerLookup == nullptr || posLookup == nullptr ||
+          (int)ownerLookup->size() != taskCount ||
+          (int)posLookup->size() != taskCount) {
+        builtWorkspaceIndex = buildAssignmentLookup(workspace, taskCount);
+        ownerLookup = &builtWorkspaceIndex.owner;
+        posLookup = &builtWorkspaceIndex.pos;
+      }
       successorSignals.reserve(successorPressureStaticSignalsByTask_[task].size());
       int64_t successorBeginFromPreviousCount = 0;
       int64_t successorPrecedenceClampCount = 0;
@@ -141,13 +152,12 @@ void LNS::computeRegretForTaskWithAgent(
         int successorBegin = -1;
         // Prefer current workspace timing when successor is still assigned.
         const int workspaceSuccessorAgent =
-            (successorTask >= 0 &&
-             successorTask < (int)workspaceIndex.owner.size())
-                ? workspaceIndex.owner[successorTask]
+            (successorTask >= 0 && successorTask < (int)ownerLookup->size())
+                ? (*ownerLookup)[successorTask]
                 : UNASSIGNED;
         const int workspaceSuccessorPos =
-            (successorTask >= 0 && successorTask < (int)workspaceIndex.pos.size())
-                ? workspaceIndex.pos[successorTask]
+            (successorTask >= 0 && successorTask < (int)posLookup->size())
+                ? (*posLookup)[successorTask]
                 : -1;
         if (workspaceSuccessorAgent != UNASSIGNED && workspaceSuccessorPos >= 0 &&
             workspaceSuccessorAgent >= 0 &&
@@ -167,8 +177,8 @@ void LNS::computeRegretForTaskWithAgent(
           auto consumePredecessorRelease = [&](int predecessorTask) {
             bool usedPreviousFallback = false;
             const int predecessorEnd = resolveTaskEndTimeFromMixedState(
-                predecessorTask, workspace, workspaceIndex, previousSolution_,
-                lnsNeighborhood_, &usedPreviousFallback);
+                predecessorTask, workspace, *ownerLookup, *posLookup,
+                previousSolution_, lnsNeighborhood_, &usedPreviousFallback);
             if (predecessorEnd >= 0) {
               if (usedPreviousFallback) {
                 successorBeginFromPreviousCount++;

@@ -109,6 +109,106 @@ double computeTimeToBestFeasible(const vector<IterationStats>& stats) {
   return timeToBest;
 }
 
+struct FinalSolutionScheduleMetrics {
+  int makespan = 0;
+  int maxIndividualCost = 0;
+  bool hasTaskScheduleData = false;
+  int totalPrecedenceWait = 0;
+  int maxPrecedenceWait = 0;
+  vector<double> precedenceSlacks;
+};
+
+FinalSolutionScheduleMetrics computeFinalSolutionScheduleMetrics(
+    const FeasibleSolution& solution, const Instance& instance) {
+  FinalSolutionScheduleMetrics metrics;
+  const int agentCount = static_cast<int>(solution.agentPaths.size());
+  for (const auto& path : solution.agentPaths) {
+    const int cost = path.endTimeOrZero();
+    metrics.makespan = max(metrics.makespan, cost);
+    metrics.maxIndividualCost = max(metrics.maxIndividualCost, cost);
+  }
+
+  const int taskCount = instance.getTasksNum();
+  if (taskCount <= 0) {
+    return metrics;
+  }
+  if ((int)solution.taskAgentMap.size() != taskCount ||
+      (int)solution.agentTaskAssignments.size() != agentCount ||
+      (int)solution.agentTaskPaths.size() != agentCount) {
+    return metrics;
+  }
+
+  vector<char> taskValid(taskCount, 0);
+  vector<int> taskArrive(taskCount, 0);
+  vector<int> taskEnd(taskCount, 0);
+  bool anyTaskValid = false;
+  for (int agent = 0; agent < agentCount; agent++) {
+    const auto& assignments = solution.agentTaskAssignments[agent];
+    const auto& taskPaths = solution.agentTaskPaths[agent];
+    if (assignments.size() != taskPaths.size()) {
+      continue;
+    }
+    for (int localTask = 0; localTask < (int)assignments.size(); localTask++) {
+      const int task = assignments[localTask];
+      if (task < 0 || task >= taskCount) {
+        continue;
+      }
+      const AgentTaskPath& taskPath = taskPaths[localTask];
+      if (taskPath.empty()) {
+        continue;
+      }
+      int arrive = taskPath.endTime();
+      const int taskLocation = instance.getTaskLocations(task);
+      for (int step = 0; step < (int)taskPath.size(); step++) {
+        if (taskPath[step].location == taskLocation) {
+          arrive = taskPath.beginTime + step;
+          break;
+        }
+      }
+      taskValid[task] = 1;
+      taskArrive[task] = arrive;
+      taskEnd[task] = taskPath.endTime();
+      anyTaskValid = true;
+    }
+  }
+  if (!anyTaskValid) {
+    return metrics;
+  }
+  metrics.hasTaskScheduleData = true;
+
+  const auto& predecessors = instance.getAncestorsRef();
+  for (int task = 0; task < taskCount; task++) {
+    if (!taskValid[task]) {
+      continue;
+    }
+    int release = 0;
+    for (int pred : predecessors[task]) {
+      if (pred >= 0 && pred < taskCount && taskValid[pred]) {
+        release = max(release, taskEnd[pred]);
+      }
+    }
+    const int waitPrec = max(0, release - taskArrive[task]);
+    metrics.totalPrecedenceWait += waitPrec;
+    metrics.maxPrecedenceWait = max(metrics.maxPrecedenceWait, waitPrec);
+  }
+
+  const auto& successors = instance.getSuccessorsRef();
+  for (int task = 0; task < taskCount; task++) {
+    if (!taskValid[task]) {
+      continue;
+    }
+    for (int succ : successors[task]) {
+      if (succ < 0 || succ >= taskCount || !taskValid[succ]) {
+        continue;
+      }
+      metrics.precedenceSlacks.push_back(
+          static_cast<double>(taskArrive[succ] - taskEnd[task]));
+    }
+  }
+
+  return metrics;
+}
+
 }  // namespace
 
 FeasibleTrajectoryStats collectFeasibleTrajectoryStats(const LNS& lns,
@@ -281,6 +381,8 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
                                       lns.runtime
                                 : 0.0;
   const double timeToBestFeasible = computeTimeToBestFeasible(lns.iterationStats);
+  const FinalSolutionScheduleMetrics finalSolutionMetrics =
+      computeFinalSolutionScheduleMetrics(solution, lns.getInstance());
   const LNS::LowLevelSearchStats lowLevelStats = lns.getLowLevelSearchStats();
   const double lowLevelCallsPerSec =
       lns.runtime > 0.0 ? static_cast<double>(lowLevelStats.calls) / lns.runtime
@@ -342,6 +444,40 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Improving feasible updates", stats.numImprovingFeasibleUpdates);
   printMetric("Total feasible iterations", stats.numFeasibleIterations);
   printMetric("Solution cost", solution.sumOfCosts);
+  printMetric("Makespan", finalSolutionMetrics.makespan);
+  printMetric("Max individual cost", finalSolutionMetrics.maxIndividualCost);
+  if (finalSolutionMetrics.hasTaskScheduleData) {
+    printMetric("Total precedence wait",
+                finalSolutionMetrics.totalPrecedenceWait);
+    printMetric("Max precedence wait", finalSolutionMetrics.maxPrecedenceWait);
+    printMetric("Precedence slack edges",
+                static_cast<int64_t>(finalSolutionMetrics.precedenceSlacks.size()));
+    if (!finalSolutionMetrics.precedenceSlacks.empty()) {
+      const double minSlack =
+          *std::min_element(finalSolutionMetrics.precedenceSlacks.begin(),
+                            finalSolutionMetrics.precedenceSlacks.end());
+      printMetric("Min precedence slack", minSlack);
+      printMetric("Precedence slack p25",
+                  percentileValue(finalSolutionMetrics.precedenceSlacks, 0.25));
+      printMetric("Precedence slack p50",
+                  percentileValue(finalSolutionMetrics.precedenceSlacks, 0.50));
+      printMetric("Precedence slack p75",
+                  percentileValue(finalSolutionMetrics.precedenceSlacks, 0.75));
+    } else {
+      printMetric("Min precedence slack", "n/a");
+      printMetric("Precedence slack p25", "n/a");
+      printMetric("Precedence slack p50", "n/a");
+      printMetric("Precedence slack p75", "n/a");
+    }
+  } else {
+    printMetric("Total precedence wait", "n/a");
+    printMetric("Max precedence wait", "n/a");
+    printMetric("Precedence slack edges", "n/a");
+    printMetric("Min precedence slack", "n/a");
+    printMetric("Precedence slack p25", "n/a");
+    printMetric("Precedence slack p50", "n/a");
+    printMetric("Precedence slack p75", "n/a");
+  }
   printMetric("Number of failures", lns.numOfFailures);
   printMetric("Invalid candidate rejections",
               lns.invalidCandidateRejections);
@@ -477,8 +613,8 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
     printMetric("Top price-mass delta EMA", marketStats.topPriceMassDeltaEma);
     printMetric("Contended Jaccard", marketStats.contendedJaccard);
     printMetric("Contended Jaccard EMA", marketStats.contendedJaccardEma);
-    printMetric("Total precedence wait", marketStats.totalPrecedenceWait);
-    printMetric("Max precedence wait", marketStats.maxPrecedenceWait);
+    printMetric("Market total precedence wait", marketStats.totalPrecedenceWait);
+    printMetric("Market max precedence wait", marketStats.maxPrecedenceWait);
   }
 
   const auto& regretStats = lns.getRegretEvalStatsRef();

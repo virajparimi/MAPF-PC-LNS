@@ -659,7 +659,8 @@ bool LNS::computeRegretForTask(
     computeRegretForTaskWithAgent(regretPacket, workspace,
                                   &precedenceConstraints,
                                   baselineMetrics,
-                                  &serviceTimes);
+                                  &serviceTimes, &assignmentLookup.owner,
+                                  &assignmentLookup.pos);
     if (serviceTimes.size() > beforeOptions) {
       candidateAgents.push_back(agent);
     }
