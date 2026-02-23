@@ -61,6 +61,7 @@ void Instance::preComputeNeighbors() {
 void Instance::preComputeHeuristics() {
   heuristics_.clear();
   heuristics_.resize(numOfTasks_);
+  extraGoalHeuristicsCache_.clear();
   std::unordered_map<int, int> rootToFirstTask;
   rootToFirstTask.reserve(numOfTasks_);
 
@@ -91,6 +92,50 @@ void Instance::preComputeHeuristics() {
       }
     }
   }
+}
+
+const vector<int>& Instance::getGoalDistanceTable(int goalLocation) const {
+  if (goalLocation < 0 || goalLocation >= mapSize || isObstacle(goalLocation)) {
+    throw std::out_of_range("Instance::getGoalDistanceTable: invalid goal");
+  }
+
+  const auto taskIt = taskLocationToGlobalTask_.find(goalLocation);
+  if (taskIt != taskLocationToGlobalTask_.end()) {
+    return heuristics_.at(taskIt->second);
+  }
+
+  const auto cacheIt = extraGoalHeuristicsCache_.find(goalLocation);
+  if (cacheIt != extraGoalHeuristicsCache_.end()) {
+    return cacheIt->second;
+  }
+
+  vector<int> distances(mapSize, MAX_TIMESTEP);
+  distances[goalLocation] = 0;
+  deque<int> frontier;
+  frontier.push_back(goalLocation);
+  while (!frontier.empty()) {
+    const int current = frontier.front();
+    frontier.pop_front();
+    const int nextDistance = distances[current] + 1;
+    for (int nextLocation : getNeighbors(current)) {
+      if (distances[nextLocation] > nextDistance) {
+        distances[nextLocation] = nextDistance;
+        frontier.push_back(nextLocation);
+      }
+    }
+  }
+
+  auto inserted =
+      extraGoalHeuristicsCache_.emplace(goalLocation, std::move(distances));
+  return inserted.first->second;
+}
+
+int Instance::getDistanceToGoal(int goalLocation, int location) const {
+  if (location < 0 || location >= mapSize) {
+    return MAX_TIMESTEP;
+  }
+  const auto& distances = getGoalDistanceTable(goalLocation);
+  return distances[location];
 }
 
 

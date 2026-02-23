@@ -10,10 +10,8 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
                           bool& currentSolutionValid,
                           ValidationStats& currentValidationStats,
                           bool& feasibleSolutionUpdated) {
-  iterationRollbackHintAgents_.clear();
   market_.candidateUpdateConsumed = false;
   const int previousSocForIter = previousSolution_.sumOfCosts;
-  const bool previousValidForIter = currentSolutionValid;
   const ValidationStats previousValidationStatsForIter =
       currentValidationStats;
   const double previousPressureForIter =
@@ -74,9 +72,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
       }
     }
     if (!cascadeAbort) {
-      iterationRollbackHintAgents_ =
-          buildRollbackAgentHints(lastPrepareAffectedAgents_);
-      restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+      restoreSolutionFromPrevious();
     }
     feasibleSolutionUpdated = false;
     quality = IterationQuality::couldNotFind;
@@ -155,7 +151,6 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     agentsToCompute.resize(instance_.getAgentNum());
     std::iota(agentsToCompute.begin(), agentsToCompute.end(), 0);
   }
-  const vector<int> rollbackBaseAgents = agentsToCompute;
   // Phase-D optimization: join only agents that are provably dirty.
   // prepareNextIteration clears service paths for impacted agents, so an
   // empty joined path is a reliable dirty signal.
@@ -185,6 +180,9 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
             std::make_pair(UNASSIGNED, -1));
   std::fill(regretSecondBestOption_.begin(), regretSecondBestOption_.end(),
             std::make_pair(UNASSIGNED, -1));
+  for (auto& candidateAgents : regretCandidateAgents_) {
+    candidateAgents.clear();
+  }
   bool repairFailed = false;
   regretEvalStatsCurrent_.reset();
   {
@@ -240,29 +238,63 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     int64_t stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
     int64_t stalePopsSinceRefresh = 0;
     int64_t commitsSinceRefresh = 0;
+    int64_t consecutiveStaleGrowthCommits = 0;
+    int refreshCooldownCommits = 0;
+    bool endgameFullRefreshDone = false;
+    enum class RefreshReason { high_stale, stale_growth, periodic };
+    auto refreshRemainingRegrets = [&](RefreshReason reason) {
+      lnsNeighborhood_.regretMaxHeap.clear();
+      incrementalRegretStatsCurrent_.fullRefreshes++;
+      incrementalRegretStatsTotal_.fullRefreshes++;
+      if (reason == RefreshReason::high_stale) {
+        incrementalRegretStatsCurrent_.refreshByHighStale++;
+        incrementalRegretStatsTotal_.refreshByHighStale++;
+      } else if (reason == RefreshReason::stale_growth) {
+        incrementalRegretStatsCurrent_.refreshByStaleGrowth++;
+        incrementalRegretStatsTotal_.refreshByStaleGrowth++;
+      } else if (reason == RefreshReason::periodic) {
+        incrementalRegretStatsCurrent_.refreshByPeriodic++;
+        incrementalRegretStatsTotal_.refreshByPeriodic++;
+      }
+      if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
+        repairFailed = true;
+        return;
+      }
+      stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
+      stalePopsSinceRefresh = 0;
+      commitsSinceRefresh = 0;
+      consecutiveStaleGrowthCommits = 0;
+      refreshCooldownCommits = 2;
+    };
 
     while (!repairFailed && !lnsNeighborhood_.removedTasks.empty()) {
       if (runtimeBudgetExhausted()) {
         repairFailed = true;
         break;
       }
-      // If we are spending too much effort discarding stale heap entries,
-      // do a full refresh of all remaining regrets.
-      //
-      // This helps when dirty rules miss some dependencies (regret drift),
-      // and also prevents the heap from filling up with stale entries.
-      if (stalePopsSinceRefresh >= 100 &&
-          stalePopsSinceRefresh > 2 * commitsSinceRefresh + 50) {
-        lnsNeighborhood_.regretMaxHeap.clear();
-        incrementalRegretStatsCurrent_.fullRefreshes++;
-        incrementalRegretStatsTotal_.fullRefreshes++;
-        if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
-          repairFailed = true;
+
+      if (refreshCooldownCommits > 0) {
+        refreshCooldownCommits--;
+      } else {
+        const bool highStaleLoad =
+            stalePopsSinceRefresh >= 120 &&
+            (double)stalePopsSinceRefresh >
+                (2.5 * (double)commitsSinceRefresh + 60.0);
+        const bool staleGrowthStall =
+            consecutiveStaleGrowthCommits >= 8 &&
+            stalePopsSinceRefresh >= 80 && commitsSinceRefresh >= 10;
+        const bool periodicSafety =
+            stalePopsSinceRefresh >= 40 && commitsSinceRefresh >= 20;
+        if (highStaleLoad) {
+          refreshRemainingRegrets(RefreshReason::high_stale);
+        } else if (staleGrowthStall) {
+          refreshRemainingRegrets(RefreshReason::stale_growth);
+        } else if (periodicSafety) {
+          refreshRemainingRegrets(RefreshReason::periodic);
+        }
+        if (repairFailed) {
           break;
         }
-        stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
-        stalePopsSinceRefresh = 0;
-        commitsSinceRefresh = 0;
       }
 
       const auto bestRegret = popNextValidRegret();
@@ -270,6 +302,11 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
           incrementalRegretStatsCurrent_.stalePops - stalePopsAtLastCheck;
       stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
       stalePopsSinceRefresh += staleDelta;
+      if (staleDelta > 0) {
+        consecutiveStaleGrowthCommits++;
+      } else {
+        consecutiveStaleGrowthCommits = 0;
+      }
 
       if (!bestRegret.has_value()) {
         // Heap may have been exhausted by stale entries; rebuild for whatever
@@ -278,12 +315,19 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
         incrementalRegretStatsTotal_.heapRebuilds++;
         if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
           repairFailed = true;
+        } else {
+          stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
+          stalePopsSinceRefresh = 0;
+          commitsSinceRefresh = 0;
+          consecutiveStaleGrowthCommits = 0;
+          refreshCooldownCommits = 2;
         }
         continue;
       }
 
       const vector<int> endTimesBefore = computeCurrentTaskEndTimes();
-      const vector<int> lastTaskBefore = computeCurrentLastTaskPerAgent();
+      const vector<uint64_t> agentSignaturesBefore =
+          computeCurrentAgentScheduleSignatures();
       if (!commitBestRegretTask(*bestRegret)) {
         PLOGE << "run: failed to commit best-regret task "
               << bestRegret->task << "\n";
@@ -294,11 +338,22 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
       incrementalRegretStatsTotal_.commits++;
       commitsSinceRefresh++;
       const vector<int> endTimesAfter = computeCurrentTaskEndTimes();
-      const vector<int> lastTaskAfter = computeCurrentLastTaskPerAgent();
+      const vector<uint64_t> agentSignaturesAfter =
+          computeCurrentAgentScheduleSignatures();
 
       const vector<int> dirtyTasks = computeDirtyTasksAfterCommit(
-          endTimesBefore, endTimesAfter, lastTaskBefore, lastTaskAfter);
-      if (!recomputeRegretsForTasks(dirtyTasks)) {
+          endTimesBefore, endTimesAfter, agentSignaturesBefore,
+          agentSignaturesAfter);
+      vector<int> tasksToRecompute = dirtyTasks;
+      const int remainingRemovedTasks = (int)lnsNeighborhood_.removedTasks.size();
+      if (!endgameFullRefreshDone && remainingRemovedTasks <= 4 &&
+          (stalePopsSinceRefresh >= 30 || commitsSinceRefresh >= 10)) {
+        incrementalRegretStatsCurrent_.endgameFullRecomputes++;
+        incrementalRegretStatsTotal_.endgameFullRecomputes++;
+        tasksToRecompute = collectRemainingRemovedTasks();
+        endgameFullRefreshDone = true;
+      }
+      if (!recomputeRegretsForTasks(tasksToRecompute)) {
         repairFailed = true;
       }
     }
@@ -313,9 +368,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
       adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
     }
     // Reject whatever we done till now
-    iterationRollbackHintAgents_ =
-        buildRollbackAgentHints(rollbackBaseAgents);
-    restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+    restoreSolutionFromPrevious();
     feasibleSolutionUpdated = false;
     quality = IterationQuality::couldNotFind;
     runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
@@ -336,9 +389,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
         alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
       adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
     }
-    iterationRollbackHintAgents_ =
-        buildRollbackAgentHints(rollbackBaseAgents);
-    restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+    restoreSolutionFromPrevious();
     feasibleSolutionUpdated = false;
     quality = IterationQuality::couldNotFind;
     runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
@@ -359,9 +410,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
           alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
         adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
       }
-      iterationRollbackHintAgents_ =
-          buildRollbackAgentHints(rollbackBaseAgents);
-      restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+      restoreSolutionFromPrevious();
       feasibleSolutionUpdated = false;
       quality = IterationQuality::couldNotFind;
       runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
@@ -395,9 +444,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   PLOGD << "New sum of costs = " << solution_.sumOfCosts << "\n";
 
   const int previousConflictSignalForIter =
-      utilityUseConflictEventCount_
-          ? previousValidationStatsForIter.totalConflictEvents()
-                                    : (int)potentialNeighborhood.size();
+      previousValidationStatsForIter.totalConflictEvents();
   PLOGD << "Conflict signal in old solution: "
         << previousConflictSignalForIter << "\n";
 
@@ -410,9 +457,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   useTerminalPathsInValidation_ = false;
 
   const int candidateConflictSignal =
-      utilityUseConflictEventCount_
-          ? candidateValidationStats.totalConflictEvents()
-                                    : (int)potentialNeighborhood.size();
+      candidateValidationStats.totalConflictEvents();
   PLOGD << "Conflict signal in new solution: " << candidateConflictSignal
         << "\n";
 
@@ -452,243 +497,42 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
       temperature_ = max(0.0, temperature_ - greatDelugeDecay_);
     }
   };
-  iterationRollbackHintAgents_ = buildRollbackAgentHints(rollbackBaseAgents);
-  if (!candidateValid && rejectInvalidCandidates_) {
-    invalidCandidateRejections++;
-    iterationRollbackHintAgents_ =
-        buildRollbackAgentHints(rollbackBaseAgents);
-    restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
+  if (!candidateValid) {
+    PLOGD << "Invalid candidate forwarded to acceptance criteria\n";
+  }
+  candidatePressure =
+      market_.heuristics ? computeSolutionMarketPressure() : 0.0;
+  candidateWait = market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
+  if (market_.heuristics && !market_.updateOnAcceptedOnly &&
+      market_.updateFromCandidate) {
+    maybeUpdateMarketState(false, true);
+  }
+  if (market_.heuristics && market_.acceptanceGuards &&
+      !passMarketAcceptanceGuards(previousPressureForIter, candidatePressure,
+                                  previousWaitForIter, candidateWait,
+                                  previousSolution_.utility <
+                                      solution_.utility)) {
+    marketGuardRejections++;
+    restoreSolutionFromPrevious();
     accepted = false;
     guardRejected = true;
     advanceTemperatureOnGuardReject();
-    PLOGD << "Rejecting invalid candidate before acceptance criteria\n";
+    PLOGD << "Rejecting this solution due to market acceptance guards\n";
   } else {
-    if (!candidateValid) {
-      PLOGD << "Invalid candidate forwarded to acceptance criteria\n";
-    }
-    candidatePressure =
-        market_.heuristics ? computeSolutionMarketPressure() : 0.0;
-    candidateWait = market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
-    if (market_.heuristics && !market_.updateOnAcceptedOnly &&
-        market_.updateFromCandidate) {
-      maybeUpdateMarketState(false, true);
-    }
-    if (market_.heuristics && market_.acceptanceGuards &&
-        !passMarketAcceptanceGuards(previousPressureForIter, candidatePressure,
-                                    previousWaitForIter, candidateWait,
-                                    previousSolution_.utility <
-                                        solution_.utility)) {
-      marketGuardRejections++;
-      iterationRollbackHintAgents_ =
-          buildRollbackAgentHints(rollbackBaseAgents);
-      restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
-      accepted = false;
-      guardRejected = true;
-      advanceTemperatureOnGuardReject();
-      PLOGD << "Rejecting this solution due to market acceptance guards\n";
+    if (acceptanceCriteria == "SA") {
+      accepted = simulatedAnnealing();
+    } else if (acceptanceCriteria == "TA") {
+      accepted = thresholdAcceptance();
+    } else if (acceptanceCriteria == "OBA") {
+      accepted = oldBachelorsAcceptance();
+    } else if (acceptanceCriteria == "GDA") {
+      accepted = greatDelugeAlgorithm();
     } else {
-      if (acceptanceFeasibilityFirstPrecedenceDebt_ &&
-          candidateValid && !previousValidForIter) {
-        acceptanceDiagnostics_.feasibilityFirstDecisions++;
-        acceptanceDiagnostics_.invalidToValidAccepted++;
-        accepted = true;
-        acceptedAsWorse = false;
-        PLOGD << "Feasibility-first acceptance: valid candidate accepted "
-                 "over invalid incumbent\n";
-      } else if (acceptanceFeasibilityFirstPrecedenceDebt_ &&
-                 !candidateValid && previousValidForIter) {
-        acceptanceDiagnostics_.feasibilityFirstDecisions++;
-        acceptanceDiagnostics_.validToInvalidCompared++;
-        double previousSpatialNorm = 0.0;
-        double previousDebtNorm = 0.0;
-        double previousSocNorm = 0.0;
-        double candidateSpatialNorm = 0.0;
-        double candidateDebtNorm = 0.0;
-        double candidateSocNorm = 0.0;
-
-        const double previousInvalidScore = computeInvalidAcceptanceScore(
-            previousValidationStatsForIter, previousSocForIter,
-            candidateValidationStats, proposedSocForIter,
-            &previousSpatialNorm, &previousDebtNorm, &previousSocNorm);
-        const double candidateInvalidScore = computeInvalidAcceptanceScore(
-            candidateValidationStats, proposedSocForIter,
-            previousValidationStatsForIter, previousSocForIter,
-            &candidateSpatialNorm, &candidateDebtNorm, &candidateSocNorm);
-        const double scoreDelta =
-            candidateInvalidScore - previousInvalidScore;
-        const bool candidateWorseInvalid = scoreDelta > 0.0;
-        double acceptanceTempBefore = temperature_;
-        if (acceptanceUseDedicatedInvalidTemperature_) {
-          ensureInvalidAcceptanceTemperatureInitialized(previousInvalidScore,
-                                                       candidateInvalidScore);
-          acceptanceTempBefore = invalidTemperature_;
-          accepted = acceptScoreWithCurrentCriterion(
-              candidateInvalidScore, previousInvalidScore, &invalidTemperature_,
-              &invalidInitialTemperature_, &invalidMaxTemperature_,
-              &invalidGreatDelugeDecay_);
-        } else {
-          accepted = acceptScoreWithCurrentCriterion(candidateInvalidScore,
-                                                     previousInvalidScore);
-        }
-        const double acceptanceTempAfter =
-            acceptanceUseDedicatedInvalidTemperature_ ? invalidTemperature_
-                                                      : temperature_;
-        acceptedAsWorse = candidateWorseInvalid;
-        acceptanceDiagnostics_.invalidScoreComparisons++;
-        acceptanceDiagnostics_.invalidScoreDeltaSum += scoreDelta;
-        acceptanceDiagnostics_.invalidScoreAbsDeltaSum +=
-            std::abs(scoreDelta);
-        acceptanceDiagnostics_.invalidAcceptanceTempBeforeSum +=
-            acceptanceTempBefore;
-        acceptanceDiagnostics_.invalidAcceptanceTempAfterSum +=
-            acceptanceTempAfter;
-        if (candidateWorseInvalid) {
-          acceptanceDiagnostics_.invalidScoreWorseComparisons++;
-        }
-        if (accepted) {
-          acceptanceDiagnostics_.invalidScoreAccepted++;
-          if (candidateWorseInvalid) {
-            acceptanceDiagnostics_.invalidScoreWorseAccepted++;
-          }
-          acceptanceDiagnostics_.validToInvalidAccepted++;
-          PLOGD << "Feasibility-first valid->invalid accepted by "
-                   "SA/TA/OBA/GDA (previous="
-                << previousInvalidScore
-                << ", candidate=" << candidateInvalidScore
-                << ", temp_before=" << acceptanceTempBefore
-                << ", temp_after=" << acceptanceTempAfter
-                << ", dedicated_temp="
-                << (acceptanceUseDedicatedInvalidTemperature_ ? "true"
-                                                              : "false")
-                << ")\n";
-        } else {
-          acceptanceDiagnostics_.invalidScoreRejected++;
-          acceptanceDiagnostics_.validToInvalidRejected++;
-          iterationRollbackHintAgents_ =
-              buildRollbackAgentHints(rollbackBaseAgents);
-          restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
-          PLOGD << "Feasibility-first valid->invalid rejected by "
-                   "SA/TA/OBA/GDA (previous="
-                << previousInvalidScore
-                << ", candidate=" << candidateInvalidScore
-                << ", temp_before=" << acceptanceTempBefore
-                << ", temp_after=" << acceptanceTempAfter
-                << ", dedicated_temp="
-                << (acceptanceUseDedicatedInvalidTemperature_ ? "true"
-                                                              : "false")
-                << ")\n";
-        }
-      } else if (acceptanceFeasibilityFirstPrecedenceDebt_ &&
-                 !candidateValid && !previousValidForIter) {
-        acceptanceDiagnostics_.feasibilityFirstDecisions++;
-        acceptanceDiagnostics_.invalidVsInvalidComparisons++;
-        double previousSpatialNorm = 0.0;
-        double previousDebtNorm = 0.0;
-        double previousSocNorm = 0.0;
-        double candidateSpatialNorm = 0.0;
-        double candidateDebtNorm = 0.0;
-        double candidateSocNorm = 0.0;
-
-        const double previousInvalidScore = computeInvalidAcceptanceScore(
-            previousValidationStatsForIter, previousSocForIter,
-            candidateValidationStats, proposedSocForIter,
-            &previousSpatialNorm, &previousDebtNorm, &previousSocNorm);
-        const double candidateInvalidScore = computeInvalidAcceptanceScore(
-            candidateValidationStats, proposedSocForIter,
-            previousValidationStatsForIter, previousSocForIter,
-            &candidateSpatialNorm, &candidateDebtNorm, &candidateSocNorm);
-
-        acceptanceDiagnostics_.previousInvalidScoreSum += previousInvalidScore;
-        acceptanceDiagnostics_.candidateInvalidScoreSum += candidateInvalidScore;
-        acceptanceDiagnostics_.previousSpatialNormSum += previousSpatialNorm;
-        acceptanceDiagnostics_.candidateSpatialNormSum += candidateSpatialNorm;
-        acceptanceDiagnostics_.previousPrecedenceDebtNormSum +=
-            previousDebtNorm;
-        acceptanceDiagnostics_.candidatePrecedenceDebtNormSum +=
-            candidateDebtNorm;
-        acceptanceDiagnostics_.previousSocNormSum += previousSocNorm;
-        acceptanceDiagnostics_.candidateSocNormSum += candidateSocNorm;
-
-        const double scoreDelta =
-            candidateInvalidScore - previousInvalidScore;
-        const bool candidateWorseInvalid = scoreDelta > 0.0;
-        double acceptanceTempBefore = temperature_;
-        if (acceptanceUseDedicatedInvalidTemperature_) {
-          ensureInvalidAcceptanceTemperatureInitialized(previousInvalidScore,
-                                                       candidateInvalidScore);
-          acceptanceTempBefore = invalidTemperature_;
-          accepted = acceptScoreWithCurrentCriterion(
-              candidateInvalidScore, previousInvalidScore, &invalidTemperature_,
-              &invalidInitialTemperature_, &invalidMaxTemperature_,
-              &invalidGreatDelugeDecay_);
-        } else {
-          accepted = acceptScoreWithCurrentCriterion(candidateInvalidScore,
-                                                     previousInvalidScore);
-        }
-        const double acceptanceTempAfter =
-            acceptanceUseDedicatedInvalidTemperature_ ? invalidTemperature_
-                                                      : temperature_;
-        acceptedAsWorse = candidateWorseInvalid;
-        acceptanceDiagnostics_.invalidScoreComparisons++;
-        acceptanceDiagnostics_.invalidScoreDeltaSum += scoreDelta;
-        acceptanceDiagnostics_.invalidScoreAbsDeltaSum +=
-            std::abs(scoreDelta);
-        acceptanceDiagnostics_.invalidAcceptanceTempBeforeSum +=
-            acceptanceTempBefore;
-        acceptanceDiagnostics_.invalidAcceptanceTempAfterSum +=
-            acceptanceTempAfter;
-        if (candidateWorseInvalid) {
-          acceptanceDiagnostics_.invalidScoreWorseComparisons++;
-        }
-        if (accepted) {
-          acceptanceDiagnostics_.invalidScoreAccepted++;
-          if (candidateWorseInvalid) {
-            acceptanceDiagnostics_.invalidScoreWorseAccepted++;
-          }
-          acceptanceDiagnostics_.invalidVsInvalidAccepted++;
-          PLOGD << "Feasibility-first invalid acceptance score: previous="
-                << previousInvalidScore
-                << ", candidate=" << candidateInvalidScore
-                << ", temp_before=" << acceptanceTempBefore
-                << ", temp_after=" << acceptanceTempAfter
-                << ", dedicated_temp="
-                << (acceptanceUseDedicatedInvalidTemperature_ ? "true"
-                                                              : "false")
-                << "\n";
-        } else {
-          acceptanceDiagnostics_.invalidScoreRejected++;
-          acceptanceDiagnostics_.invalidVsInvalidRejected++;
-          iterationRollbackHintAgents_ =
-              buildRollbackAgentHints(rollbackBaseAgents);
-          restoreSolutionFromPrevious(&iterationRollbackHintAgents_);
-          PLOGD << "Feasibility-first invalid rejection score: previous="
-                << previousInvalidScore
-                << ", candidate=" << candidateInvalidScore
-                << ", temp_before=" << acceptanceTempBefore
-                << ", temp_after=" << acceptanceTempAfter
-                << ", dedicated_temp="
-                << (acceptanceUseDedicatedInvalidTemperature_ ? "true"
-                                                              : "false")
-                << "\n";
-        }
-      } else {
-        if (acceptanceCriteria == "SA") {
-          accepted = simulatedAnnealing();
-        } else if (acceptanceCriteria == "TA") {
-          accepted = thresholdAcceptance();
-        } else if (acceptanceCriteria == "OBA") {
-          accepted = oldBachelorsAcceptance();
-        } else if (acceptanceCriteria == "GDA") {
-          accepted = greatDelugeAlgorithm();
-        } else {
-          PLOGE << "Unknown acceptance criteria: " << acceptanceCriteria
-                << "\n";
-          return false;
-        }
-        if (accepted) {
-          acceptedAsWorse = previousSolution_.utility < solution_.utility;
-        }
-      }
+      PLOGE << "Unknown acceptance criteria: " << acceptanceCriteria << "\n";
+      return false;
+    }
+    if (accepted) {
+      acceptedAsWorse = previousSolution_.utility < solution_.utility;
     }
   }
 

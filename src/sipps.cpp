@@ -78,7 +78,7 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
         successMismatch || signatureMismatch || validityMismatch;
 
     const bool canEmitParityLog =
-        plannerParityLogsEmitted_ < plannerParityMaxLogs_;
+        plannerParityLogsEmitted_ < kPlannerParityMaxLogs;
     if (hasMismatch && canEmitParityLog) {
       plannerParityLogsEmitted_++;
       string mismatchType;

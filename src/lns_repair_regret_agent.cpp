@@ -59,29 +59,13 @@ void LNS::computeRegretForTaskWithAgent(
   const bool useMarketShortlist =
       (repairHeuristic == "market_shortlist_regret");
   const bool useNormalizedWaitProxyInRegretShortlist =
-      (repairHeuristic == "regret") && regretShortlistUseNormalizedWaitProxy_;
+      (repairHeuristic == "regret");
   const bool useNormalizedSuccessorPressureInRegretShortlist =
-      (repairHeuristic == "regret") &&
-      regretShortlistUseNormalizedSuccessorPressure_;
+      (repairHeuristic == "regret");
   const bool collectShortlistDiagnostics =
       (repairHeuristic == "regret") && regretShortlistDiagnostics_;
   const int candidateCount = (int)allCandidatePositions.size();
-  const int adaptiveTopKLower = 1;
-  const int adaptiveTopKUpper =
-      std::max(adaptiveTopKLower,
-               std::min(candidateCount - 1,
-                        std::max(regretCandidateTopK_,
-                                 std::max(2, 2 * std::max(1, neighborSize_)))));
-  int shortlistTopK = regretCandidateTopK_;
-  if (adaptiveRegretTopK_ && regretCandidateTopK_ > 0 && candidateCount > 1) {
-    if (adaptiveRegretTopKCurrent_ <= 0) {
-      adaptiveRegretTopKCurrent_ = regretCandidateTopK_;
-    }
-    adaptiveRegretTopKCurrent_ = std::max(
-        adaptiveTopKLower,
-        std::min(adaptiveTopKUpper, adaptiveRegretTopKCurrent_));
-    shortlistTopK = adaptiveRegretTopKCurrent_;
-  }
+  const int shortlistTopK = regretCandidateTopK_;
   const bool shortlistActive =
       shortlistTopK > 0 && shortlistTopK < candidateCount;
 
@@ -89,35 +73,6 @@ void LNS::computeRegretForTaskWithAgent(
   if (shortlistActive) {
     regretEvalStatsCurrent_.shortlistAgentEvaluations++;
     regretEvalStatsTotal_.shortlistAgentEvaluations++;
-    if (adaptiveRegretTopK_) {
-      regretEvalStatsCurrent_.adaptiveTopKEvaluations++;
-      regretEvalStatsTotal_.adaptiveTopKEvaluations++;
-      regretEvalStatsCurrent_.adaptiveTopKUsedSum += shortlistTopK;
-      regretEvalStatsTotal_.adaptiveTopKUsedSum += shortlistTopK;
-      if (regretEvalStatsCurrent_.adaptiveTopKEvaluations == 1) {
-        regretEvalStatsCurrent_.adaptiveTopKUsedMin = shortlistTopK;
-        regretEvalStatsCurrent_.adaptiveTopKUsedMax = shortlistTopK;
-      } else {
-        regretEvalStatsCurrent_.adaptiveTopKUsedMin =
-            std::min(regretEvalStatsCurrent_.adaptiveTopKUsedMin,
-                     (int64_t)shortlistTopK);
-        regretEvalStatsCurrent_.adaptiveTopKUsedMax =
-            std::max(regretEvalStatsCurrent_.adaptiveTopKUsedMax,
-                     (int64_t)shortlistTopK);
-      }
-      if (regretEvalStatsTotal_.adaptiveTopKEvaluations == 1) {
-        regretEvalStatsTotal_.adaptiveTopKUsedMin = shortlistTopK;
-        regretEvalStatsTotal_.adaptiveTopKUsedMax = shortlistTopK;
-      } else {
-        regretEvalStatsTotal_.adaptiveTopKUsedMin =
-            std::min(regretEvalStatsTotal_.adaptiveTopKUsedMin,
-                     (int64_t)shortlistTopK);
-        regretEvalStatsTotal_.adaptiveTopKUsedMax =
-            std::max(regretEvalStatsTotal_.adaptiveTopKUsedMax,
-                     (int64_t)shortlistTopK);
-      }
-      adaptiveRegretTopKLastUsed_ = shortlistTopK;
-    }
 
     struct CandidateScore {
       double score = std::numeric_limits<double>::infinity();
@@ -166,7 +121,6 @@ void LNS::computeRegretForTaskWithAgent(
     struct ResolvedSuccessorSignal {
       int begin = -1;
       int depth = 1;
-      double weight = 1.0;
     };
     vector<ResolvedSuccessorSignal> successorSignals;
     if (task >= 0 && task < (int)staticSuccessors.size() &&
@@ -185,8 +139,6 @@ void LNS::computeRegretForTaskWithAgent(
           continue;
         }
         int successorBegin = -1;
-        bool successorBeginFromPrevious = false;
-
         // Prefer current workspace timing when successor is still assigned.
         const int workspaceSuccessorAgent =
             (successorTask >= 0 &&
@@ -209,36 +161,7 @@ void LNS::computeRegretForTaskWithAgent(
           }
         }
 
-        // If successor is pending-removed, recover timing from previousSolution_.
-        if (successorBegin < 0 &&
-            isPendingCommitState(lnsNeighborhood_, successorTask)) {
-          const int prevSuccessorAgent =
-              (successorTask >= 0 &&
-               successorTask < (int)previousSolution_.taskAgentMap.size())
-                  ? previousSolution_.taskAgentMap[successorTask]
-                  : UNASSIGNED;
-          if (prevSuccessorAgent != UNASSIGNED && prevSuccessorAgent >= 0 &&
-              prevSuccessorAgent < (int)previousSolution_.agents.size()) {
-            const int prevSuccessorPos =
-                previousSolution_.getLocalTaskIndex(prevSuccessorAgent,
-                                                    successorTask);
-            if (prevSuccessorPos != UNASSIGNED && prevSuccessorPos >= 0 &&
-                prevSuccessorPos <
-                    (int)previousSolution_.agents[prevSuccessorAgent]
-                        .taskPaths.size()) {
-              const auto& prevSuccessorPath =
-                  previousSolution_.agents[prevSuccessorAgent]
-                      .taskPaths[prevSuccessorPos];
-              if (!prevSuccessorPath.empty()) {
-                successorBegin = prevSuccessorPath.beginTime;
-                successorBeginFromPrevious = true;
-              }
-            }
-          }
-        }
-
-        if (successorBegin >= 0 &&
-            regretShortlistClampSuccessorToPrecedenceRelease_) {
+        if (successorBegin >= 0) {
           int successorRelease = 0;
           bool hasSuccessorRelease = false;
           auto consumePredecessorRelease = [&](int predecessorTask) {
@@ -266,27 +189,6 @@ void LNS::computeRegretForTaskWithAgent(
                 workspace.assignments(workspaceSuccessorAgent)
                                     [workspaceSuccessorPos - 1];
             consumePredecessorRelease(predecessorTask);
-          } else if (successorTask >= 0 &&
-                     successorTask < (int)previousSolution_.taskAgentMap.size()) {
-            const int previousSuccessorAgent =
-                previousSolution_.taskAgentMap[successorTask];
-            if (previousSuccessorAgent != UNASSIGNED &&
-                previousSuccessorAgent >= 0 &&
-                previousSuccessorAgent < (int)previousSolution_.agents.size()) {
-              const int previousSuccessorPos =
-                  previousSolution_.getLocalTaskIndex(previousSuccessorAgent,
-                                                      successorTask);
-              if (previousSuccessorPos > 0 &&
-                  previousSuccessorPos - 1 <
-                      (int)previousSolution_
-                          .agents[previousSuccessorAgent]
-                          .taskAssignments.size()) {
-                const int predecessorTask =
-                    previousSolution_.agents[previousSuccessorAgent]
-                        .taskAssignments[previousSuccessorPos - 1];
-                consumePredecessorRelease(predecessorTask);
-              }
-            }
           }
 
           if (hasSuccessorRelease && successorBegin < successorRelease) {
@@ -299,10 +201,7 @@ void LNS::computeRegretForTaskWithAgent(
 
         if (successorBegin >= 0) {
           successorSignals.push_back(
-              {successorBegin, staticSignal.depth, staticSignal.weight});
-          if (successorBeginFromPrevious) {
-            successorBeginFromPreviousCount++;
-          }
+              {successorBegin, staticSignal.depth});
           if (staticSignal.depth <= 1) {
             successorDepth1Signals++;
           } else {
@@ -333,6 +232,24 @@ void LNS::computeRegretForTaskWithAgent(
             successorDepthGt1Signals;
       }
     }
+    bool successorSignalsInformative = true;
+    if (needNormalizedSuccessorPressureScores) {
+      if (successorSignals.size() < 2) {
+        successorSignalsInformative = false;
+      } else {
+        int minBegin = std::numeric_limits<int>::max();
+        int maxBegin = std::numeric_limits<int>::min();
+        for (const auto& signal : successorSignals) {
+          minBegin = std::min(minBegin, signal.begin);
+          maxBegin = std::max(maxBegin, signal.begin);
+        }
+        if (maxBegin <= minBegin) {
+          successorSignalsInformative = false;
+        }
+      }
+    }
+    const bool useSuccessorPressureInThisEval =
+        needNormalizedSuccessorPressureScores && successorSignalsInformative;
     double repairPriceScale = 0.0;
     if (useMarketShortlist) {
       if (market_.repairNormalizeByObservedPrice) {
@@ -385,8 +302,11 @@ void LNS::computeRegretForTaskWithAgent(
         const double normalizedPrice =
             (repairPriceScale > 0.0) ? (vertexPrice / repairPriceScale)
                                      : vertexPrice;
+        // Under feasibility filtering, candidates are already at/after earliest
+        // release. Use lateness beyond release to retain a meaningful
+        // precedence signal for shortlist ranking.
         const int waitProxy =
-            max(0, regretPacket.earliestTimestep - estimatedArrival);
+            max(0, estimatedArrival - regretPacket.earliestTimestep);
         const double waitProxyBuckets =
             (market_.bucketDt > 0) ? (double)waitProxy / (double)market_.bucketDt
                                    : (double)waitProxy;
@@ -399,9 +319,9 @@ void LNS::computeRegretForTaskWithAgent(
         finiteScoreIndices.push_back((int)idx);
         if (needNormalizedWaitProxyScores && hasEstimatedArrival) {
           waitProxyScores[idx] =
-              (double)max(0, regretPacket.earliestTimestep - estimatedArrival);
+              (double)max(0, estimatedArrival - regretPacket.earliestTimestep);
         }
-        if (needNormalizedSuccessorPressureScores && hasEstimatedArrival) {
+        if (useSuccessorPressureInThisEval && hasEstimatedArrival) {
           double pressure = 0.0;
           double depth1Pressure = 0.0;
           double depthGt1Pressure = 0.0;
@@ -411,13 +331,12 @@ void LNS::computeRegretForTaskWithAgent(
             if (successorDelay <= 0) {
               continue;
             }
-            const double weightedDelay =
-                successorSignal.weight * (double)successorDelay;
-            pressure += weightedDelay;
+            const double delayContribution = (double)successorDelay;
+            pressure += delayContribution;
             if (successorSignal.depth <= 1) {
-              depth1Pressure += weightedDelay;
+              depth1Pressure += delayContribution;
             } else {
-              depthGt1Pressure += weightedDelay;
+              depthGt1Pressure += delayContribution;
             }
           }
           successorPressureScores[idx] = pressure;
@@ -438,13 +357,19 @@ void LNS::computeRegretForTaskWithAgent(
       normalizeSeriesByRobustScale(waitProxyScores, finiteScoreIndices,
                                    normalizedWaitProxyScores);
     }
-    if (needNormalizedSuccessorPressureScores) {
+    if (useSuccessorPressureInThisEval) {
       if (normalizedDistanceScores.empty()) {
         normalizeSeriesByRobustScale(rawScores, finiteScoreIndices,
                                      normalizedDistanceScores);
       }
       normalizeSeriesByRobustScale(successorPressureScores, finiteScoreIndices,
                                    normalizedSuccessorPressureScores);
+    } else if (needNormalizedSuccessorPressureScores) {
+      if (normalizedDistanceScores.empty()) {
+        normalizeSeriesByRobustScale(rawScores, finiteScoreIndices,
+                                     normalizedDistanceScores);
+      }
+      normalizedSuccessorPressureScores.assign(rawScores.size(), 0.0);
     }
     for (int idx : finiteScoreIndices) {
       if (!normalizedDistanceScores.empty()) {
@@ -454,7 +379,7 @@ void LNS::computeRegretForTaskWithAgent(
       if (needNormalizedWaitProxyScores) {
         combinedScores[idx] += normalizedWaitProxyScores[idx];
       }
-      if (needNormalizedSuccessorPressureScores) {
+      if (useSuccessorPressureInThisEval) {
         combinedScores[idx] += normalizedSuccessorPressureScores[idx];
         successorOnlyScores[idx] += normalizedSuccessorPressureScores[idx];
       }
@@ -467,7 +392,9 @@ void LNS::computeRegretForTaskWithAgent(
       rankedCombined = buildSortedCandidates(combinedScores);
     }
     if (needNormalizedSuccessorPressureScores) {
-      rankedSuccessorOnly = buildSortedCandidates(successorOnlyScores);
+      rankedSuccessorOnly = useSuccessorPressureInThisEval
+                                ? buildSortedCandidates(successorOnlyScores)
+                                : rankedRaw;
     }
 
     if (collectShortlistDiagnostics) {
@@ -693,11 +620,12 @@ void LNS::computeRegretForTaskWithAgent(
       }
     }
 
-    vector<CandidateScore> scored =
-        (useNormalizedWaitProxyInRegretShortlist ||
-         useNormalizedSuccessorPressureInRegretShortlist)
-            ? std::move(rankedCombined)
-            : std::move(rankedRaw);
+    const bool shortlistUsesCombinedScores =
+        useNormalizedWaitProxyInRegretShortlist ||
+        useSuccessorPressureInThisEval;
+    vector<CandidateScore> scored = shortlistUsesCombinedScores
+                                        ? std::move(rankedCombined)
+                                        : std::move(rankedRaw);
 
     candidatePositions.clear();
     candidatePositions.reserve(shortlistTopK);
@@ -741,7 +669,6 @@ void LNS::computeRegretForTaskWithAgent(
 
   // Correctness-first guard: if market shortlist mode misses all feasible
   // candidates for this agent, fall back to the remaining insertion positions.
-  bool shortlistFallbackRecovered = false;
   if (shortlistActive && useMarketShortlist && feasibleCandidatesForAgent == 0) {
     vector<char> inShortlist(assignmentsForAgent.size() + 1, 0);
     for (int pos : candidatePositions) {
@@ -763,37 +690,9 @@ void LNS::computeRegretForTaskWithAgent(
       regretEvalStatsTotal_.shortlistFallbackEvaluations++;
       evaluateCandidatePositions(fallbackPositions);
       if (feasibleCandidatesForAgent > 0) {
-        shortlistFallbackRecovered = true;
         regretEvalStatsCurrent_.shortlistFallbackRecovered++;
         regretEvalStatsTotal_.shortlistFallbackRecovered++;
       }
     }
   }
-
-  if (adaptiveRegretTopK_ && regretCandidateTopK_ > 0 && candidateCount > 1) {
-    int nextTopK = adaptiveRegretTopKCurrent_;
-    if (shortlistActive) {
-      if (feasibleCandidatesForAgent == 0) {
-        nextTopK = std::min(adaptiveTopKUpper, adaptiveRegretTopKCurrent_ + 1);
-        regretEvalStatsCurrent_.adaptiveTopKNoFeasibleSignals++;
-        regretEvalStatsTotal_.adaptiveTopKNoFeasibleSignals++;
-      } else if (shortlistFallbackRecovered) {
-        nextTopK = std::min(adaptiveTopKUpper, adaptiveRegretTopKCurrent_ + 1);
-        regretEvalStatsCurrent_.adaptiveTopKFallbackRecoverySignals++;
-        regretEvalStatsTotal_.adaptiveTopKFallbackRecoverySignals++;
-      } else if (feasibleCandidatesForAgent >= std::max(2, shortlistTopK / 2)) {
-        nextTopK = std::max(adaptiveTopKLower, adaptiveRegretTopKCurrent_ - 1);
-      }
-    }
-
-    if (nextTopK > adaptiveRegretTopKCurrent_) {
-      regretEvalStatsCurrent_.adaptiveTopKIncreases++;
-      regretEvalStatsTotal_.adaptiveTopKIncreases++;
-    } else if (nextTopK < adaptiveRegretTopKCurrent_) {
-      regretEvalStatsCurrent_.adaptiveTopKDecreases++;
-      regretEvalStatsTotal_.adaptiveTopKDecreases++;
-    }
-    adaptiveRegretTopKCurrent_ = nextTopK;
-  }
 }
-

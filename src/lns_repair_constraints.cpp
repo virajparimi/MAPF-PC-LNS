@@ -12,18 +12,27 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
                                TaskRegretPacket taskPacket, int taskLocation,
                                RegretWorkspace& workspace,
                                vector<pair<int, int>>* precedenceConstraints,
-                               bool findingNextTask) {
-  const AssignmentLookup assignmentLookup =
-      buildAssignmentLookup(workspace, instance_.getTasksNum());
+                               bool findingNextTask,
+                               const vector<int>* assignmentOwnerLookup,
+                               const vector<int>* assignmentPosLookup) {
+  const int taskCount = instance_.getTasksNum();
+  AssignmentLookup builtLookup;
+  const vector<int>* ownerLookup = assignmentOwnerLookup;
+  const vector<int>* posLookup = assignmentPosLookup;
+  if (ownerLookup == nullptr || posLookup == nullptr ||
+      (int)ownerLookup->size() != taskCount || (int)posLookup->size() != taskCount) {
+    builtLookup = buildAssignmentLookup(workspace, taskCount);
+    ownerLookup = &builtLookup.owner;
+    posLookup = &builtLookup.pos;
+  }
 
   constraintTable.goalLocation = taskLocation;
 
-  vector<vector<int>> ancestors(instance_.getTasksNum());
+  vector<vector<int>> ancestors(taskCount);
   if (precedenceConstraints != nullptr && !precedenceConstraints->empty()) {
     for (const auto& edge : *precedenceConstraints) {
       if (edge.first < 0 || edge.second < 0 ||
-          edge.first >= instance_.getTasksNum() ||
-          edge.second >= instance_.getTasksNum()) {
+          edge.first >= taskCount || edge.second >= taskCount) {
         continue;
       }
       ancestors[edge.second].push_back(edge.first);
@@ -37,8 +46,7 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
     for (int pos = 1; pos < (int)assignments.size(); pos++) {
       const int pred = assignments[pos - 1];
       const int succ = assignments[pos];
-      if (pred >= 0 && pred < instance_.getTasksNum() && succ >= 0 &&
-          succ < instance_.getTasksNum()) {
+      if (pred >= 0 && pred < taskCount && succ >= 0 && succ < taskCount) {
         ancestors[succ].push_back(pred);
       }
     }
@@ -50,12 +58,12 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
   }
 
   // Loop through the last task map to gather the actual final tasks of the agents
-  vector<bool> finalTasks(instance_.getTasksNum(), false);
+  vector<bool> finalTasks(taskCount, false);
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     const auto& assignments = workspace.assignments(agent);
     if ((int)assignments.size() > 0) {
       int lastTask = assignments.back();
-      if (lastTask < 0 || lastTask >= instance_.getTasksNum()) {
+      if (lastTask < 0 || lastTask >= taskCount) {
         PLOGE << "buildConstraintTable: invalid final task id " << lastTask
               << " for agent " << agent << "\n";
         return false;
@@ -112,13 +120,13 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
     }
 
     const int ancestorTaskLocalIndex =
-        (ancestorTask >= 0 && ancestorTask < instance_.getTasksNum())
-            ? assignmentLookup.pos[ancestorTask]
+        (ancestorTask >= 0 && ancestorTask < taskCount)
+            ? (*posLookup)[ancestorTask]
             : -1;
     if (ancestorTaskLocalIndex < 0 ||
         ancestorTaskLocalIndex >=
             (int)workspace.taskPaths(ancestorTaskAgent).size() ||
-        assignmentLookup.owner[ancestorTask] != ancestorTaskAgent) {
+        (*ownerLookup)[ancestorTask] != ancestorTaskAgent) {
       PLOGE << "buildConstraintTable: could not locate ancestor task "
             << ancestorTask << " for agent " << ancestorTaskAgent << "\n";
       return false;
@@ -140,44 +148,41 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
             1);
   }
 
-  // Optionally reserve occupancy for non-ancestor agents as well.
-  // This tightens repair planning against cross-agent collisions by treating
-  // all other agents as frozen while planning taskPacket.agent.
-  if (repairIncludeNonAncestorAgents_) {
-    vector<char> isAncestorTask(instance_.getTasksNum(), 0);
-    for (int task = 0; task < (int)ancestorsOfTask.size(); task++) {
-      if (ancestorsOfTask[task]) {
-        isAncestorTask[task] = 1;
-      }
+  // Reserve occupancy for non-ancestor agents as well. This tightens repair
+  // planning against cross-agent collisions by treating all other agents as
+  // frozen while planning taskPacket.agent.
+  vector<char> isAncestorTask(taskCount, 0);
+  for (int task = 0; task < (int)ancestorsOfTask.size(); task++) {
+    if (ancestorsOfTask[task]) {
+      isAncestorTask[task] = 1;
     }
-    for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-      if (agent == taskPacket.agent) {
+  }
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (agent == taskPacket.agent) {
+      continue;
+    }
+    const auto& assignments = workspace.assignments(agent);
+    const auto& paths = workspace.taskPaths(agent);
+    const int localCount = min((int)assignments.size(), (int)paths.size());
+    for (int localTask = 0; localTask < localCount; localTask++) {
+      const int task = assignments[localTask];
+      if (task < 0 || task >= taskCount) {
         continue;
       }
-      const auto& assignments = workspace.assignments(agent);
-      const auto& paths = workspace.taskPaths(agent);
-      const int localCount = min((int)assignments.size(), (int)paths.size());
-      for (int localTask = 0; localTask < localCount; localTask++) {
-        const int task = assignments[localTask];
-        if (task < 0 || task >= instance_.getTasksNum()) {
-          continue;
-        }
-        if (isAncestorTask[task]) {
-          continue;
-        }
-        if (assignmentLookup.owner[task] != agent ||
-            assignmentLookup.pos[task] != localTask) {
-          continue;
-        }
-        const auto& pathRef = paths[localTask];
-        if (pathRef.empty()) {
-          continue;
-        }
-        const bool isFinalTask = (localTask + 1 == (int)assignments.size());
-        reservePathWithGoalPolicy(constraintTable, pathRef, isFinalTask);
-        if (isFinalTask) {
-          reserveTerminalPathIfActive(constraintTable, agent);
-        }
+      if (isAncestorTask[task]) {
+        continue;
+      }
+      if ((*ownerLookup)[task] != agent || (*posLookup)[task] != localTask) {
+        continue;
+      }
+      const auto& pathRef = paths[localTask];
+      if (pathRef.empty()) {
+        continue;
+      }
+      const bool isFinalTask = (localTask + 1 == (int)assignments.size());
+      reservePathWithGoalPolicy(constraintTable, pathRef, isFinalTask);
+      if (isFinalTask) {
+        reserveTerminalPathIfActive(constraintTable, agent);
       }
     }
   }

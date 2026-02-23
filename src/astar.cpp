@@ -10,14 +10,17 @@ void SingleAgentSolver::computeHeuristics() {
   assert(locationToGlobalTask.size() <= instance.taskLocations_.size());
 
   for (size_t stage = 0; stage < numGoals; stage++) {
-    auto it = locationToGlobalTask.find(goalLocations[stage]);
-    if (it == locationToGlobalTask.end()) {
+    if (goalLocations[stage] < 0 || goalLocations[stage] >= instance.mapSize ||
+        instance.isObstacle(goalLocations[stage])) {
       PLOGE << "computeHeuristics: goal location " << goalLocations[stage]
-            << " is not present in task-location index\n";
+            << " is invalid\n";
       throw std::runtime_error(
-          "SingleAgentSolver::computeHeuristics: missing goal location");
+          "SingleAgentSolver::computeHeuristics: invalid goal location");
     }
-    heuristicTaskIdx[stage] = it->second;
+    auto it = locationToGlobalTask.find(goalLocations[stage]);
+    if (it != locationToGlobalTask.end()) {
+      heuristicTaskIdx[stage] = it->second;
+    }
   }
 
   // Landmark heuristic is a suffix-sum of distances between consecutive goals.
@@ -25,8 +28,8 @@ void SingleAgentSolver::computeHeuristics() {
     const size_t prevStage = stage - 1;
     const long long suffix =
         (long long)heuristicLandmarks[stage] +
-        (long long)instance.heuristics_[heuristicTaskIdx[stage]]
-                                   [goalLocations[prevStage]];
+        (long long)instance.getDistanceToGoal(goalLocations[stage],
+                                              goalLocations[prevStage]);
     if (suffix > std::numeric_limits<int>::max()) {
       heuristicLandmarks[prevStage] = std::numeric_limits<int>::max();
     } else if (suffix < std::numeric_limits<int>::min()) {

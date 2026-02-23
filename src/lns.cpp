@@ -149,21 +149,9 @@ void LNS::reservePathWithGoalPolicy(ConstraintTable& constraintTable,
     return;
   }
 
-  // Tail/reposition modes reserve the traversal but release the terminal goal
-  // after a bounded hold to avoid permanent bottlenecks.
+  // In reposition_true, service path occupancy ends at task completion and
+  // explicit terminalPath handles post-completion occupancy.
   constraintTable.addPath(path, false);
-  if (goalTailSteps_ <= 0) {
-    return;
-  }
-
-  const int holdStart = path.endTimeChecked() + 1;
-  if (holdStart >= MAX_TIMESTEP) {
-    return;
-  }
-  const int holdEnd = min(MAX_TIMESTEP, holdStart + goalTailSteps_);
-  if (holdEnd > holdStart) {
-    constraintTable.insert2CT(path.back().location, holdStart, holdEnd);
-  }
 }
 
 void LNS::reserveTerminalPathIfActive(ConstraintTable& constraintTable,
@@ -178,47 +166,9 @@ void LNS::reserveTerminalPathIfActive(ConstraintTable& constraintTable,
   if (!solution_.agents[agent].terminalPathActive || terminalPath.empty()) {
     return;
   }
-  const int serviceHorizon = computeActiveServiceHorizon();
-  const int cappedEndExclusive =
-      serviceHorizon + max(0, repositionReservationSlack_);
-  if (cappedEndExclusive <= terminalPath.beginTime) {
-    return;
-  }
-  if (terminalPath.endTimeChecked() < cappedEndExclusive) {
-    constraintTable.addPath(terminalPath, false);
-    return;
-  }
-
-  AgentTaskPath clippedTerminal;
-  clippedTerminal.beginTime = terminalPath.beginTime;
-  const int clippedSize =
-      min((int)terminalPath.size(), cappedEndExclusive - terminalPath.beginTime);
-  if (clippedSize <= 0) {
-    return;
-  }
-  clippedTerminal.path.insert(clippedTerminal.path.end(),
-                              terminalPath.path.begin(),
-                              terminalPath.path.begin() + clippedSize);
-  constraintTable.addPath(clippedTerminal, false);
-
-  // Hold the terminal end location through the capped horizon so CT occupancy
-  // matches validator semantics (agent remains at terminal endpoint).
-  const int holdStart = clippedTerminal.beginTime + (int)clippedTerminal.size();
-  if (holdStart < cappedEndExclusive) {
-    constraintTable.insert2CT(clippedTerminal.back().location, holdStart,
-                              cappedEndExclusive);
-  }
-}
-
-int LNS::computeActiveServiceHorizon() const {
-  int horizon = 0;
-  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    if (solution_.agents[agent].path.empty()) {
-      continue;
-    }
-    horizon = max(horizon, solution_.agents[agent].path.endTimeOrZero() + 1);
-  }
-  return horizon;
+  // Terminal reposition path is part of the active occupancy model; keep the
+  // final terminal location reserved to MAX_TIMESTEP for CT/validator parity.
+  constraintTable.addPath(terminalPath, true);
 }
 
 bool LNS::didAgentServicePathChange(int agent) const {
@@ -337,33 +287,30 @@ const vector<int>& LNS::getParkingCandidatesForGoal(int finalGoal) {
   }
 
   terminalRepositionStats_.candidateCacheMisses++;
-  vector<pair<int, int>> rankedCandidates;
-  rankedCandidates.reserve(instance_.getTaskLocationsRef().size());
-  unordered_set<int> seenLocations;
-  for (int location : instance_.getTaskLocationsRef()) {
-    if (location < 0 || location >= instance_.mapSize || location == finalGoal ||
-        instance_.isObstacle(location) || seenLocations.count(location) > 0) {
-      continue;
-    }
-    seenLocations.insert(location);
-    rankedCandidates.emplace_back(
-        instance_.getManhattanDistance(finalGoal, location), location);
-  }
-  std::sort(rankedCandidates.begin(), rankedCandidates.end(),
-            [](const pair<int, int>& lhs, const pair<int, int>& rhs) {
-              if (lhs.first == rhs.first) {
-                return lhs.second < rhs.second;
-              }
-              return lhs.first < rhs.first;
-            });
   vector<int> candidates;
-  const int maxCandidates = max(1, repositionMaxCandidates_);
-  candidates.reserve((size_t)maxCandidates);
-  for (const auto& [distance, location] : rankedCandidates) {
-    (void)distance;
-    candidates.push_back(location);
-    if ((int)candidates.size() >= maxCandidates) {
-      break;
+  if (finalGoal >= 0 && finalGoal < instance_.mapSize &&
+      !instance_.isObstacle(finalGoal)) {
+    // Enumerate all reachable free cells in nondecreasing shortest-path
+    // distance from finalGoal (BFS order).
+    vector<char> visited(instance_.mapSize, 0);
+    deque<int> frontier;
+    visited[finalGoal] = 1;
+    frontier.push_back(finalGoal);
+    candidates.reserve((size_t)max(0, instance_.mapSize - 1));
+    while (!frontier.empty()) {
+      const int current = frontier.front();
+      frontier.pop_front();
+      for (int next : instance_.getNeighbors(current)) {
+        if (next < 0 || next >= instance_.mapSize || visited[next] ||
+            instance_.isObstacle(next)) {
+          continue;
+        }
+        visited[next] = 1;
+        frontier.push_back(next);
+        if (next != finalGoal) {
+          candidates.push_back(next);
+        }
+      }
     }
   }
   auto inserted =
@@ -388,94 +335,10 @@ int LNS::cascadeTaskBudget() const {
   return max(factorBudget, offsetBudget);
 }
 
-vector<int> LNS::buildRollbackAgentHints(const vector<int>& baseAgents) const {
-  const int agentCount = instance_.getAgentNum();
-  vector<char> marked(agentCount, 0);
-  vector<int> result;
-  result.reserve(baseAgents.size() + (size_t)agentCount / 4 + 1);
-
-  auto markAgent = [&](int agent) {
-    if (agent < 0 || agent >= agentCount || marked[agent]) {
-      return;
-    }
-    marked[agent] = 1;
-    result.push_back(agent);
-  };
-
-  for (int agent : baseAgents) {
-    markAgent(agent);
-  }
-
-  // Cross-agent insertions can introduce touched agents outside the destroy
-  // closure; assignment drift is a robust signal for that case.
-  for (int agent = 0; agent < agentCount; agent++) {
-    if (solution_.agents[agent].taskAssignments !=
-        previousSolution_.agents[agent].taskAssignments) {
-      markAgent(agent);
-    }
-  }
-
-  return result;
-}
-
-void LNS::restoreSolutionFromPrevious(const vector<int>* agentHints) {
+void LNS::restoreSolutionFromPrevious() {
   solutionRestoreStats_.restoreCalls++;
-
-  auto fullRestore = [&]() {
-    solution_ = previousSolution_;
-    solutionRestoreStats_.fullRestores++;
-  };
-
-  if (!partialSolutionRestore_) {
-    fullRestore();
-    return;
-  }
-
-  if (agentHints == nullptr || agentHints->empty()) {
-    solutionRestoreStats_.partialRestoreFallbacks++;
-    fullRestore();
-    return;
-  }
-
-  if (solution_.agents.size() != previousSolution_.agents.size() ||
-      solution_.taskAgentMap.size() != previousSolution_.taskAgentMap.size()) {
-    solutionRestoreStats_.partialRestoreFallbacks++;
-    fullRestore();
-    return;
-  }
-
-  const int agentCount = instance_.getAgentNum();
-  vector<char> marked(agentCount, 0);
-  int touchedAgents = 0;
-  for (int agent : *agentHints) {
-    if (agent < 0 || agent >= agentCount || marked[agent]) {
-      continue;
-    }
-    marked[agent] = 1;
-    touchedAgents++;
-  }
-
-  if (touchedAgents == 0) {
-    solutionRestoreStats_.partialRestoreFallbacks++;
-    fullRestore();
-    return;
-  }
-
-  solution_.numOfTasks = previousSolution_.numOfTasks;
-  solution_.numOfAgents = previousSolution_.numOfAgents;
-  solution_.sumOfCosts = previousSolution_.sumOfCosts;
-  solution_.utility = previousSolution_.utility;
-  solution_.taskAgentMap = previousSolution_.taskAgentMap;
-
-  for (int agent = 0; agent < agentCount; agent++) {
-    if (!marked[agent]) {
-      continue;
-    }
-    solution_.agents[agent] = previousSolution_.agents[agent];
-  }
-
-  solutionRestoreStats_.partialRestores++;
-  solutionRestoreStats_.partialAgentsRestored += touchedAgents;
+  solution_ = previousSolution_;
+  solutionRestoreStats_.fullRestores++;
 }
 
 LNS::LNS(int numOfIterations, const Instance& instance,
@@ -497,102 +360,26 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   shawTemporalWeight_ = parameters.core.shawTemporalWeight;
   lnsConflictWeight_ = parameters.core.lnsConflictWeight;
   lnsCostWeight_ = parameters.core.lnsCostWeight;
-  rejectInvalidCandidates_ = parameters.core.rejectInvalidCandidates;
-  utilityUseConflictEventCount_ = parameters.core.utilityUseConflictEventCount;
-  acceptanceFeasibilityFirstPrecedenceDebt_ =
-      parameters.core.acceptanceFeasibilityFirstPrecedenceDebt;
-  acceptanceInvalidSpatialWeight_ =
-      parameters.core.acceptanceInvalidSpatialWeight;
-  acceptanceInvalidPrecedenceDebtWeight_ =
-      parameters.core.acceptanceInvalidPrecedenceDebtWeight;
-  acceptanceInvalidSocTieBreakWeight_ =
-      parameters.core.acceptanceInvalidSocTieBreakWeight;
-  acceptanceUseDedicatedInvalidTemperature_ =
-      parameters.core.acceptanceUseDedicatedInvalidTemperature;
-  acceptanceInvalidTemperatureScale_ =
-      parameters.core.acceptanceInvalidTemperatureScale;
-  acceptanceInvalidTemperatureFloor_ =
-      parameters.core.acceptanceInvalidTemperatureFloor;
-  if (!std::isfinite(acceptanceInvalidSpatialWeight_)) {
-    acceptanceInvalidSpatialWeight_ = 1.0;
-  }
-  if (!std::isfinite(acceptanceInvalidPrecedenceDebtWeight_)) {
-    acceptanceInvalidPrecedenceDebtWeight_ = 1.0;
-  }
-  if (!std::isfinite(acceptanceInvalidSocTieBreakWeight_)) {
-    acceptanceInvalidSocTieBreakWeight_ = 0.0;
-  }
-  if (!std::isfinite(acceptanceInvalidTemperatureScale_)) {
-    acceptanceInvalidTemperatureScale_ = 0.25;
-  }
-  if (!std::isfinite(acceptanceInvalidTemperatureFloor_)) {
-    acceptanceInvalidTemperatureFloor_ = 1e-3;
-  }
-  acceptanceInvalidSpatialWeight_ = max(0.0, acceptanceInvalidSpatialWeight_);
-  acceptanceInvalidPrecedenceDebtWeight_ =
-      max(0.0, acceptanceInvalidPrecedenceDebtWeight_);
-  acceptanceInvalidSocTieBreakWeight_ =
-      max(0.0, acceptanceInvalidSocTieBreakWeight_);
-  acceptanceInvalidTemperatureScale_ = max(1e-9, acceptanceInvalidTemperatureScale_);
-  acceptanceInvalidTemperatureFloor_ = max(1e-9, acceptanceInvalidTemperatureFloor_);
-  invalidTemperatureInitialized_ = false;
-  invalidTemperature_ = 0.0;
-  invalidInitialTemperature_ = 0.0;
-  invalidMaxTemperature_ = std::numeric_limits<double>::infinity();
-  invalidGreatDelugeDecay_ = 0.0;
-  if (acceptanceFeasibilityFirstPrecedenceDebt_ &&
-      acceptanceInvalidSpatialWeight_ == 0.0 &&
-      acceptanceInvalidPrecedenceDebtWeight_ == 0.0 &&
-      acceptanceInvalidSocTieBreakWeight_ == 0.0) {
-    PLOGW << "acceptanceFeasibilityFirstPrecedenceDebt enabled with all "
-             "invalid-score weights at 0; defaulting precedence-debt weight "
-             "to 1.0\n";
-    acceptanceInvalidPrecedenceDebtWeight_ = 1.0;
-  }
   initialSolutionStrategy = parameters.core.initialSolutionStrategy;
-  initialSolutionFallback = parameters.core.initialSolutionFallback;
   initialPortfolioTimeFraction_ =
       parameters.core.initialPortfolioTimeFraction;
-  initialPortfolioMinArmTimeSec_ =
-      parameters.core.initialPortfolioMinArmTimeSec;
-  initialPortfolioStopOnFirstFeasible_ =
-      parameters.core.initialPortfolioStopOnFirstFeasible;
   if (!std::isfinite(initialPortfolioTimeFraction_)) {
     initialPortfolioTimeFraction_ = 0.10;
   }
-  if (!std::isfinite(initialPortfolioMinArmTimeSec_)) {
-    initialPortfolioMinArmTimeSec_ = 1.0;
-  }
   initialPortfolioTimeFraction_ =
       min(1.0, max(0.0, initialPortfolioTimeFraction_));
-  initialPortfolioMinArmTimeSec_ = max(1e-6, initialPortfolioMinArmTimeSec_);
   initialSolutionRequested_ = initialSolutionStrategy;
   initialSolutionEffective_ = initialSolutionStrategy;
   initialSolutionFallbackUsed_ = false;
   initialSolutionFallbackReason_ = "none";
   goalOccupationMode_ = parameters.core.goalOccupationMode;
-  goalTailSteps_ = max(0, parameters.core.goalTailSteps);
-  repositionMaxCandidates_ = max(1, parameters.core.repositionMaxCandidates);
-  repositionDemandLookahead_ =
-      max(0, parameters.core.repositionDemandLookahead);
-  repositionReservationSlack_ =
-      max(0, parameters.core.repositionReservationSlack);
-  greedySegmentDiagnostics_ = parameters.core.greedySegmentDiagnostics;
-  greedySegmentDiagnosticsTopK_ =
-      max(1, parameters.core.greedySegmentDiagnosticsTopK);
   terminalRepositionStats_.reset();
   parkingCandidatesCache_.clear();
-  if (goalOccupationMode_ != "stay" && goalOccupationMode_ != "tail" &&
-      goalOccupationMode_ != "reposition" &&
+  if (goalOccupationMode_ != "stay" &&
       goalOccupationMode_ != "reposition_true") {
     PLOGW << "Unknown goalOccupationMode '" << goalOccupationMode_
-          << "'; defaulting to 'stay'\n";
-    goalOccupationMode_ = "stay";
-  }
-  if (goalOccupationMode_ == "reposition" && goalTailSteps_ <= 0) {
-    goalTailSteps_ = 1;
-    PLOGW << "goalOccupationMode='reposition' currently uses finite tail "
-             "release; applying goalTailSteps=1 by default.\n";
+          << "'; defaulting to 'reposition_true'\n";
+    goalOccupationMode_ = "reposition_true";
   }
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
@@ -605,43 +392,17 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   }
   regretType = parameters.core.regretType;
   regretCandidateTopK_ = std::max(0, parameters.core.regretCandidateTopK);
-  adaptiveRegretTopK_ = parameters.core.adaptiveRegretTopK;
-  if (adaptiveRegretTopK_ && regretCandidateTopK_ <= 0) {
-    PLOGW << "adaptiveRegretTopK requires regretCandidateTopK > 0; disabling adaptive regret Top-K\n";
-    adaptiveRegretTopK_ = false;
-  }
-  adaptiveRegretTopKCurrent_ = regretCandidateTopK_;
-  adaptiveRegretTopKLastUsed_ = adaptiveRegretTopKCurrent_;
-  regretShortlistUseNormalizedWaitProxy_ =
-      parameters.core.regretShortlistUseNormalizedWaitProxy;
-  regretShortlistUseNormalizedSuccessorPressure_ =
-      parameters.core.regretShortlistUseNormalizedSuccessorPressure;
-  regretShortlistClampSuccessorToPrecedenceRelease_ =
-      parameters.core.regretShortlistClampSuccessorToPrecedenceRelease;
-  regretShortlistUseDescendantWeightedSuccessorPressure_ =
-      parameters.core.regretShortlistUseDescendantWeightedSuccessorPressure;
-  regretShortlistSuccessorPressureDepthDecay_ =
-      parameters.core.regretShortlistSuccessorPressureDepthDecay;
-  regretShortlistSuccessorPressureMaxDepth_ =
-      std::max(0, parameters.core.regretShortlistSuccessorPressureMaxDepth);
   regretShortlistDiagnostics_ = parameters.core.regretShortlistDiagnostics;
-  if (!std::isfinite(regretShortlistSuccessorPressureDepthDecay_)) {
-    regretShortlistSuccessorPressureDepthDecay_ = 0.5;
-  }
-  regretShortlistSuccessorPressureDepthDecay_ =
-      min(1.0, max(0.0, regretShortlistSuccessorPressureDepthDecay_));
   buildSuccessorPressureStaticSignals();
   maxCascadeFactor_ = parameters.core.maxCascadeFactor;
   if (!std::isfinite(maxCascadeFactor_)) {
-    maxCascadeFactor_ = 3.0;
+    maxCascadeFactor_ = 0.0;
   }
   maxCascadeFactor_ = max(0.0, maxCascadeFactor_);
   maxCascadeTasks_ = std::max(0, parameters.core.maxCascadeTasks);
   adaptiveCascadeBudget_ = parameters.core.adaptiveCascadeBudget;
   adaptiveCascadeBudgetCurrent_ = cascadeTaskBudget();
   adaptiveCascadeBudgetLastUsed_ = adaptiveCascadeBudgetCurrent_;
-  repairIncludeNonAncestorAgents_ =
-      parameters.core.repairIncludeNonAncestorAgents;
   alnsEnablePrecedenceAwareDestroy_ =
       parameters.core.alnsEnablePrecedenceAwareDestroy;
   if (parameters.lowLevel.planner == "sipps") {
@@ -651,10 +412,6 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   }
   lowLevelSegmentTimeout_ = max(0.0, parameters.lowLevel.segmentTimeout);
   plannerParityCheck_ = parameters.lowLevel.parityCheck;
-  plannerParityMaxLogs_ = parameters.lowLevel.parityMaxLogs;
-  mlastarIncrementalFocalRefresh_ =
-      parameters.lowLevel.mlastarIncrementalFocalRefresh;
-  partialSolutionRestore_ = parameters.core.partialSolutionRestore;
   market_.heuristics = parameters.market.heuristics;
   market_.bucketDt = max(1, parameters.market.bucketDt);
   market_.vertexBucketCapacity = max(1, parameters.market.vertexBucketCapacity);
@@ -737,9 +494,12 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   regretStamp_.assign(instance_.getTasksNum(), 0);
   regretBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
   regretSecondBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
+  regretCandidateAgents_.assign(instance_.getTasksNum(), {});
 }
 
 void LNS::buildSuccessorPressureStaticSignals() {
+  // Fixed behavior: always use all precedence descendants for successor
+  // pressure, with unweighted contributions and no depth cap.
   const int taskCount = instance_.getTasksNum();
   successorPressureStaticSignalsByTask_.assign(taskCount, {});
   const auto& successors = instance_.getSuccessorsRef();
@@ -747,17 +507,6 @@ void LNS::buildSuccessorPressureStaticSignals() {
   for (int task = 0; task < taskCount; task++) {
     auto& signals = successorPressureStaticSignalsByTask_[task];
     if (task < 0 || task >= (int)successors.size()) {
-      continue;
-    }
-
-    if (!regretShortlistUseDescendantWeightedSuccessorPressure_) {
-      signals.reserve(successors[task].size());
-      for (int successor : successors[task]) {
-        if (successor < 0 || successor >= taskCount) {
-          continue;
-        }
-        signals.push_back({successor, 1, 1.0});
-      }
       continue;
     }
 
@@ -780,10 +529,6 @@ void LNS::buildSuccessorPressureStaticSignals() {
       if (currentDepth <= 0) {
         continue;
       }
-      if (regretShortlistSuccessorPressureMaxDepth_ > 0 &&
-          currentDepth >= regretShortlistSuccessorPressureMaxDepth_) {
-        continue;
-      }
       if (current < 0 || current >= (int)successors.size()) {
         continue;
       }
@@ -792,10 +537,6 @@ void LNS::buildSuccessorPressureStaticSignals() {
           continue;
         }
         const int candidateDepth = currentDepth + 1;
-        if (regretShortlistSuccessorPressureMaxDepth_ > 0 &&
-            candidateDepth > regretShortlistSuccessorPressureMaxDepth_) {
-          continue;
-        }
         if (minDepth[next] == -1 || candidateDepth < minDepth[next]) {
           minDepth[next] = candidateDepth;
           frontier.push_back(next);
@@ -808,13 +549,7 @@ void LNS::buildSuccessorPressureStaticSignals() {
       if (depth <= 0) {
         continue;
       }
-      const double weight =
-          std::pow(regretShortlistSuccessorPressureDepthDecay_,
-                   static_cast<double>(depth - 1));
-      if (weight <= 0.0) {
-        continue;
-      }
-      signals.push_back({descendant, depth, weight});
+      signals.push_back({descendant, depth});
     }
   }
 }
@@ -824,12 +559,12 @@ std::shared_ptr<SingleAgentSolver> LNS::createSharedPlanner(int agent) const {
   switch (lowLevelPlannerType_) {
     case LowLevelPlannerType::sipps:
       planner = std::make_shared<MultiLabelSIPPS>(
-          instance_, agent, plannerParityCheck_, plannerParityMaxLogs_);
+          instance_, agent, plannerParityCheck_);
       break;
     case LowLevelPlannerType::mlastar:
     default:
       planner = std::make_shared<MultiLabelSpaceTimeAStar>(
-          instance_, agent, true, mlastarIncrementalFocalRefresh_);
+          instance_, agent, true, true);
       break;
   }
   planner->setSegmentTimeout(lowLevelSegmentTimeout_);
@@ -842,15 +577,14 @@ std::unique_ptr<SingleAgentSolver> LNS::createLocalPlanner(int agent) const {
     case LowLevelPlannerType::sipps:
       // Local repair planners always set explicit goals before search.
       planner = std::make_unique<MultiLabelSIPPS>(
-          instance_, agent, plannerParityCheck_, plannerParityMaxLogs_, false);
+          instance_, agent, plannerParityCheck_, false);
       break;
     case LowLevelPlannerType::mlastar:
     default:
       planner = std::make_unique<MultiLabelSpaceTimeAStar>(
-          instance_, agent, false, mlastarIncrementalFocalRefresh_);
+          instance_, agent, false, true);
       break;
   }
   planner->setSegmentTimeout(lowLevelSegmentTimeout_);
   return planner;
 }
-

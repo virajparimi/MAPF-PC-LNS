@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <numeric>
@@ -67,6 +68,40 @@ vector<int> LNS::computeCurrentLastTaskPerAgent() const {
   return lastTasks;
 }
 
+vector<uint64_t> LNS::computeCurrentAgentScheduleSignatures() const {
+  vector<uint64_t> signatures(instance_.getAgentNum(), 0);
+  auto mixHash = [](uint64_t seed, uint64_t value) {
+    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    return seed;
+  };
+
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    uint64_t sig = 1469598103934665603ULL;
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    const auto& taskPaths = solution_.agents[agent].taskPaths;
+    sig = mixHash(sig, (uint64_t)assignments.size());
+    for (int task : assignments) {
+      sig = mixHash(sig, (uint64_t)(task + 3));
+    }
+    sig = mixHash(sig, (uint64_t)taskPaths.size());
+    for (const auto& segment : taskPaths) {
+      sig = mixHash(sig, (uint64_t)(segment.beginTime + 17));
+      sig = mixHash(sig, (uint64_t)segment.size());
+      for (const auto& entry : segment.path) {
+        const uint64_t packed =
+            ((uint64_t)(entry.location + 2) << 1) | (entry.isGoal ? 1ULL : 0ULL);
+        sig = mixHash(sig, packed);
+      }
+      sig = mixHash(sig, (uint64_t)segment.timeStamps.size());
+      for (int ts : segment.timeStamps) {
+        sig = mixHash(sig, (uint64_t)(ts + 11));
+      }
+    }
+    signatures[agent] = sig;
+  }
+  return signatures;
+}
+
 bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
   if (runtimeBudgetExhausted()) {
     return false;
@@ -115,10 +150,10 @@ std::optional<Regret> LNS::popNextValidRegret() {
   return std::nullopt;
 }
 
-vector<int> LNS::computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
-                                             const vector<int>& endTimesAfter,
-                                             const vector<int>& lastTaskBefore,
-                                             const vector<int>& lastTaskAfter) {
+vector<int> LNS::computeDirtyTasksAfterCommit(
+    const vector<int>& endTimesBefore, const vector<int>& endTimesAfter,
+    const vector<uint64_t>& agentSignaturesBefore,
+    const vector<uint64_t>& agentSignaturesAfter) {
   vector<int> changedTasks;
   changedTasks.reserve(instance_.getTasksNum());
   for (int task = 0; task < instance_.getTasksNum(); task++) {
@@ -137,26 +172,34 @@ vector<int> LNS::computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
   incrementalRegretStatsTotal_.changedMax =
       max(incrementalRegretStatsTotal_.changedMax, (int64_t)changedTasks.size());
 
-  vector<bool> affectedAgents(instance_.getAgentNum(), false);
+  vector<char> changedAgents(instance_.getAgentNum(), 0);
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    if (lastTaskBefore[agent] != lastTaskAfter[agent]) {
-      affectedAgents[agent] = true;
-    }
-  }
-  for (int task : changedTasks) {
-    const int agent =
-        (task >= 0 && task < (int)solution_.taskAgentMap.size())
-            ? solution_.taskAgentMap[task]
-            : UNASSIGNED;
-    if (agent == UNASSIGNED) {
+    if (agent >= (int)agentSignaturesBefore.size() ||
+        agent >= (int)agentSignaturesAfter.size()) {
+      changedAgents[agent] = 1;
       continue;
     }
-    if (agent >= 0 && agent < instance_.getAgentNum()) {
-      affectedAgents[agent] = true;
+    if (agentSignaturesBefore[agent] != agentSignaturesAfter[agent]) {
+      changedAgents[agent] = 1;
     }
   }
+  int64_t changedAgentCount = 0;
+  for (char v : changedAgents) {
+    if (v) {
+      changedAgentCount++;
+    }
+  }
+  incrementalRegretStatsCurrent_.changedAgentsSum += changedAgentCount;
+  incrementalRegretStatsTotal_.changedAgentsSum += changedAgentCount;
+  incrementalRegretStatsCurrent_.changedAgentsMax =
+      max(incrementalRegretStatsCurrent_.changedAgentsMax, changedAgentCount);
+  incrementalRegretStatsTotal_.changedAgentsMax =
+      max(incrementalRegretStatsTotal_.changedAgentsMax, changedAgentCount);
 
-  vector<bool> isDirty(instance_.getTasksNum(), false);
+  vector<char> isDirty(instance_.getTasksNum(), 0);
+  vector<char> dirtyFromDescendants(instance_.getTasksNum(), 0);
+  vector<char> dirtyFromCandidateAgents(instance_.getTasksNum(), 0);
+  vector<char> dirtyFromAncestors(instance_.getTasksNum(), 0);
 
   const auto& successors = instance_.getSuccessorsRef();
   std::vector<int> stack;
@@ -170,12 +213,13 @@ vector<int> LNS::computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
     if (current < 0 || current >= instance_.getTasksNum()) {
       continue;
     }
-    if (isDirty[current]) {
+    if (dirtyFromDescendants[current]) {
       continue;
     }
-    isDirty[current] = true;
+    dirtyFromDescendants[current] = 1;
+    isDirty[current] = 1;
     for (int succ : successors[current]) {
-      if (!isDirty[succ]) {
+      if (!dirtyFromDescendants[succ]) {
         stack.push_back(succ);
       }
     }
@@ -184,20 +228,90 @@ vector<int> LNS::computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
   if (incrementalRegretMode_ == IncrementalRegretMode::descendants_and_agent) {
     for (const auto& [_, conflict] : lnsNeighborhood_.removedTasks) {
       const int task = conflict.task;
-      const int bestAgent = regretBestOption_[task].first;
-      const int secondAgent = regretSecondBestOption_[task].first;
-      if ((bestAgent != UNASSIGNED && affectedAgents[bestAgent]) ||
-          (secondAgent != UNASSIGNED && affectedAgents[secondAgent])) {
-        isDirty[task] = true;
+      if (task < 0 || task >= instance_.getTasksNum()) {
+        continue;
+      }
+      bool touchesChangedAgent = false;
+      if (task >= 0 && task < (int)regretCandidateAgents_.size()) {
+        for (int candidateAgent : regretCandidateAgents_[task]) {
+          if (candidateAgent >= 0 && candidateAgent < instance_.getAgentNum() &&
+              changedAgents[candidateAgent]) {
+            touchesChangedAgent = true;
+            break;
+          }
+        }
+      }
+      if (!touchesChangedAgent) {
+        const int bestAgent =
+            (task >= 0 && task < (int)regretBestOption_.size())
+                ? regretBestOption_[task].first
+                : UNASSIGNED;
+        const int secondAgent =
+            (task >= 0 && task < (int)regretSecondBestOption_.size())
+                ? regretSecondBestOption_[task].first
+                : UNASSIGNED;
+        if ((bestAgent != UNASSIGNED && bestAgent < instance_.getAgentNum() &&
+             changedAgents[bestAgent]) ||
+            (secondAgent != UNASSIGNED &&
+             secondAgent < instance_.getAgentNum() &&
+             changedAgents[secondAgent])) {
+          touchesChangedAgent = true;
+        }
+      }
+      if (touchesChangedAgent) {
+        dirtyFromCandidateAgents[task] = 1;
+        isDirty[task] = 1;
+      }
+    }
+  }
+
+  const bool precedencePressureActive = (repairHeuristic == "regret");
+  if (precedencePressureActive) {
+    const auto& ancestors = instance_.getAncestorsRef();
+    stack.clear();
+    for (int t : changedTasks) {
+      stack.push_back(t);
+    }
+    while (!stack.empty()) {
+      const int current = stack.back();
+      stack.pop_back();
+      if (current < 0 || current >= instance_.getTasksNum()) {
+        continue;
+      }
+      if (dirtyFromAncestors[current]) {
+        continue;
+      }
+      dirtyFromAncestors[current] = 1;
+      isDirty[current] = 1;
+      for (int pred : ancestors[current]) {
+        if (!dirtyFromAncestors[pred]) {
+          stack.push_back(pred);
+        }
       }
     }
   }
 
   vector<int> dirtyTasks;
   dirtyTasks.reserve(lnsNeighborhood_.removedTasks.size());
+  int64_t descendantHits = 0;
+  int64_t candidateAgentHits = 0;
+  int64_t ancestorHits = 0;
   for (const auto& [_, conflict] : lnsNeighborhood_.removedTasks) {
-    if (isDirty[conflict.task]) {
-      dirtyTasks.push_back(conflict.task);
+    const int task = conflict.task;
+    if (task < 0 || task >= instance_.getTasksNum()) {
+      continue;
+    }
+    if (dirtyFromDescendants[task]) {
+      descendantHits++;
+    }
+    if (dirtyFromCandidateAgents[task]) {
+      candidateAgentHits++;
+    }
+    if (dirtyFromAncestors[task]) {
+      ancestorHits++;
+    }
+    if (isDirty[task]) {
+      dirtyTasks.push_back(task);
     }
   }
   incrementalRegretStatsCurrent_.dirtySum += (int64_t)dirtyTasks.size();
@@ -206,6 +320,12 @@ vector<int> LNS::computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
       max(incrementalRegretStatsCurrent_.dirtyMax, (int64_t)dirtyTasks.size());
   incrementalRegretStatsTotal_.dirtyMax =
       max(incrementalRegretStatsTotal_.dirtyMax, (int64_t)dirtyTasks.size());
+  incrementalRegretStatsCurrent_.dirtyByDescendants += descendantHits;
+  incrementalRegretStatsTotal_.dirtyByDescendants += descendantHits;
+  incrementalRegretStatsCurrent_.dirtyByCandidateAgent += candidateAgentHits;
+  incrementalRegretStatsTotal_.dirtyByCandidateAgent += candidateAgentHits;
+  incrementalRegretStatsCurrent_.dirtyByAncestors += ancestorHits;
+  incrementalRegretStatsTotal_.dirtyByAncestors += ancestorHits;
   return dirtyTasks;
 }
 
@@ -330,6 +450,8 @@ bool LNS::computeRegretForTask(
                                          assignmentsView[localTask]);
     }
   }
+  const AssignmentLookup assignmentLookup =
+      buildAssignmentLookup(workspace, instance_.getTasksNum());
 
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     if (runtimeBudgetExhausted()) {
@@ -405,7 +527,8 @@ bool LNS::computeRegretForTask(
                                      -1};
       if (!buildConstraintTable(constraintTable, taskPacket,
                                 goalLocations[localTask], workspace,
-                                &precedenceConstraints)) {
+                                &precedenceConstraints, false,
+                                &assignmentLookup.owner, &assignmentLookup.pos)) {
         PLOGE << "computeRegretForTask: failed to build constraint table for "
               << "agent " << agent << ", task " << assignments[localTask]
               << " at position " << localTask << "\n";
@@ -455,8 +578,6 @@ bool LNS::computeRegretForTask(
   if (task >= 0 && task < (int)ancestorsOfTask.size()) {
     ancestorsOfTask[task] = 0;
   }
-  const AssignmentLookup assignmentLookup =
-      buildAssignmentLookup(workspace, instance_.getTasksNum());
 
   for (int ancestorTask = 0; ancestorTask < (int)ancestorsOfTask.size();
        ancestorTask++) {
@@ -526,16 +647,25 @@ bool LNS::computeRegretForTask(
     baselineMetrics.valid = true;
   }
 
+  vector<int> candidateAgents;
+  candidateAgents.reserve(instance_.getAgentNum());
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     if (runtimeBudgetExhausted()) {
       return false;
     }
 
     TaskRegretPacket regretPacket = {task, agent, -1, earliestTimestep};
+    const auto beforeOptions = serviceTimes.size();
     computeRegretForTaskWithAgent(regretPacket, workspace,
                                   &precedenceConstraints,
                                   baselineMetrics,
                                   &serviceTimes);
+    if (serviceTimes.size() > beforeOptions) {
+      candidateAgents.push_back(agent);
+    }
+  }
+  if (task >= 0 && task < (int)regretCandidateAgents_.size()) {
+    regretCandidateAgents_[task] = std::move(candidateAgents);
   }
 
   if (serviceTimes.empty()) {
@@ -578,19 +708,28 @@ bool LNS::computeRegretForTask(
 }
 
 int LNS::computeTaskPrecedenceWaitFromWorkspace(
-    int task, int taskLocation, const RegretWorkspace& workspace) const {
+    int task, int taskLocation, const RegretWorkspace& workspace,
+    const vector<int>* assignmentOwnerLookup,
+    const vector<int>* assignmentPosLookup) const {
   if (task < 0 || task >= instance_.getTasksNum()) {
     return 0;
   }
 
-  const AssignmentLookup stateIndex =
-      buildAssignmentLookup(workspace, instance_.getTasksNum());
+  const int taskCount = instance_.getTasksNum();
+  AssignmentLookup builtLookup;
+  const vector<int>* ownerLookup = assignmentOwnerLookup;
+  const vector<int>* posLookup = assignmentPosLookup;
+  if (ownerLookup == nullptr || posLookup == nullptr ||
+      (int)ownerLookup->size() != taskCount || (int)posLookup->size() != taskCount) {
+    builtLookup = buildAssignmentLookup(workspace, taskCount);
+    ownerLookup = &builtLookup.owner;
+    posLookup = &builtLookup.pos;
+  }
   const int taskAgent =
-      (task >= 0 && task < (int)stateIndex.owner.size()) ? stateIndex.owner[task]
-                                                          : UNASSIGNED;
+      (task >= 0 && task < (int)ownerLookup->size()) ? (*ownerLookup)[task]
+                                                      : UNASSIGNED;
   const int taskPos =
-      (task >= 0 && task < (int)stateIndex.pos.size()) ? stateIndex.pos[task]
-                                                        : -1;
+      (task >= 0 && task < (int)posLookup->size()) ? (*posLookup)[task] : -1;
   if (taskAgent == UNASSIGNED || taskPos < 0 ||
       taskPos >= (int)workspace.taskPaths(taskAgent).size()) {
     return 0;
@@ -610,18 +749,17 @@ int LNS::computeTaskPrecedenceWaitFromWorkspace(
   }
 
   int release = 0;
-  const int taskCount = instance_.getTasksNum();
   vector<char> seenPredecessor(taskCount, 0);
   auto consumePredecessor = [&](int pred) {
     if (pred < 0 || pred >= taskCount || seenPredecessor[pred]) {
       return;
     }
     seenPredecessor[pred] = 1;
-    const int predAgent = (pred >= 0 && pred < (int)stateIndex.owner.size())
-                              ? stateIndex.owner[pred]
+    const int predAgent = (pred >= 0 && pred < (int)ownerLookup->size())
+                              ? (*ownerLookup)[pred]
                               : UNASSIGNED;
-    const int predPos = (pred >= 0 && pred < (int)stateIndex.pos.size())
-                            ? stateIndex.pos[pred]
+    const int predPos = (pred >= 0 && pred < (int)posLookup->size())
+                            ? (*posLookup)[pred]
                             : -1;
     if (predAgent != UNASSIGNED && predPos >= 0 &&
         predPos < (int)workspace.taskPaths(predAgent).size() &&
@@ -644,4 +782,3 @@ int LNS::computeTaskPrecedenceWaitFromWorkspace(
 
   return max(0, release - arrive);
 }
-

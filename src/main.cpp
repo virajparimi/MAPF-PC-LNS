@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cmath>
+#include <algorithm>
 #include <boost/program_options.hpp>
 #include "common.hpp"
 #include "instance.hpp"
@@ -34,52 +35,23 @@ int main(int argc, char** argv) {
                      "Number of agents to plan for");
   desc.add_options()("taskNum,l", po::value<int>()->default_value(0),
                      "Number of tasks to plan for");
-  desc.add_options()("neighborSize,n", po::value<int>()->default_value(10),
-                     "Size of the neighborhood");
+  desc.add_options()(
+      "neighborSize,n", po::value<int>()->default_value(0),
+      "Size of the neighborhood (0 = adaptive formula based on agents/tasks/precedence)");
   desc.add_options()("maxIterations,i", po::value<int>()->default_value(0),
                      "Maximum number of iterations");
   desc.add_options()(
       "regretCandidateTopK",
-      po::value<int>()->default_value(0),
+      po::value<int>()->default_value(8),
       "Top-K insertion positions per (task,agent) during regret evaluation "
       "(0 = evaluate all positions)");
-  desc.add_options()(
-      "adaptiveRegretTopK",
-      po::value<bool>()->default_value(false),
-      "Enable adaptive regret shortlist Top-K (requires regretCandidateTopK > 0)");
-  desc.add_options()(
-      "regretShortlistUseNormalizedWaitProxy",
-      po::value<bool>()->default_value(false),
-      "For repairHeuristic='regret' shortlist mode, add normalized wait-proxy "
-      "to shortlist ranking");
-  desc.add_options()(
-      "regretShortlistUseNormalizedSuccessorPressure",
-      po::value<bool>()->default_value(false),
-      "For repairHeuristic='regret' shortlist mode, add normalized successor-pressure "
-      "to shortlist ranking");
-  desc.add_options()(
-      "regretShortlistClampSuccessorToPrecedenceRelease",
-      po::value<bool>()->default_value(true),
-      "Clamp successor-pressure successor timing estimates to precedence release lower bounds");
-  desc.add_options()(
-      "regretShortlistUseDescendantWeightedSuccessorPressure",
-      po::value<bool>()->default_value(false),
-      "Use descendant-weighted successor-pressure (depth-decayed over precedence descendants)");
-  desc.add_options()(
-      "regretShortlistSuccessorPressureDepthDecay",
-      po::value<double>()->default_value(0.5),
-      "Depth-decay factor for descendant-weighted successor-pressure, weight(d)=decay^(d-1)");
-  desc.add_options()(
-      "regretShortlistSuccessorPressureMaxDepth",
-      po::value<int>()->default_value(0),
-      "Max descendant depth used in descendant-weighted successor-pressure (0 = unlimited)");
   desc.add_options()(
       "regretShortlistDiagnostics",
       po::value<bool>()->default_value(false),
       "Emit regret shortlist diagnostics for wait-proxy ranking impact");
   desc.add_options()(
       "maxCascadeFactor",
-      po::value<double>()->default_value(3.0),
+      po::value<double>()->default_value(0.0),
       "Multiplier for successor-closure cap in prepareNextIteration "
       "(<=0 with maxCascadeTasks=0 disables cap)");
   desc.add_options()(
@@ -92,15 +64,6 @@ int main(int argc, char** argv) {
       po::value<bool>()->default_value(false),
       "Enable adaptive successor-closure budget in prepareNextIteration");
   desc.add_options()(
-      "partialSolutionRestore",
-      po::value<bool>()->default_value(false),
-      "Use touched-agent-scoped rollback restore instead of always copying "
-      "the full solution snapshot");
-  desc.add_options()(
-      "repairIncludeNonAncestorAgents",
-      po::value<bool>()->default_value(true),
-      "Include non-ancestor agent paths in repair constraint tables");
-  desc.add_options()(
       "alnsEnablePrecedenceAwareDestroy",
       po::value<bool>()->default_value(true),
       "Allow ALNS to sample precedence_wait and low_slack destroy operators");
@@ -111,100 +74,24 @@ int main(int argc, char** argv) {
                      "Strategy for the initial solution (portfolio default for "
                      "best final SoC; use greedy/prioritized for faster time-to-best)");
   desc.add_options()(
-      "initialFallback",
-      po::value<string>()->default_value("none"),
-      "Fallback when initial solution fails: 'greedy' or 'none'");
-  desc.add_options()(
       "initialPortfolioTimeFraction",
       po::value<double>()->default_value(0.10),
       "Portfolio warm-start budget fraction in [0,1] "
       "(used when initialSolution='portfolio')");
   desc.add_options()(
-      "initialPortfolioMinArmTimeSec",
-      po::value<double>()->default_value(1.0),
-      "Minimum per-arm budget in portfolio warm-start (seconds)");
-  desc.add_options()(
-      "initialPortfolioStopOnFirstFeasible",
-      po::value<bool>()->default_value(false),
-      "Stop portfolio warm-start after first feasible arm");
-  desc.add_options()(
       "goalOccupationMode",
-      po::value<string>()->default_value("stay"),
-      "Final-goal reservation policy: 'stay', 'tail', 'reposition', or "
-      "'reposition_true'");
+      po::value<string>()->default_value("reposition_true"),
+      "Final-goal reservation policy: 'stay' or 'reposition_true'");
   desc.add_options()(
-      "goalTailSteps",
-      po::value<int>()->default_value(0),
-      "Additional timesteps to reserve final goals in 'tail'/'reposition' modes");
-  desc.add_options()(
-      "repositionMaxCandidates",
-      po::value<int>()->default_value(12),
-      "Maximum parking candidates evaluated per final goal in "
-      "'reposition_true' mode");
-  desc.add_options()(
-      "repositionDemandLookahead",
-      po::value<int>()->default_value(0),
-      "Demand scan horizon after completion in 'reposition_true' "
-      "(0 = full path horizon)");
-  desc.add_options()(
-      "repositionReservationSlack",
-      po::value<int>()->default_value(64),
-      "Additional timesteps beyond active service horizon to reserve "
-      "terminal occupancy in 'reposition_true'");
-  desc.add_options()(
-      "greedySegmentDiagnostics",
-      po::bool_switch()->default_value(false),
-      "Emit per-segment low-level diagnostics for greedy initialization");
-  desc.add_options()(
-      "greedySegmentDiagnosticsTopK",
-      po::value<int>()->default_value(10),
-      "Top-K expensive greedy segments to print in diagnostics summary");
-  desc.add_options()(
-      "destroyHeuristic,H", po::value<string>()->default_value("conflict"),
+      "destroyHeuristic,H", po::value<string>()->default_value("alns"),
       "Destroy heuristic to use for creating the LNS neighborhood");
   desc.add_options()("acceptanceCriteria,c",
-                     po::value<string>()->default_value("SA"),
+                     po::value<string>()->default_value("TA"),
                      "Acceptance criteria for new solutions");
   desc.add_options()(
       "repairHeuristic",
       po::value<string>()->default_value("regret"),
       "Repair heuristic to use: 'regret' or 'market_shortlist_regret'");
-  desc.add_options()(
-      "rejectInvalidCandidates",
-      po::value<bool>()->default_value(false),
-      "Hard-reject invalid candidates before acceptance criteria");
-  desc.add_options()(
-      "utilityUseConflictEventCount",
-      po::value<bool>()->default_value(true),
-      "Use conflict-event magnitude (vertex/swap/precedence) in utility instead of conflicting-task count");
-  desc.add_options()(
-      "acceptanceFeasibilityFirstPrecedenceDebt",
-      po::value<bool>()->default_value(false),
-      "Feasibility-first acceptance: valid dominates invalid; invalid-vs-invalid uses precedence-debt score");
-  desc.add_options()(
-      "acceptanceInvalidSpatialWeight",
-      po::value<double>()->default_value(1.0),
-      "Invalid-score weight for spatial conflicts (vertex + swap + structural)");
-  desc.add_options()(
-      "acceptanceInvalidPrecedenceDebtWeight",
-      po::value<double>()->default_value(1.0),
-      "Invalid-score weight for precedence-debt magnitude");
-  desc.add_options()(
-      "acceptanceInvalidSocTieBreakWeight",
-      po::value<double>()->default_value(0.0),
-      "Invalid-score SoC tie-break weight (default 0 keeps invalid scoring SoC-independent)");
-  desc.add_options()(
-      "acceptanceUseDedicatedInvalidTemperature",
-      po::value<bool>()->default_value(false),
-      "Use a dedicated SA/TA/OBA/GDA temperature state for feasibility-first invalid-score transitions");
-  desc.add_options()(
-      "acceptanceInvalidTemperatureScale",
-      po::value<double>()->default_value(0.25),
-      "Dedicated invalid-temperature scale: T0 = scale * max(1, |prev|, |cand|, |delta|)");
-  desc.add_options()(
-      "acceptanceInvalidTemperatureFloor",
-      po::value<double>()->default_value(1e-3),
-      "Lower bound for dedicated invalid-temperature initialization/recovery");
   desc.add_options()("seed",
                      po::value<unsigned int>()->default_value(0),
                      "Random seed (0 = time-based)");
@@ -230,17 +117,9 @@ int main(int argc, char** argv) {
       "Debug mode: in SIPPS runs, shadow each low-level segment with MLA* and "
       "log parity mismatches");
   desc.add_options()(
-      "plannerParityMaxLogs",
-      po::value<int>()->default_value(10),
-      "Maximum number of SIPPS-vs-MLA* parity mismatch logs");
-  desc.add_options()(
       "lowLevelSegmentTimeout",
       po::value<double>()->default_value(600.0),
       "Per-segment timeout (seconds) for low-level planner searches");
-  desc.add_options()(
-      "mlastarIncrementalFocalRefresh",
-      po::value<bool>()->default_value(true),
-      "Enable incremental MLA* focal refresh using f-value buckets");
 
   struct MarketIntOptionSpec {
     const char* name;
@@ -446,76 +325,20 @@ int main(int argc, char** argv) {
           << "\n";
     return 1;
   }
-  const string initialSolutionFallback = vm["initialFallback"].as<string>();
   const double initialPortfolioTimeFraction =
       vm["initialPortfolioTimeFraction"].as<double>();
-  const double initialPortfolioMinArmTimeSec =
-      vm["initialPortfolioMinArmTimeSec"].as<double>();
-  const bool initialPortfolioStopOnFirstFeasible =
-      vm["initialPortfolioStopOnFirstFeasible"].as<bool>();
-  if (initialSolutionFallback != "greedy" &&
-      initialSolutionFallback != "none") {
-    PLOGE << "Incorrect initial fallback strategy provided. Please choose "
-             "from 'greedy' and 'none'\n";
-    return 1;
-  }
   if (!std::isfinite(initialPortfolioTimeFraction) ||
       initialPortfolioTimeFraction < 0.0 ||
       initialPortfolioTimeFraction > 1.0) {
     PLOGE << "initialPortfolioTimeFraction must be finite and in [0, 1]\n";
     return 1;
   }
-  if (!std::isfinite(initialPortfolioMinArmTimeSec) ||
-      initialPortfolioMinArmTimeSec <= 0.0) {
-    PLOGE << "initialPortfolioMinArmTimeSec must be finite and > 0\n";
-    return 1;
-  }
-  if (initialSolutionStrategy != "portfolio" &&
-      initialPortfolioStopOnFirstFeasible) {
-    PLOGW << "initialPortfolioStopOnFirstFeasible is ignored unless "
-             "initialSolution='portfolio'\n";
-  }
   string goalOccupationMode = vm["goalOccupationMode"].as<string>();
-  if (goalOccupationMode != "stay" && goalOccupationMode != "tail" &&
-      goalOccupationMode != "reposition" &&
+  if (goalOccupationMode != "stay" &&
       goalOccupationMode != "reposition_true") {
     PLOGE << "Incorrect goal occupation mode provided. Please choose from "
-             "'stay', 'tail', 'reposition', and 'reposition_true'\n";
+             "'stay' and 'reposition_true'\n";
     return 1;
-  }
-  const int goalTailSteps = vm["goalTailSteps"].as<int>();
-  const int repositionMaxCandidates =
-      vm["repositionMaxCandidates"].as<int>();
-  const int repositionDemandLookahead =
-      vm["repositionDemandLookahead"].as<int>();
-  const int repositionReservationSlack =
-      vm["repositionReservationSlack"].as<int>();
-  const bool greedySegmentDiagnostics =
-      vm["greedySegmentDiagnostics"].as<bool>();
-  const int greedySegmentDiagnosticsTopK =
-      vm["greedySegmentDiagnosticsTopK"].as<int>();
-  if (goalTailSteps < 0) {
-    PLOGE << "goalTailSteps must be non-negative\n";
-    return 1;
-  }
-  if (repositionMaxCandidates <= 0) {
-    PLOGE << "repositionMaxCandidates must be positive\n";
-    return 1;
-  }
-  if (repositionDemandLookahead < 0) {
-    PLOGE << "repositionDemandLookahead must be non-negative\n";
-    return 1;
-  }
-  if (repositionReservationSlack < 0) {
-    PLOGE << "repositionReservationSlack must be non-negative\n";
-    return 1;
-  }
-  if (greedySegmentDiagnosticsTopK <= 0) {
-    PLOGE << "greedySegmentDiagnosticsTopK must be positive\n";
-    return 1;
-  }
-  if (goalOccupationMode == "stay" && goalTailSteps > 0) {
-    PLOGW << "goalTailSteps is ignored when goalOccupationMode='stay'\n";
   }
 
   string destroyHeuristic = vm["destroyHeuristic"].as<string>();
@@ -546,88 +369,8 @@ int main(int argc, char** argv) {
              "from 'regret' and 'market_shortlist_regret'\n";
     return 1;
   }
-  const bool rejectInvalidCandidates =
-      vm["rejectInvalidCandidates"].as<bool>();
-  const bool utilityUseConflictEventCount =
-      vm["utilityUseConflictEventCount"].as<bool>();
-  const bool acceptanceFeasibilityFirstPrecedenceDebt =
-      vm["acceptanceFeasibilityFirstPrecedenceDebt"].as<bool>();
-  const double acceptanceInvalidSpatialWeight =
-      vm["acceptanceInvalidSpatialWeight"].as<double>();
-  const double acceptanceInvalidPrecedenceDebtWeight =
-      vm["acceptanceInvalidPrecedenceDebtWeight"].as<double>();
-  const double acceptanceInvalidSocTieBreakWeight =
-      vm["acceptanceInvalidSocTieBreakWeight"].as<double>();
-  const bool acceptanceUseDedicatedInvalidTemperature =
-      vm["acceptanceUseDedicatedInvalidTemperature"].as<bool>();
-  const double acceptanceInvalidTemperatureScale =
-      vm["acceptanceInvalidTemperatureScale"].as<double>();
-  const double acceptanceInvalidTemperatureFloor =
-      vm["acceptanceInvalidTemperatureFloor"].as<double>();
-  if (!std::isfinite(acceptanceInvalidSpatialWeight) ||
-      acceptanceInvalidSpatialWeight < 0.0) {
-    PLOGE << "acceptanceInvalidSpatialWeight must be finite and non-negative\n";
-    return 1;
-  }
-  if (!std::isfinite(acceptanceInvalidPrecedenceDebtWeight) ||
-      acceptanceInvalidPrecedenceDebtWeight < 0.0) {
-    PLOGE << "acceptanceInvalidPrecedenceDebtWeight must be finite and "
-             "non-negative\n";
-    return 1;
-  }
-  if (!std::isfinite(acceptanceInvalidSocTieBreakWeight) ||
-      acceptanceInvalidSocTieBreakWeight < 0.0) {
-    PLOGE << "acceptanceInvalidSocTieBreakWeight must be finite and "
-             "non-negative\n";
-    return 1;
-  }
-  if (!std::isfinite(acceptanceInvalidTemperatureScale) ||
-      acceptanceInvalidTemperatureScale <= 0.0) {
-    PLOGE << "acceptanceInvalidTemperatureScale must be finite and > 0\n";
-    return 1;
-  }
-  if (!std::isfinite(acceptanceInvalidTemperatureFloor) ||
-      acceptanceInvalidTemperatureFloor <= 0.0) {
-    PLOGE << "acceptanceInvalidTemperatureFloor must be finite and > 0\n";
-    return 1;
-  }
-  if (acceptanceUseDedicatedInvalidTemperature &&
-      !acceptanceFeasibilityFirstPrecedenceDebt) {
-    PLOGW << "acceptanceUseDedicatedInvalidTemperature has no effect unless "
-             "acceptanceFeasibilityFirstPrecedenceDebt is enabled\n";
-  }
-  if (acceptanceFeasibilityFirstPrecedenceDebt &&
-      acceptanceInvalidSpatialWeight == 0.0 &&
-      acceptanceInvalidPrecedenceDebtWeight == 0.0 &&
-      acceptanceInvalidSocTieBreakWeight == 0.0) {
-    PLOGE << "With acceptanceFeasibilityFirstPrecedenceDebt enabled, at least "
-             "one invalid-score weight must be > 0\n";
-    return 1;
-  }
-  const bool regretShortlistUseNormalizedWaitProxy =
-      vm["regretShortlistUseNormalizedWaitProxy"].as<bool>();
-  const bool regretShortlistUseNormalizedSuccessorPressure =
-      vm["regretShortlistUseNormalizedSuccessorPressure"].as<bool>();
-  const bool regretShortlistClampSuccessorToPrecedenceRelease =
-      vm["regretShortlistClampSuccessorToPrecedenceRelease"].as<bool>();
-  const bool regretShortlistUseDescendantWeightedSuccessorPressure =
-      vm["regretShortlistUseDescendantWeightedSuccessorPressure"].as<bool>();
-  const double regretShortlistSuccessorPressureDepthDecay =
-      vm["regretShortlistSuccessorPressureDepthDecay"].as<double>();
-  const int regretShortlistSuccessorPressureMaxDepth =
-      vm["regretShortlistSuccessorPressureMaxDepth"].as<int>();
   const bool regretShortlistDiagnostics =
       vm["regretShortlistDiagnostics"].as<bool>();
-  if (!std::isfinite(regretShortlistSuccessorPressureDepthDecay) ||
-      regretShortlistSuccessorPressureDepthDecay < 0.0 ||
-      regretShortlistSuccessorPressureDepthDecay > 1.0) {
-    PLOGE << "regretShortlistSuccessorPressureDepthDecay must be in [0, 1]\n";
-    return 1;
-  }
-  if (regretShortlistSuccessorPressureMaxDepth < 0) {
-    PLOGE << "regretShortlistSuccessorPressureMaxDepth must be non-negative\n";
-    return 1;
-  }
 
   string regretType = vm["regretType"].as<string>();
   if (regretType != "absolute" && regretType != "relative") {
@@ -653,15 +396,8 @@ int main(int argc, char** argv) {
     return 1;
   }
   const bool plannerParityCheck = vm["plannerParityCheck"].as<bool>();
-  const int plannerParityMaxLogs = vm["plannerParityMaxLogs"].as<int>();
   const double lowLevelSegmentTimeout =
       vm["lowLevelSegmentTimeout"].as<double>();
-  const bool mlastarIncrementalFocalRefresh =
-      vm["mlastarIncrementalFocalRefresh"].as<bool>();
-  if (plannerParityMaxLogs <= 0) {
-    PLOGE << "plannerParityMaxLogs must be a positive integer\n";
-    return 1;
-  }
   if (lowLevelSegmentTimeout <= 0.0) {
     PLOGE << "lowLevelSegmentTimeout must be positive\n";
     return 1;
@@ -776,14 +512,10 @@ int main(int argc, char** argv) {
   const int neighborSize = vm["neighborSize"].as<int>();
   const int maxIterations = vm["maxIterations"].as<int>();
   const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
-  const bool adaptiveRegretTopK = vm["adaptiveRegretTopK"].as<bool>();
   const double maxCascadeFactor = vm["maxCascadeFactor"].as<double>();
   const int maxCascadeTasks = vm["maxCascadeTasks"].as<int>();
   const bool adaptiveCascadeBudget =
       vm["adaptiveCascadeBudget"].as<bool>();
-  const bool partialSolutionRestore = vm["partialSolutionRestore"].as<bool>();
-  const bool repairIncludeNonAncestorAgents =
-      vm["repairIncludeNonAncestorAgents"].as<bool>();
   const bool alnsEnablePrecedenceAwareDestroy =
       vm["alnsEnablePrecedenceAwareDestroy"].as<bool>();
   if (agentNum < 0) {
@@ -872,77 +604,52 @@ int main(int argc, char** argv) {
     }
   }
 
+  int effectiveNeighborSize = neighborSize;
+  if (neighborSize == 0) {
+    const double agentScale =
+        static_cast<double>(std::max(1, instance.getAgentNum()));
+    const double taskScale =
+        static_cast<double>(std::max(1, instance.getTasksNum()));
+    const double precedenceScale = static_cast<double>(std::max(
+        1, static_cast<int>(instance.getInputPrecedenceConstraintsRef().size())));
+    const double numerator = 10.0 * std::pow(taskScale / 100.0, 0.20);
+    const double denominator = std::pow(agentScale / 10.0, 0.35) *
+                               std::pow(precedenceScale / 80.0, 0.20);
+    const int adaptiveNeighborSize =
+        static_cast<int>(std::lround(numerator / denominator));
+    effectiveNeighborSize = std::max(4, std::min(14, adaptiveNeighborSize));
+    PLOGI << "neighborSize auto mode selected n=" << effectiveNeighborSize
+          << " (agents=" << instance.getAgentNum()
+          << ", tasks=" << instance.getTasksNum()
+          << ", precedence_edges="
+          << instance.getInputPrecedenceConstraintsRef().size() << ")\n";
+  }
+
   LNSParams parameters{};
-  parameters.core.neighborhoodSize = neighborSize;
+  parameters.core.neighborhoodSize = effectiveNeighborSize;
   parameters.core.timeLimit = cutoffTime;
   parameters.core.initialSolutionStrategy = initialSolutionStrategy;
-  parameters.core.initialSolutionFallback = initialSolutionFallback;
   parameters.core.initialPortfolioTimeFraction =
       initialPortfolioTimeFraction;
-  parameters.core.initialPortfolioMinArmTimeSec =
-      initialPortfolioMinArmTimeSec;
-  parameters.core.initialPortfolioStopOnFirstFeasible =
-      initialPortfolioStopOnFirstFeasible;
   parameters.core.goalOccupationMode = goalOccupationMode;
-  parameters.core.goalTailSteps = goalTailSteps;
-  parameters.core.repositionMaxCandidates = repositionMaxCandidates;
-  parameters.core.repositionDemandLookahead = repositionDemandLookahead;
-  parameters.core.repositionReservationSlack = repositionReservationSlack;
-  parameters.core.greedySegmentDiagnostics = greedySegmentDiagnostics;
-  parameters.core.greedySegmentDiagnosticsTopK = greedySegmentDiagnosticsTopK;
   parameters.core.destroyHeuristic = destroyHeuristic;
   parameters.core.acceptanceCriteria = acceptanceCriteria;
   parameters.core.repairHeuristic = repairHeuristic;
-  parameters.core.rejectInvalidCandidates = rejectInvalidCandidates;
-  parameters.core.utilityUseConflictEventCount = utilityUseConflictEventCount;
-  parameters.core.acceptanceFeasibilityFirstPrecedenceDebt =
-      acceptanceFeasibilityFirstPrecedenceDebt;
-  parameters.core.acceptanceInvalidSpatialWeight =
-      acceptanceInvalidSpatialWeight;
-  parameters.core.acceptanceInvalidPrecedenceDebtWeight =
-      acceptanceInvalidPrecedenceDebtWeight;
-  parameters.core.acceptanceInvalidSocTieBreakWeight =
-      acceptanceInvalidSocTieBreakWeight;
-  parameters.core.acceptanceUseDedicatedInvalidTemperature =
-      acceptanceUseDedicatedInvalidTemperature;
-  parameters.core.acceptanceInvalidTemperatureScale =
-      acceptanceInvalidTemperatureScale;
-  parameters.core.acceptanceInvalidTemperatureFloor =
-      acceptanceInvalidTemperatureFloor;
   parameters.core.regretType = regretType;
   parameters.core.incrementalRegret = incrementalRegret;
   parameters.core.regretCandidateTopK = regretCandidateTopK;
-  parameters.core.adaptiveRegretTopK = adaptiveRegretTopK;
-  parameters.core.regretShortlistUseNormalizedWaitProxy =
-      regretShortlistUseNormalizedWaitProxy;
-  parameters.core.regretShortlistUseNormalizedSuccessorPressure =
-      regretShortlistUseNormalizedSuccessorPressure;
-  parameters.core.regretShortlistClampSuccessorToPrecedenceRelease =
-      regretShortlistClampSuccessorToPrecedenceRelease;
-  parameters.core.regretShortlistUseDescendantWeightedSuccessorPressure =
-      regretShortlistUseDescendantWeightedSuccessorPressure;
-  parameters.core.regretShortlistSuccessorPressureDepthDecay =
-      regretShortlistSuccessorPressureDepthDecay;
-  parameters.core.regretShortlistSuccessorPressureMaxDepth =
-      regretShortlistSuccessorPressureMaxDepth;
   parameters.core.regretShortlistDiagnostics = regretShortlistDiagnostics;
   parameters.core.maxCascadeFactor = maxCascadeFactor;
   parameters.core.maxCascadeTasks = maxCascadeTasks;
   parameters.core.adaptiveCascadeBudget = adaptiveCascadeBudget;
-  parameters.core.partialSolutionRestore = partialSolutionRestore;
-  parameters.core.repairIncludeNonAncestorAgents =
-      repairIncludeNonAncestorAgents;
   parameters.core.alnsEnablePrecedenceAwareDestroy =
       alnsEnablePrecedenceAwareDestroy;
   parameters.core.incrementalRegretMode = incrementalRegretMode;
   parameters.core.seed = seed;
 
   parameters.lowLevel.parityCheck = plannerParityCheck;
-  parameters.lowLevel.parityMaxLogs = plannerParityMaxLogs;
   parameters.lowLevel.planner = lowLevelPlanner;
   parameters.lowLevel.segmentTimeout = lowLevelSegmentTimeout;
-  parameters.lowLevel.mlastarIncrementalFocalRefresh =
-      mlastarIncrementalFocalRefresh;
 
   parameters.market = marketCli;
   auto lnsInstance =

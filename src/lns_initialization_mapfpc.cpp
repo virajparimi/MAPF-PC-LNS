@@ -11,6 +11,7 @@
 #define MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL 0
 #endif
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <filesystem>
@@ -24,6 +25,43 @@
 #include "common.hpp"
 #include "lns_internal_helpers.hpp"
 #include "utils.hpp"
+
+namespace {
+std::optional<std::filesystem::path> resolveTaskAssignmentExecutable() {
+  namespace fs = std::filesystem;
+  std::vector<fs::path> candidates;
+
+  if (const char* envExe = std::getenv("MAPF_PC_TASK_ASSIGNMENT_EXE");
+      envExe != nullptr && envExe[0] != '\0') {
+    candidates.emplace_back(envExe);
+  }
+
+  // Relative to current working directory.
+  candidates.emplace_back("./MAPF-PC/build_local/bin/task_assignment");
+  candidates.emplace_back("./MAPF-PC/build/bin/task_assignment");
+
+  // Relative to this binary location.
+  std::error_code ec;
+  const fs::path selfExe = fs::read_symlink("/proc/self/exe", ec);
+  if (!ec && !selfExe.empty()) {
+    const fs::path projectRoot = selfExe.parent_path().parent_path();
+    if (!projectRoot.empty()) {
+      candidates.emplace_back(projectRoot / "MAPF-PC/build_local/bin/task_assignment");
+      candidates.emplace_back(projectRoot / "MAPF-PC/build/bin/task_assignment");
+    }
+  }
+
+  for (const auto& candidate : candidates) {
+    std::error_code candidateEc;
+    if (candidate.empty() || !fs::exists(candidate, candidateEc) ||
+        candidateEc || fs::is_directory(candidate, candidateEc)) {
+      continue;
+    }
+    return fs::absolute(candidate, candidateEc);
+  }
+  return std::nullopt;
+}
+}  // namespace
 
 bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
                                         int solverTimeoutSec) {
@@ -61,11 +99,12 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
   // Run a child process to spawn the MAPC-PC codebase with the current map and agent informations
   namespace bp = boost::process;
   bp::ipstream inputStream;
-  std::string taskAssignmentExe;
-  if (std::filesystem::exists("./MAPF-PC/build_local/bin/task_assignment")) {
-    taskAssignmentExe = "./MAPF-PC/build_local/bin/task_assignment";
-  } else {
-    taskAssignmentExe = "./MAPF-PC/build/bin/task_assignment";
+  const auto taskAssignmentExe = resolveTaskAssignmentExecutable();
+  if (!taskAssignmentExe.has_value()) {
+    PLOGE << "MAPF-PC task_assignment executable not found. "
+          << "Expected under ./MAPF-PC/build_local/bin or ./MAPF-PC/build/bin, "
+          << "or set MAPF_PC_TASK_ASSIGNMENT_EXE.\n";
+    return false;
   }
   const std::vector<std::string> args = {
       "-m", instance_.getMapName(),
@@ -75,14 +114,24 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
       "-d", std::to_string(seed_),
       "--solver", solver,
   };
+  std::optional<bp::child> childProcess;
+  try {
 #if MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL
-  bp::child child(taskAssignmentExe, bp::args(args), bp::std_out > inputStream,
-                  bp::std_err > bp::null);
+    childProcess.emplace(taskAssignmentExe->string(), bp::args(args),
+                         bp::std_out > inputStream, bp::std_err > bp::null);
 #else
-  // Some Boost.Process installations don't ship <boost/process/null.hpp>.
-  // In that case, don't suppress stderr.
-  bp::child child(taskAssignmentExe, bp::args(args), bp::std_out > inputStream);
+    // Some Boost.Process installations don't ship <boost/process/null.hpp>.
+    // In that case, don't suppress stderr.
+    childProcess.emplace(taskAssignmentExe->string(), bp::args(args),
+                         bp::std_out > inputStream);
 #endif
+  } catch (const bp::process_error& e) {
+    PLOGE << "Failed to launch MAPF-PC task_assignment at '"
+          << taskAssignmentExe->string() << "': " << e.what() << "\n";
+    return false;
+  }
+
+  bp::child& child = *childProcess;
 
   // The output sequence of the MAPF-PC codebase is as follows:
   // 1. Output TASK ASSIGNMENTS
@@ -311,4 +360,3 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
       clampSocToInt(initialSumOfCosts, "buildGreedySolutionWithMAPFPC");
   return true;
 }
-

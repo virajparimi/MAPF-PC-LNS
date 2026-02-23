@@ -242,6 +242,14 @@ std::variant<bool, Utility> LNS::insertTask(
 
   int agentTasksSize = (int)assignmentsFor(regretPacket.agent).size();
   double value = std::numeric_limits<double>::infinity();
+  AssignmentLookup assignmentLookup;
+  const vector<int>* assignmentOwnerLookup = nullptr;
+  const vector<int>* assignmentPosLookup = nullptr;
+  auto rebuildAssignmentLookup = [&]() {
+    assignmentLookup = buildAssignmentLookup(workspace, taskCount);
+    assignmentOwnerLookup = &assignmentLookup.owner;
+    assignmentPosLookup = &assignmentLookup.pos;
+  };
 
   // In this case we are inserting a task not at the last position
   if (regretPacket.taskPosition < agentTasksSize) {
@@ -300,30 +308,29 @@ std::variant<bool, Utility> LNS::insertTask(
   if (nextTask >= 0) {
     // The task paths reference does not have ancestor information about next task, so we need to add those in
 
-    const AssignmentLookup assignmentLookup =
-        buildAssignmentLookup(workspace, instance_.getTasksNum());
+    rebuildAssignmentLookup();
     const auto& staticAncestors = instance_.getAncestorsRef();
-    vector<char> ancestorsOfNextTask(instance_.getTasksNum(), 0);
-    vector<char> discovered(instance_.getTasksNum(), 0);
-    vector<char> taskPresent(instance_.getTasksNum(), 0);
+    vector<char> ancestorsOfNextTask(taskCount, 0);
+    vector<char> discovered(taskCount, 0);
+    vector<char> taskPresent(taskCount, 0);
     for (int task = 0; task < (int)assignmentLookup.owner.size(); task++) {
       if (assignmentLookup.owner[task] != UNASSIGNED) {
         taskPresent[task] = 1;
       }
     }
-    if (nextTask >= 0 && nextTask < instance_.getTasksNum()) {
+    if (nextTask >= 0 && nextTask < taskCount) {
       vector<int> frontier;
-      frontier.reserve(instance_.getTasksNum());
+      frontier.reserve(taskCount);
       frontier.push_back(nextTask);
       discovered[nextTask] = 1;
       for (size_t frontierIdx = 0; frontierIdx < frontier.size();
            frontierIdx++) {
         const int currentTask = frontier[frontierIdx];
-        if (currentTask < 0 || currentTask >= instance_.getTasksNum()) {
+        if (currentTask < 0 || currentTask >= taskCount) {
           continue;
         }
         for (int predecessorTask : staticAncestors[currentTask]) {
-          if (predecessorTask < 0 || predecessorTask >= instance_.getTasksNum()) {
+          if (predecessorTask < 0 || predecessorTask >= taskCount) {
             continue;
           }
           ancestorsOfNextTask[predecessorTask] = 1;
@@ -339,8 +346,7 @@ std::variant<bool, Utility> LNS::insertTask(
             owner >= 0 && owner < instance_.getAgentNum()) {
           const int predecessorTask =
               assignmentsFor(owner)[localPos - 1];
-          if (predecessorTask >= 0 &&
-              predecessorTask < instance_.getTasksNum()) {
+          if (predecessorTask >= 0 && predecessorTask < taskCount) {
             ancestorsOfNextTask[predecessorTask] = 1;
             if (!discovered[predecessorTask]) {
               discovered[predecessorTask] = 1;
@@ -379,7 +385,7 @@ std::variant<bool, Utility> LNS::insertTask(
           return false;
         }
         assert(nextTaskAncestorAgent != UNASSIGNED);
-        if (nextTaskAncestor < 0 || nextTaskAncestor >= instance_.getTasksNum() ||
+        if (nextTaskAncestor < 0 || nextTaskAncestor >= taskCount ||
             !taskPresent[nextTaskAncestor]) {
 
           int ancestorTaskLocalIndex = previousSolution_.getLocalTaskIndex(
@@ -419,16 +425,15 @@ std::variant<bool, Utility> LNS::insertTask(
             affectedAgents[nextTaskAncestorAgent] = 1;
           }
           if (nextTaskAncestor >= 0 &&
-              nextTaskAncestor < instance_.getTasksNum()) {
+              nextTaskAncestor < taskCount) {
             taskPresent[nextTaskAncestor] = 1;
           }
         }
       }
     }
     if (injectedPendingAncestor) {
-      const AssignmentLookup refreshedLookup =
-          buildAssignmentLookup(workspace, taskCount);
-      if (!isAcyclicAssignmentState(refreshedLookup)) {
+      rebuildAssignmentLookup();
+      if (!isAcyclicAssignmentState(assignmentLookup)) {
         return false;
       }
     } else {
@@ -496,7 +501,9 @@ std::variant<bool, Utility> LNS::insertTask(
               assignmentsFor(agent)[localTask], agent, localTask, -1};
           if (!buildConstraintTable(constraintTable, taskPacket,
                                     goalLocations[localTask], workspace,
-                                    precedenceConstraints)) {
+                                    precedenceConstraints, false,
+                                    assignmentOwnerLookup,
+                                    assignmentPosLookup)) {
             PLOGE << "insertTask: failed to build constraint table for agent "
                   << agent << ", task " << assignmentsFor(agent)[localTask]
                   << " at position " << localTask << "\n";
@@ -559,7 +566,9 @@ std::variant<bool, Utility> LNS::insertTask(
 
     if (!buildConstraintTable(constraintTable, regretPacket,
                               goalLocations[taskPosition], workspace,
-                              precedenceConstraints)) {
+                              precedenceConstraints, false,
+                              assignmentOwnerLookup,
+                              assignmentPosLookup)) {
       PLOGE << "insertTask: failed to build constraint table for task "
             << regretPacket.task << " (agent " << regretPacket.agent
             << ", position " << taskPosition << ")\n";
@@ -591,7 +600,9 @@ std::variant<bool, Utility> LNS::insertTask(
         nextTask, regretPacket.agent, nextTaskPosition, {}};
     if (!buildConstraintTable(constraintTable, nextTaskPacket,
                               goalLocations[nextTaskPosition], workspace,
-                              precedenceConstraints, true)) {
+                              precedenceConstraints, true,
+                              assignmentOwnerLookup,
+                              assignmentPosLookup)) {
       PLOGE << "insertTask: failed to build constraint table for next task "
             << nextTask << " (agent " << regretPacket.agent << ", position "
             << nextTaskPosition << ")\n";
@@ -606,8 +617,7 @@ std::variant<bool, Utility> LNS::insertTask(
     recordSetTaskPath(regretPacket.agent, nextTaskPosition, std::move(nextPath));
     value += nextPathSize;
   } else {
-    const AssignmentLookup assignmentLookup =
-        buildAssignmentLookup(workspace, taskCount);
+    rebuildAssignmentLookup();
     if (!isAcyclicAfterLocalInsertion(assignmentLookup, regretPacket.task,
                                       previousTask, UNDEFINED)) {
       return false;
@@ -627,7 +637,9 @@ std::variant<bool, Utility> LNS::insertTask(
 
     if (!buildConstraintTable(constraintTable, regretPacket,
                               goalLocations[regretPacket.taskPosition],
-                              workspace, precedenceConstraints)) {
+                              workspace, precedenceConstraints, false,
+                              assignmentOwnerLookup,
+                              assignmentPosLookup)) {
       PLOGE << "insertTask: failed to build constraint table for task "
             << regretPacket.task << " (agent " << regretPacket.agent
             << ", position " << regretPacket.taskPosition << ")\n";
@@ -680,7 +692,9 @@ std::variant<bool, Utility> LNS::insertTask(
       const double newExposure =
           computeMarketExposureFromPath(insertedTaskPath, true);
       const int newWait =
-          computeTaskPrecedenceWaitFromWorkspace(task, taskLocation, workspace);
+          computeTaskPrecedenceWaitFromWorkspace(
+              task, taskLocation, workspace, assignmentOwnerLookup,
+              assignmentPosLookup);
       deltaExposure = newExposure - oldExposure;
       deltaWait = (double)newWait - (double)oldWait;
     }

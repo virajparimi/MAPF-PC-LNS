@@ -323,11 +323,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
           ? static_cast<double>(lowLevelStats.budgetExhausted) /
                 static_cast<double>(lowLevelStats.calls)
           : 0.0;
-  const LNS::AcceptanceDiagnostics acceptanceDiag =
-      lns.getAcceptanceDiagnostics();
-  auto average = [](double sum, int64_t count) {
-    return count > 0 ? sum / static_cast<double>(count) : 0.0;
-  };
 
   std::cout << "\n=== Run Summary ===\n";
   printMetric("Requested initial solution",
@@ -348,87 +343,9 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Total feasible iterations", stats.numFeasibleIterations);
   printMetric("Solution cost", solution.sumOfCosts);
   printMetric("Number of failures", lns.numOfFailures);
-  printMetric("Reject invalid candidates",
-              lns.rejectInvalidCandidatesEnabled() ? "true" : "false");
-  printMetric("Utility uses conflict events",
-              lns.utilityUsesConflictEventCount() ? "true" : "false");
-  printMetric("Acceptance feasibility-first debt",
-              lns.acceptanceUsesFeasibilityFirstPrecedenceDebt() ? "true"
-                                                                 : "false");
-  printMetric("Acceptance dedicated invalid temperature",
-              lns.acceptanceUsesDedicatedInvalidTemperature() ? "true"
-                                                              : "false");
-  printMetric("MLA* incremental focal refresh",
-              lns.mlastarIncrementalFocalRefreshEnabled() ? "true" : "false");
   printMetric("Invalid candidate rejections",
               lns.invalidCandidateRejections);
   printMetric("Market guard rejections", lns.marketGuardRejections);
-  printMetric("FF decisions", acceptanceDiag.feasibilityFirstDecisions);
-  printMetric("FF invalid->valid accepted",
-              acceptanceDiag.invalidToValidAccepted);
-  printMetric("FF valid->invalid compared",
-              acceptanceDiag.validToInvalidCompared);
-  printMetric("FF valid->invalid accepted",
-              acceptanceDiag.validToInvalidAccepted);
-  printMetric("FF valid->invalid rejected",
-              acceptanceDiag.validToInvalidRejected);
-  printMetric("FF invalid-vs-invalid compared",
-              acceptanceDiag.invalidVsInvalidComparisons);
-  printMetric("FF invalid-vs-invalid accepted",
-              acceptanceDiag.invalidVsInvalidAccepted);
-  printMetric("FF invalid-vs-invalid rejected",
-              acceptanceDiag.invalidVsInvalidRejected);
-  printMetric("FF avg previous invalid score",
-              average(acceptanceDiag.previousInvalidScoreSum,
-                      acceptanceDiag.invalidVsInvalidComparisons));
-  printMetric("FF avg candidate invalid score",
-              average(acceptanceDiag.candidateInvalidScoreSum,
-                      acceptanceDiag.invalidVsInvalidComparisons));
-  printMetric("FF avg previous spatial(norm)",
-              average(acceptanceDiag.previousSpatialNormSum,
-                      acceptanceDiag.invalidVsInvalidComparisons));
-  printMetric("FF avg candidate spatial(norm)",
-              average(acceptanceDiag.candidateSpatialNormSum,
-                      acceptanceDiag.invalidVsInvalidComparisons));
-  printMetric("FF avg previous precedenceDebt(norm)",
-              average(acceptanceDiag.previousPrecedenceDebtNormSum,
-                      acceptanceDiag.invalidVsInvalidComparisons));
-  printMetric("FF avg candidate precedenceDebt(norm)",
-              average(acceptanceDiag.candidatePrecedenceDebtNormSum,
-                      acceptanceDiag.invalidVsInvalidComparisons));
-  printMetric("FF avg previous soc(norm)",
-              average(acceptanceDiag.previousSocNormSum,
-                      acceptanceDiag.invalidVsInvalidComparisons));
-  printMetric("FF avg candidate soc(norm)",
-              average(acceptanceDiag.candidateSocNormSum,
-                      acceptanceDiag.invalidVsInvalidComparisons));
-  printMetric("FF invalid-score compared",
-              acceptanceDiag.invalidScoreComparisons);
-  printMetric("FF invalid-score accepted",
-              acceptanceDiag.invalidScoreAccepted);
-  printMetric("FF invalid-score rejected",
-              acceptanceDiag.invalidScoreRejected);
-  printMetric("FF invalid-score worse compared",
-              acceptanceDiag.invalidScoreWorseComparisons);
-  printMetric("FF invalid-score worse accepted",
-              acceptanceDiag.invalidScoreWorseAccepted);
-  printMetric("FF avg invalid-score delta",
-              average(acceptanceDiag.invalidScoreDeltaSum,
-                      acceptanceDiag.invalidScoreComparisons));
-  printMetric("FF avg invalid-score abs delta",
-              average(acceptanceDiag.invalidScoreAbsDeltaSum,
-                      acceptanceDiag.invalidScoreComparisons));
-  printMetric("FF avg invalid-temp before",
-              average(acceptanceDiag.invalidAcceptanceTempBeforeSum,
-                      acceptanceDiag.invalidScoreComparisons));
-  printMetric("FF avg invalid-temp after",
-              average(acceptanceDiag.invalidAcceptanceTempAfterSum,
-                      acceptanceDiag.invalidScoreComparisons));
-  printMetric("FF dedicated invalid-temp init count",
-              acceptanceDiag.invalidDedicatedTempInitCount);
-  printMetric("FF avg dedicated invalid-temp init",
-              average(acceptanceDiag.invalidDedicatedInitTempSum,
-                      acceptanceDiag.invalidDedicatedTempInitCount));
   printMetric("Success", success ? "true" : "false");
 
   std::cout << "\n=== Low-Level Planner Throughput ===\n";
@@ -516,26 +433,9 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Avg closure_added/total_tasks", avgClosureFracOfTasks);
 
   const auto& restoreStats = lns.getSolutionRestoreStats();
-  const double partialRestoreRate =
-      restoreStats.restoreCalls > 0
-          ? (double)restoreStats.partialRestores /
-                (double)restoreStats.restoreCalls
-          : 0.0;
-  const double avgAgentsPerPartialRestore =
-      restoreStats.partialRestores > 0
-          ? (double)restoreStats.partialAgentsRestored /
-                (double)restoreStats.partialRestores
-          : 0.0;
   std::cout << "\n=== Solution Restore Stats ===\n";
-  printMetric("Partial restore enabled",
-              lns.isPartialSolutionRestoreEnabled() ? "true" : "false");
   printMetric("Restore calls", restoreStats.restoreCalls);
   printMetric("Full restores", restoreStats.fullRestores);
-  printMetric("Partial restores", restoreStats.partialRestores);
-  printMetric("Partial restore fallbacks",
-              restoreStats.partialRestoreFallbacks);
-  printMetric("Partial restore rate", partialRestoreRate);
-  printMetric("Avg agents/partial restore", avgAgentsPerPartialRestore);
 
   const auto& terminalStats = lns.getTerminalRepositionStats();
   if (terminalStats.replansRequested > 0) {
@@ -605,29 +505,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
               regretStats.shortlistFallbackEvaluations);
   printMetric("Shortlist fallback recovered",
               regretStats.shortlistFallbackRecovered);
-  printMetric("Adaptive regret Top-K enabled",
-              lns.isAdaptiveRegretTopKEnabled() ? "true" : "false");
-  printMetric("Adaptive regret Top-K current", lns.getAdaptiveRegretTopKCurrent());
-  if (regretStats.adaptiveTopKEvaluations > 0) {
-    const double adaptiveTopKAvg =
-        (double)regretStats.adaptiveTopKUsedSum /
-        (double)regretStats.adaptiveTopKEvaluations;
-    printMetric("Adaptive regret Top-K evals",
-                regretStats.adaptiveTopKEvaluations);
-    printMetric("Adaptive regret Top-K avg used", adaptiveTopKAvg);
-    printMetric("Adaptive regret Top-K min used",
-                regretStats.adaptiveTopKUsedMin);
-    printMetric("Adaptive regret Top-K max used",
-                regretStats.adaptiveTopKUsedMax);
-    printMetric("Adaptive regret Top-K increases",
-                regretStats.adaptiveTopKIncreases);
-    printMetric("Adaptive regret Top-K decreases",
-                regretStats.adaptiveTopKDecreases);
-    printMetric("Adaptive regret Top-K no-feasible signals",
-                regretStats.adaptiveTopKNoFeasibleSignals);
-    printMetric("Adaptive regret Top-K fallback-recovered signals",
-                regretStats.adaptiveTopKFallbackRecoverySignals);
-  }
   printMetric("Workspace agents cloned", regretStats.workspaceAgentsCloned);
   printMetric("Max cloned agents/task",
               regretStats.workspaceMaxClonedPerTask);
@@ -837,9 +714,29 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
           ? (double)incrementalStats.changedSum /
                 (double)incrementalStats.commits
           : 0.0;
+  const double avgChangedAgents =
+      incrementalStats.commits > 0
+          ? (double)incrementalStats.changedAgentsSum /
+                (double)incrementalStats.commits
+          : 0.0;
   const double avgRecomputedTasksPerCommit =
       incrementalStats.commits > 0
           ? (double)incrementalStats.recomputedTasks /
+                (double)incrementalStats.commits
+          : 0.0;
+  const double avgDirtyByDescendants =
+      incrementalStats.commits > 0
+          ? (double)incrementalStats.dirtyByDescendants /
+                (double)incrementalStats.commits
+          : 0.0;
+  const double avgDirtyByCandidateAgent =
+      incrementalStats.commits > 0
+          ? (double)incrementalStats.dirtyByCandidateAgent /
+                (double)incrementalStats.commits
+          : 0.0;
+  const double avgDirtyByAncestors =
+      incrementalStats.commits > 0
+          ? (double)incrementalStats.dirtyByAncestors /
                 (double)incrementalStats.commits
           : 0.0;
 
@@ -856,4 +753,17 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Max dirty tasks", incrementalStats.dirtyMax);
   printMetric("Avg changed end-times/commit", avgChanged);
   printMetric("Max changed end-times", incrementalStats.changedMax);
+  printMetric("Avg changed agents/commit", avgChangedAgents);
+  printMetric("Max changed agents", incrementalStats.changedAgentsMax);
+  printMetric("Avg dirty-by-descendants/commit", avgDirtyByDescendants);
+  printMetric("Avg dirty-by-candidate-agent/commit", avgDirtyByCandidateAgent);
+  printMetric("Avg dirty-by-ancestors/commit", avgDirtyByAncestors);
+  printMetric("Refreshes by high stale load",
+              incrementalStats.refreshByHighStale);
+  printMetric("Refreshes by stale-growth stall",
+              incrementalStats.refreshByStaleGrowth);
+  printMetric("Refreshes by periodic safety",
+              incrementalStats.refreshByPeriodic);
+  printMetric("Endgame full recomputes",
+              incrementalStats.endgameFullRecomputes);
 }

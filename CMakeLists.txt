@@ -32,11 +32,24 @@ set(SOURCES
   src/report_exporter.cpp
   src/instance.cpp
   src/instance_generic.cpp
-  src/instance_kiva.cpp
   src/lns.cpp
+  src/lns_market.cpp
+  src/lns_initialization.cpp
+  src/lns_initialization_mapfpc.cpp
+  src/lns_initialization_reposition.cpp
   src/lns_destroy.cpp
+  src/lns_destroy_market.cpp
+  src/lns_destroy_classic.cpp
+  src/lns_destroy_precedence.cpp
   src/lns_repair.cpp
+  src/lns_repair_regret_agent.cpp
+  src/lns_repair_insert.cpp
+  src/lns_repair_commit.cpp
+  src/lns_repair_constraints.cpp
   src/lns_run.cpp
+  src/lns_run_iteration.cpp
+  src/lns_acceptance.cpp
+  src/lns_prepare.cpp
   src/lns_validation.cpp
   src/main.cpp
   src/mlastar.cpp
@@ -67,7 +80,6 @@ set(PLANNER_ISOLATION_SOURCES
   src/constrainttable.cpp
   src/instance.cpp
   src/instance_generic.cpp
-  src/instance_kiva.cpp
   src/mlastar.cpp
   src/sipps_helpers.cpp
   src/sipps.cpp

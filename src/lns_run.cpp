@@ -1,6 +1,7 @@
 #include "lns.hpp"
 #include "internal/task_position_index.hpp"
 #include "utils.hpp"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -18,14 +19,10 @@ void LNS::appendIterationStatBounded(const IterationStats& stat) {
 }
 
 bool LNS::run() {
+  constexpr double kPortfolioMinArmTimeSec = 1.0;
+
   invalidCandidateRejections = 0;
   marketGuardRejections = 0;
-  acceptanceDiagnostics_ = AcceptanceDiagnostics{};
-  invalidTemperatureInitialized_ = false;
-  invalidTemperature_ = 0.0;
-  invalidInitialTemperature_ = 0.0;
-  invalidMaxTemperature_ = std::numeric_limits<double>::infinity();
-  invalidGreatDelugeDecay_ = 0.0;
 
   auto runInitialSolutionStrategy =
       [&](const string& strategy,
@@ -80,6 +77,7 @@ bool LNS::run() {
   initialSolutionEffective_ = initialSolutionStrategy;
   initialSolutionFallbackUsed_ = false;
   initialSolutionFallbackReason_ = "none";
+  bool terminalPreparedDuringPortfolio = false;
 
   bool success = false;
   if (initialSolutionStrategy == "portfolio") {
@@ -93,13 +91,24 @@ bool LNS::run() {
     if (portfolioBudgetSec <= 0.0 && remainingBudget > 0.0) {
       // Ensure at least one short arm when portfolio is explicitly requested.
       portfolioBudgetSec =
-          std::min(remainingBudget, initialPortfolioMinArmTimeSec_);
+          std::min(remainingBudget, kPortfolioMinArmTimeSec);
     }
 
+    struct PortfolioCandidate {
+      string arm;
+      int soc;
+      Solution snapshot;
+
+      PortfolioCandidate(const string& armName, int socValue,
+                         const Solution& solution)
+          : arm(armName), soc(socValue), snapshot(solution) {}
+    };
+    vector<PortfolioCandidate> feasiblePortfolioCandidates;
+
     bool haveBestPortfolioSolution = false;
-    int bestPortfolioSoc = std::numeric_limits<int>::max();
     string bestPortfolioArm;
     Solution bestPortfolioSolution(instance_);
+    int bestServicePortfolioSoc = std::numeric_limits<int>::max();
 
     for (int i = 0; i < (int)portfolioArms.size(); i++) {
       if (runtimeBudgetExhausted() || portfolioBudgetSec <= 0.0) {
@@ -108,7 +117,7 @@ bool LNS::run() {
       const int armsLeft = (int)portfolioArms.size() - i;
       const double fairShare = portfolioBudgetSec / max(1, armsLeft);
       double armBudgetSec =
-          std::max(initialPortfolioMinArmTimeSec_, fairShare);
+          std::max(kPortfolioMinArmTimeSec, fairShare);
       armBudgetSec = std::min(armBudgetSec, portfolioBudgetSec);
       armBudgetSec = std::min(armBudgetSec, remainingRuntimeBudgetSec());
       if (armBudgetSec <= 0.0) {
@@ -119,9 +128,6 @@ bool LNS::run() {
       const double armStartSec = elapsedRuntimeSec();
       const bool armSuccess =
           runInitialSolutionStrategyWithBudget(arm, armBudgetSec);
-      const double armEndSec = elapsedRuntimeSec();
-      const double consumedBudget = max(0.0, armEndSec - armStartSec);
-      portfolioBudgetSec = max(0.0, portfolioBudgetSec - consumedBudget);
 
       bool armFeasible = false;
       int armSoc = 0;
@@ -136,14 +142,17 @@ bool LNS::run() {
         armFeasible = validateSolution(&armPotentialNeighborhood,
                                        &armValidationStats);
         useTerminalPathsInValidation_ = previousTerminalValidationFlag;
-        if (armFeasible && armSoc < bestPortfolioSoc) {
-          bestPortfolioSoc = armSoc;
-          bestPortfolioArm = arm;
-          bestPortfolioSolution = solution_;
-          haveBestPortfolioSolution = true;
-          armQuality = IterationQuality::bestSolutionYet;
+        if (armFeasible) {
+          feasiblePortfolioCandidates.emplace_back(arm, armSoc, solution_);
+          if (armSoc < bestServicePortfolioSoc) {
+            bestServicePortfolioSoc = armSoc;
+            armQuality = IterationQuality::bestSolutionYet;
+          }
         }
       }
+      const double armEndSec = elapsedRuntimeSec();
+      const double consumedBudget = max(0.0, armEndSec - armStartSec);
+      portfolioBudgetSec = max(0.0, portfolioBudgetSec - consumedBudget);
 
       InitialCheckpoint checkpoint;
       checkpoint.runtimeSec = armEndSec;
@@ -152,9 +161,42 @@ bool LNS::run() {
       checkpoint.feasible = armFeasible;
       checkpoint.quality = armQuality;
       initialCheckpoints.push_back(std::move(checkpoint));
+    }
 
-      if (initialPortfolioStopOnFirstFeasible_ && haveBestPortfolioSolution) {
-        break;
+    if (!feasiblePortfolioCandidates.empty()) {
+      std::stable_sort(
+          feasiblePortfolioCandidates.begin(), feasiblePortfolioCandidates.end(),
+          [](const PortfolioCandidate& a, const PortfolioCandidate& b) {
+            return a.soc < b.soc;
+          });
+
+      for (const auto& candidate : feasiblePortfolioCandidates) {
+        solution_ = candidate.snapshot;
+        bool candidateFeasible = false;
+        if (goalOccupationMode_ == "reposition_true") {
+          vector<int> allAgents(instance_.getAgentNum());
+          std::iota(allAgents.begin(), allAgents.end(), 0);
+          if (!planTerminalReposition(allAgents, true)) {
+            continue;
+          }
+          terminalPreparedDuringPortfolio = true;
+        }
+
+        ValidationStats validationStats;
+        ConflictMap potentialNeighborhood;
+        const bool previousTerminalValidationFlag =
+            useTerminalPathsInValidation_;
+        useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
+        candidateFeasible =
+            validateSolution(&potentialNeighborhood, &validationStats);
+        useTerminalPathsInValidation_ = previousTerminalValidationFlag;
+
+        if (candidateFeasible) {
+          bestPortfolioArm = candidate.arm;
+          bestPortfolioSolution = solution_;
+          haveBestPortfolioSolution = true;
+          break;
+        }
       }
     }
 
@@ -163,6 +205,9 @@ bool LNS::run() {
       initialSolutionEffective_ = "portfolio(" + bestPortfolioArm + ")";
       initialSolutionFallbackReason_ = "none";
       success = true;
+    } else if (!feasiblePortfolioCandidates.empty()) {
+      initialSolutionFallbackReason_ = "portfolio_no_terminal_feasible_arm";
+      success = false;
     } else {
       initialSolutionFallbackReason_ = "portfolio_no_feasible_arm";
       success = false;
@@ -171,35 +216,7 @@ bool LNS::run() {
     success = runInitialSolutionStrategy(initialSolutionStrategy);
   }
 
-  if (!success && initialSolutionStrategy != "greedy") {
-    if (initialSolutionFallback == "greedy") {
-      PLOGW << "Initial solution strategy '" << initialSolutionStrategy
-            << "' failed; falling back to 'greedy'\n";
-      initialSolutionFallbackUsed_ = true;
-      initialSolutionEffective_ = "greedy";
-      initialSolutionFallbackReason_ = "requested_strategy_failed";
-      success = runInitialSolutionStrategyWithBudget("greedy");
-      if (!success) {
-        initialSolutionFallbackReason_ = "fallback_greedy_failed";
-      }
-    } else if (initialSolutionFallback == "none") {
-      PLOGW << "Initial solution strategy '" << initialSolutionStrategy
-            << "' failed; fallback disabled\n";
-      initialSolutionFallbackReason_ = "fallback_disabled";
-    } else {
-      PLOGW << "Unknown initialSolutionFallback '" << initialSolutionFallback
-            << "'; defaulting to 'greedy'\n";
-      initialSolutionFallbackUsed_ = true;
-      initialSolutionEffective_ = "greedy";
-      initialSolutionFallbackReason_ = "unknown_fallback_defaulted_to_greedy";
-      success = runInitialSolutionStrategyWithBudget("greedy");
-      if (!success) {
-        initialSolutionFallbackReason_ = "fallback_greedy_failed";
-      }
-    }
-  }
-
-  // If the initial solution strategy failed then we cannot do anything!
+  // If the requested initial solution strategy fails, terminate directly.
   if (!success) {
     if (initialSolutionFallbackReason_ == "none") {
       initialSolutionFallbackReason_ = "initializer_failed";
@@ -213,7 +230,8 @@ bool LNS::run() {
   PLOGD << "Initial solution cost = " << solution_.sumOfCosts
         << ", Runtime = " << initialSolutionRuntime_ << "\n";
 
-  if (goalOccupationMode_ == "reposition_true") {
+  if (goalOccupationMode_ == "reposition_true" &&
+      !terminalPreparedDuringPortfolio) {
     vector<int> allAgents(instance_.getAgentNum());
     std::iota(allAgents.begin(), allAgents.end(), 0);
     if (!planTerminalReposition(allAgents, true)) {
@@ -270,10 +288,7 @@ bool LNS::run() {
   const int metricsWindowSize =
       (numOfIterations_ > 0) ? max(2, numOfIterations_)
                              : kDefaultMetricsWindowSize;
-  const int initialConflictSignal =
-      utilityUseConflictEventCount_
-          ? currentValidationStats.totalConflictEvents()
-                                    : (int)potentialNeighborhood.size();
+  const int initialConflictSignal = currentValidationStats.totalConflictEvents();
   MovingMetrics metrics(metricsWindowSize, lnsConflictWeight_, lnsCostWeight_,
                         initialConflictSignal, solution_.sumOfCosts);
   solution_.utility =

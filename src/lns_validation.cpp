@@ -46,14 +46,7 @@ int LNS::getServiceOccupancyEndExclusive(int agent) const {
   if (goalOccupationMode_ == "stay") {
     return MAX_TIMESTEP;
   }
-  int endExclusive = (int)servicePath.size();
-  if (!solution_.agents[agent].taskAssignments.empty() && goalTailSteps_ > 0) {
-    if (endExclusive >= MAX_TIMESTEP - goalTailSteps_) {
-      return MAX_TIMESTEP;
-    }
-    endExclusive += goalTailSteps_;
-  }
-  return endExclusive;
+  return (int)servicePath.size();
 }
 
 LNS::OccupancySource LNS::getAgentOccupancySourceAt(

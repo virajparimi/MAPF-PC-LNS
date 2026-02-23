@@ -30,14 +30,6 @@ class LNS {
     int64_t shortlistAgentEvaluations = 0;
     int64_t shortlistFallbackEvaluations = 0;
     int64_t shortlistFallbackRecovered = 0;
-    int64_t adaptiveTopKEvaluations = 0;
-    int64_t adaptiveTopKUsedSum = 0;
-    int64_t adaptiveTopKUsedMin = std::numeric_limits<int64_t>::max();
-    int64_t adaptiveTopKUsedMax = 0;
-    int64_t adaptiveTopKIncreases = 0;
-    int64_t adaptiveTopKDecreases = 0;
-    int64_t adaptiveTopKNoFeasibleSignals = 0;
-    int64_t adaptiveTopKFallbackRecoverySignals = 0;
     int64_t waitProxyDiagEvaluations = 0;
     int64_t waitProxyDiagFiniteCandidates = 0;
     int64_t waitProxyDiagNonZeroCandidates = 0;
@@ -88,6 +80,15 @@ class LNS {
     int64_t dirtyMax = 0;
     int64_t changedSum = 0;
     int64_t changedMax = 0;
+    int64_t changedAgentsSum = 0;
+    int64_t changedAgentsMax = 0;
+    int64_t dirtyByDescendants = 0;
+    int64_t dirtyByCandidateAgent = 0;
+    int64_t dirtyByAncestors = 0;
+    int64_t refreshByHighStale = 0;
+    int64_t refreshByStaleGrowth = 0;
+    int64_t refreshByPeriodic = 0;
+    int64_t endgameFullRecomputes = 0;
 
     void reset() { *this = IncrementalRegretStats(); }
   };
@@ -124,9 +125,6 @@ class LNS {
   struct SolutionRestoreStats {
     int64_t restoreCalls = 0;
     int64_t fullRestores = 0;
-    int64_t partialRestores = 0;
-    int64_t partialRestoreFallbacks = 0;
-    int64_t partialAgentsRestored = 0;
 
     void reset() { *this = SolutionRestoreStats(); }
   };
@@ -137,9 +135,6 @@ class LNS {
   LowLevelPlannerType lowLevelPlannerType_ = LowLevelPlannerType::mlastar;
   double lowLevelSegmentTimeout_ = 600.0;
   bool plannerParityCheck_ = false;
-  int plannerParityMaxLogs_ = 10;
-  bool mlastarIncrementalFocalRefresh_ = true;
-  bool partialSolutionRestore_ = false;
   struct MarketState : LNSParams::Market {
     // Runtime-only market state. Configuration fields are inherited from
     // LNSParams::Market to avoid duplicated declarations.
@@ -177,6 +172,7 @@ class LNS {
   vector<uint32_t> regretStamp_;
   vector<pair<int, int>> regretBestOption_;
   vector<pair<int, int>> regretSecondBestOption_;
+  vector<vector<int>> regretCandidateAgents_;
 
   RegretEvalStats regretEvalStatsCurrent_;
   RegretEvalStats regretEvalStatsTotal_;
@@ -202,37 +198,25 @@ class LNS {
   bool runtimeBudgetExhausted() const;
   int cascadeTaskBudget() const;
   void clearNeighborhood();
-  vector<int> buildRollbackAgentHints(const vector<int>& baseAgents) const;
-  void restoreSolutionFromPrevious(const vector<int>* agentHints = nullptr);
+  void restoreSolutionFromPrevious();
 
  protected:
   ALNS adaptiveLNS_;
   int neighborSize_;
   int regretCandidateTopK_ = 0;
-  bool adaptiveRegretTopK_ = false;
-  int adaptiveRegretTopKCurrent_ = 0;
-  int adaptiveRegretTopKLastUsed_ = 0;
-  bool regretShortlistUseNormalizedWaitProxy_ = false;
-  bool regretShortlistUseNormalizedSuccessorPressure_ = false;
-  bool regretShortlistClampSuccessorToPrecedenceRelease_ = true;
-  bool regretShortlistUseDescendantWeightedSuccessorPressure_ = false;
-  double regretShortlistSuccessorPressureDepthDecay_ = 0.5;
-  int regretShortlistSuccessorPressureMaxDepth_ = 0;
   bool regretShortlistDiagnostics_ = false;
   struct SuccessorPressureStaticSignal {
     int successorTask = UNASSIGNED;
     int depth = 1;
-    double weight = 1.0;
   };
   vector<vector<SuccessorPressureStaticSignal>>
       successorPressureStaticSignalsByTask_;
   void buildSuccessorPressureStaticSignals();
-  double maxCascadeFactor_ = 3.0;
+  double maxCascadeFactor_ = 0.0;
   int maxCascadeTasks_ = 0;
   bool adaptiveCascadeBudget_ = false;
   int adaptiveCascadeBudgetCurrent_ = 0;
   int adaptiveCascadeBudgetLastUsed_ = 0;
-  bool repairIncludeNonAncestorAgents_ = true;
   bool alnsEnablePrecedenceAwareDestroy_ = true;
   bool useTerminalPathsInValidation_ = false;
   bool lastPrepareAbortedByCascade_ = false;
@@ -240,7 +224,6 @@ class LNS {
   int lastPrepareClosureTasks_ = 0;
   int lastPrepareClosureAdded_ = 0;
   vector<int> lastPrepareAffectedAgents_;
-  vector<int> iterationRollbackHintAgents_;
   CascadeStats cascadeStats_;
   SolutionRestoreStats solutionRestoreStats_;
   vector<pair<int, int>> fullPrecedenceConstraintsScratch_;
@@ -273,13 +256,7 @@ class LNS {
                      shawDistanceWeight_ = 9, shawTemporalWeight_ = 3,
                      lnsConflictWeight_ = 0.75, lnsCostWeight_ = 0.25;
   Time::time_point plannerStartTime_;
-  string goalOccupationMode_ = "stay";
-  int goalTailSteps_ = 0;
-  int repositionMaxCandidates_ = 12;
-  int repositionDemandLookahead_ = 0;
-  int repositionReservationSlack_ = 64;
-  bool greedySegmentDiagnostics_ = false;
-  int greedySegmentDiagnosticsTopK_ = 10;
+  string goalOccupationMode_ = "reposition_true";
   mutable unordered_map<int, vector<int>> parkingCandidatesCache_;
   TerminalRepositionStats terminalRepositionStats_;
   string initialSolutionRequested_;
@@ -287,65 +264,14 @@ class LNS {
   bool initialSolutionFallbackUsed_ = false;
   string initialSolutionFallbackReason_;
   double initialPortfolioTimeFraction_ = 0.10;
-  double initialPortfolioMinArmTimeSec_ = 1.0;
-  bool initialPortfolioStopOnFirstFeasible_ = false;
-  bool rejectInvalidCandidates_ = false;
-  bool utilityUseConflictEventCount_ = true;
-  bool acceptanceFeasibilityFirstPrecedenceDebt_ = false;
-  double acceptanceInvalidSpatialWeight_ = 1.0;
-  double acceptanceInvalidPrecedenceDebtWeight_ = 1.0;
-  double acceptanceInvalidSocTieBreakWeight_ = 0.0;
-  bool acceptanceUseDedicatedInvalidTemperature_ = false;
-  double acceptanceInvalidTemperatureScale_ = 0.25;
-  double acceptanceInvalidTemperatureFloor_ = 1e-3;
-  double invalidTemperature_ = 0.0;
-  double invalidInitialTemperature_ = 0.0;
-  double invalidMaxTemperature_ = std::numeric_limits<double>::infinity();
-  double invalidGreatDelugeDecay_ = 0.0;
-  bool invalidTemperatureInitialized_ = false;
-
- public:
-  struct AcceptanceDiagnostics {
-    int64_t feasibilityFirstDecisions = 0;
-    int64_t invalidToValidAccepted = 0;
-    int64_t validToInvalidCompared = 0;
-    int64_t validToInvalidAccepted = 0;
-    int64_t validToInvalidRejected = 0;
-    int64_t invalidVsInvalidComparisons = 0;
-    int64_t invalidVsInvalidAccepted = 0;
-    int64_t invalidVsInvalidRejected = 0;
-    double previousInvalidScoreSum = 0.0;
-    double candidateInvalidScoreSum = 0.0;
-    double previousSpatialNormSum = 0.0;
-    double candidateSpatialNormSum = 0.0;
-    double previousPrecedenceDebtNormSum = 0.0;
-    double candidatePrecedenceDebtNormSum = 0.0;
-    double previousSocNormSum = 0.0;
-    double candidateSocNormSum = 0.0;
-    int64_t invalidScoreComparisons = 0;
-    int64_t invalidScoreAccepted = 0;
-    int64_t invalidScoreRejected = 0;
-    int64_t invalidScoreWorseComparisons = 0;
-    int64_t invalidScoreWorseAccepted = 0;
-    double invalidScoreDeltaSum = 0.0;
-    double invalidScoreAbsDeltaSum = 0.0;
-    double invalidAcceptanceTempBeforeSum = 0.0;
-    double invalidAcceptanceTempAfterSum = 0.0;
-    int64_t invalidDedicatedTempInitCount = 0;
-    double invalidDedicatedInitTempSum = 0.0;
-  };
-
- private:
-  AcceptanceDiagnostics acceptanceDiagnostics_;
-
  public:
   double runtime = 0;
   int numOfFailures = 0, sumOfCosts = 0;
   int64_t invalidCandidateRejections = 0;
   int64_t marketGuardRejections = 0;
   vector<IterationStats> iterationStats;
-  string initialSolutionStrategy, initialSolutionFallback, destroyHeuristic,
-      acceptanceCriteria, repairHeuristic,
+  string initialSolutionStrategy, destroyHeuristic, acceptanceCriteria,
+      repairHeuristic,
       regretType;
 
  private:
@@ -361,7 +287,6 @@ class LNS {
   int getServiceOccupancyEndExclusive(int agent) const;
   void reserveTerminalPathIfActive(ConstraintTable& constraintTable,
                                    int agent) const;
-  int computeActiveServiceHorizon() const;
   bool didAgentServicePathChange(int agent) const;
   vector<int> selectTerminalReplanAgents(
       const vector<int>& candidateAgents) const;
@@ -373,24 +298,6 @@ class LNS {
       const LNSParams& parameters);
 
   inline const Instance& getInstance() const { return instance_; }
-  inline bool rejectInvalidCandidatesEnabled() const {
-    return rejectInvalidCandidates_;
-  }
-  inline bool utilityUsesConflictEventCount() const {
-    return utilityUseConflictEventCount_;
-  }
-  inline bool acceptanceUsesFeasibilityFirstPrecedenceDebt() const {
-    return acceptanceFeasibilityFirstPrecedenceDebt_;
-  }
-  inline bool acceptanceUsesDedicatedInvalidTemperature() const {
-    return acceptanceUseDedicatedInvalidTemperature_;
-  }
-  AcceptanceDiagnostics getAcceptanceDiagnostics() const {
-    return acceptanceDiagnostics_;
-  }
-  inline bool mlastarIncrementalFocalRefreshEnabled() const {
-    return mlastarIncrementalFocalRefresh_;
-  }
 
   bool run();
 
@@ -412,7 +319,7 @@ class LNS {
       int agent, int timestep, bool includeTerminal = true) const;
   // Returns an agent's occupied location at timestep.
   // If includeTerminal is false, occupancy follows service + goal policy
-  // (stay/tail/reposition), excluding explicit terminalPath.
+  // (stay/reposition_true), excluding explicit terminalPath.
   int getAgentLocationAt(int agent, int timestep,
                          bool includeTerminal = true) const;
   // Returns the occupancy horizon (exclusive upper bound) for collision checks.
@@ -449,7 +356,9 @@ class LNS {
                             TaskRegretPacket taskPacket, int taskLocation,
                             RegretWorkspace& workspace,
                             vector<pair<int, int>>* precedenceConstraints,
-                            bool findingNextTask = false);
+                            bool findingNextTask = false,
+                            const vector<int>* assignmentOwnerLookup = nullptr,
+                            const vector<int>* assignmentPosLookup = nullptr);
 
   int extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue);
   int extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue,
@@ -472,10 +381,11 @@ class LNS {
   vector<int> collectRemainingRemovedTasks() const;
   vector<int> computeCurrentTaskEndTimes() const;
   vector<int> computeCurrentLastTaskPerAgent() const;
+  vector<uint64_t> computeCurrentAgentScheduleSignatures() const;
   vector<int> computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
                                           const vector<int>& endTimesAfter,
-                                          const vector<int>& lastTaskBefore,
-                                          const vector<int>& lastTaskAfter);
+                                          const vector<uint64_t>& agentSignaturesBefore,
+                                          const vector<uint64_t>& agentSignaturesAfter);
   std::shared_ptr<SingleAgentSolver> createSharedPlanner(int agent) const;
   std::unique_ptr<SingleAgentSolver> createLocalPlanner(int agent) const;
 
@@ -518,14 +428,9 @@ class LNS {
     return adaptiveCascadeBudget_ ? adaptiveCascadeBudgetCurrent_
                                   : cascadeTaskBudget();
   }
-  bool isAdaptiveRegretTopKEnabled() const { return adaptiveRegretTopK_; }
-  int getAdaptiveRegretTopKCurrent() const {
-    return adaptiveRegretTopK_ ? adaptiveRegretTopKCurrent_ : regretCandidateTopK_;
-  }
   const SolutionRestoreStats& getSolutionRestoreStats() const {
     return solutionRestoreStats_;
   }
-  bool isPartialSolutionRestoreEnabled() const { return partialSolutionRestore_; }
   const TerminalRepositionStats& getTerminalRepositionStats() const {
     return terminalRepositionStats_;
   }
@@ -581,18 +486,6 @@ class LNS {
   bool thresholdAcceptance();
   bool oldBachelorsAcceptance();
   bool greatDelugeAlgorithm();
-  bool acceptScoreWithCurrentCriterion(
-      double candidateScore, double previousScore,
-      double* temperatureOverride = nullptr,
-      double* initialTemperatureOverride = nullptr,
-      double* maxTemperatureOverride = nullptr,
-      double* greatDelugeDecayOverride = nullptr);
-  double computeInvalidAcceptanceScore(
-      const ValidationStats& selfStats, int selfSoc,
-      const ValidationStats& peerStats, int peerSoc, double* spatialNorm,
-      double* precedenceDebtNorm, double* socNorm) const;
-  void ensureInvalidAcceptanceTemperatureInitialized(double previousScore,
-                                                     double candidateScore);
 
   int marketTimeBucket(int timestep) const;
   uint64_t makeMarketVertexKey(int location, int bucket) const;
@@ -626,7 +519,9 @@ class LNS {
       int task, int taskLocation, const vector<vector<int>>& agentTaskAssignments,
       const vector<vector<AgentTaskPath>>& agentTaskPaths) const;
   int computeTaskPrecedenceWaitFromWorkspace(int task, int taskLocation,
-                                             const RegretWorkspace& workspace) const;
+                                             const RegretWorkspace& workspace,
+                                             const vector<int>* assignmentOwnerLookup = nullptr,
+                                             const vector<int>* assignmentPosLookup = nullptr) const;
   int computeTaskPrecedenceWaitInCurrentSolution(int task) const;
 
   void computeMovingMetrics(int numberOfConflicts, int sumOfCosts);

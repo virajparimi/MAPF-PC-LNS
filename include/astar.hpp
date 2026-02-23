@@ -155,15 +155,19 @@ class SingleAgentSolver {
       return MAX_TIMESTEP;
     }
     const int globalTask = heuristicTaskIdx[stage];
-    if (globalTask < 0 || globalTask >= (int)instance.heuristics_.size()) {
+    if (globalTask >= 0 && globalTask < (int)instance.heuristics_.size()) {
+      if (location < 0 ||
+          location >= (int)instance.heuristics_[globalTask].size()) {
+        assert(false);
+        return MAX_TIMESTEP;
+      }
+      return instance.heuristics_[globalTask][location];
+    }
+    if (location < 0 || location >= instance.mapSize) {
       assert(false);
       return MAX_TIMESTEP;
     }
-    if (location < 0 || location >= (int)instance.heuristics_[globalTask].size()) {
-      assert(false);
-      return MAX_TIMESTEP;
-    }
-    return instance.heuristics_[globalTask][location];
+    return instance.getDistanceToGoal(goalLocations[stage], location);
   }
   int getHeuristic(int stage, int location) const {
     if (stage < 0 || stage >= (int)heuristicLandmarks.size()) {

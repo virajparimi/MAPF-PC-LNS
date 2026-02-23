@@ -27,50 +27,6 @@
 
 bool LNS::buildGreedySolution() {
 
-  struct GreedySegmentDiag {
-    int agent = UNASSIGNED;
-    int task = UNASSIGNED;
-    int taskPosition = -1;
-    int startTime = 0;
-    int pathLength = 0;
-    double runtimeMs = 0.0;
-    uint64_t expanded = 0;
-    uint64_t generated = 0;
-    const char* outcome = "unknown";
-  };
-  vector<GreedySegmentDiag> segmentDiags;
-  segmentDiags.reserve((size_t)instance_.getTasksNum());
-
-  const auto printGreedyDiagSummary = [&](const char* context) {
-    if (!greedySegmentDiagnostics_ || segmentDiags.empty()) {
-      return;
-    }
-    vector<GreedySegmentDiag> sorted = segmentDiags;
-    std::sort(sorted.begin(), sorted.end(),
-              [](const GreedySegmentDiag& lhs, const GreedySegmentDiag& rhs) {
-                if (lhs.runtimeMs == rhs.runtimeMs) {
-                  return lhs.expanded > rhs.expanded;
-                }
-                return lhs.runtimeMs > rhs.runtimeMs;
-              });
-    const int topK = min((int)sorted.size(), greedySegmentDiagnosticsTopK_);
-    std::cout << "Greedy segment diagnostics (" << context
-              << "): total_segments=" << sorted.size() << ", top_k=" << topK
-              << '\n';
-    for (int i = 0; i < topK; i++) {
-      const auto& diag = sorted[i];
-      std::cout << "  [" << i << "] agent=" << diag.agent
-                << ", task=" << diag.task
-                << ", local_pos=" << diag.taskPosition
-                << ", start_t=" << diag.startTime
-                << ", path_len=" << diag.pathLength
-                << ", ll_ms=" << diag.runtimeMs
-                << ", expanded=" << diag.expanded
-                << ", generated=" << diag.generated
-                << ", outcome=" << diag.outcome << '\n';
-    }
-  };
-
   // Reset any previous task->agent mapping.
   for (int& assignedAgent : solution_.taskAgentMap) {
     assignedAgent = UNASSIGNED;
@@ -216,38 +172,15 @@ bool LNS::buildGreedySolution() {
       reservePathWithGoalPolicy(constraintTable, plannedPath, isFinalTask);
     }
 
-    uint64_t expandedBefore = 0;
-    uint64_t generatedBefore = 0;
-    double callStartSec = 0.0;
-    if (greedySegmentDiagnostics_) {
-      expandedBefore = lowLevelExpanded_;
-      generatedBefore = lowLevelGenerated_;
-      callStartSec = elapsedRuntimeSec();
-    }
     initialPaths_[id] = runLowLevelSearch(
         *solution_.agents[agent].pathPlanner, constraintTable, startTime,
         taskPosition, 0);
-    if (greedySegmentDiagnostics_) {
-      const double callEndSec = elapsedRuntimeSec();
-      GreedySegmentDiag diag;
-      diag.agent = agent;
-      diag.task = task;
-      diag.taskPosition = taskPosition;
-      diag.startTime = startTime;
-      diag.pathLength = (int)initialPaths_[id].size();
-      diag.runtimeMs = max(0.0, (callEndSec - callStartSec) * 1000.0);
-      diag.expanded = lowLevelExpanded_ - expandedBefore;
-      diag.generated = lowLevelGenerated_ - generatedBefore;
-      diag.outcome = getLastLowLevelOutcomeName();
-      segmentDiags.push_back(diag);
-    }
     if (initialPaths_[id].empty()) {
       PLOGE << "No path exists for agent " << agent << " and task " << task
             << " (ll_outcome=" << getLastLowLevelOutcomeName()
             << ", remaining_budget_sec=" << getLastLowLevelRemainingBudgetSec()
             << ", effective_timeout_sec=" << getLastLowLevelEffectiveTimeoutSec()
             << ")\n";
-      printGreedyDiagSummary("failure");
       logInitialSegmentFailureDiagnostics(
           instance_, solution_, constraintTable, agent, task, taskPosition,
           startTime, *solution_.agents[agent].pathPlanner,
@@ -274,7 +207,6 @@ bool LNS::buildGreedySolution() {
         static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
   }
   solution_.sumOfCosts = clampSocToInt(initialSumOfCosts, "buildGreedySolution");
-  printGreedyDiagSummary("success");
   return true;
 }
 

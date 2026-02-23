@@ -133,10 +133,6 @@ bool LNS::planTerminalReposition(const vector<int>& agentsToPlan,
       }
       const int fromTime = max(0, completionTime + 1);
       int demandScanEnd = (int)otherPath.size();
-      if (repositionDemandLookahead_ > 0) {
-        demandScanEnd =
-            min(demandScanEnd, completionTime + 1 + repositionDemandLookahead_);
-      }
       for (int timestep = fromTime; timestep < demandScanEnd;
            timestep++) {
         if (otherPath.at(timestep).location == finalGoal) {
@@ -167,6 +163,9 @@ bool LNS::planTerminalReposition(const vector<int>& agentsToPlan,
 
     bool planned = false;
     for (int parkingLocation : parkingCandidates) {
+      if (runtimeBudgetExhausted()) {
+        return false;
+      }
       auto planner = createLocalPlanner(agent);
       planner->setGoalLocations(vector<int>{finalGoal, parkingLocation});
       ConstraintTable evacConstraints(instance_.numOfCols, instance_.mapSize);
@@ -218,4 +217,3 @@ bool LNS::planTerminalReposition(const vector<int>& agentsToPlan,
 
   return true;
 }
-

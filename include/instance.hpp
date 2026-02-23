@@ -12,6 +12,7 @@ class Instance {
 
   vector<vector<int>> heuristics_;
   vector<vector<int>> neighborsCache_;
+  mutable unordered_map<int, vector<int>> extraGoalHeuristicsCache_;
   int numOfAgents_{}, numOfTasks_{};
   vector<int> endPoints_, taskLocations_, startLocations_, inputPlanningOrder_;
   unordered_map<int, int> taskLocationToGlobalTask_;
@@ -172,6 +173,8 @@ class Instance {
                                   const pair<int, int>& loc2) const {
     return abs(loc1.first - loc2.first) + abs(loc1.second - loc2.second);
   }
+  const vector<int>& getGoalDistanceTable(int goalLocation) const;
+  int getDistanceToGoal(int goalLocation, int location) const;
   int getDefaultNumberOfTasks() const { return numOfTasks_; }
   int getDefaultNumberOfAgents() const { return numOfAgents_; }
   string getAgentTaskFName() const { return agentTaskFname_; }
