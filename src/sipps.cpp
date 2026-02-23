@@ -1,6 +1,7 @@
 #include "internal/sipps_internal.hpp"
 #include "mlastar.hpp"
 #include <cstring>
+#include <deque>
 
 using namespace sipps_internal;
 
@@ -197,8 +198,7 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
   pairing_heap<SIPPSNode*, compare<SIPPSFocalCompare>> focalList;
   int minFVal = 0;
   int lowerBound = 0;
-  std::vector<std::unique_ptr<SIPPSNode>> allNodes;
-  allNodes.reserve(1024);
+  std::deque<SIPPSNode> allNodes;
   constexpr uint32_t kTimeoutCheckStride = 64;
   uint32_t intervalChecksSinceTimeoutProbe = 0;
   const auto timedOut = [&]() -> bool {
@@ -212,7 +212,8 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
                          int timestep, int gVal) -> SIPPSNode* {
     int hVal = max(getStageGoalDistance(stage, location),
                    holdingTime - timestep);
-    auto node = std::make_unique<SIPPSNode>();
+    allNodes.emplace_back();
+    SIPPSNode* node = &allNodes.back();
     node->parent = parent;
     node->location = location;
     node->intervalId = intervalId;
@@ -221,9 +222,7 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     node->hVal = hVal;
     node->secondaryKey = -gVal;
     node->tieBreaker = makeNodeTieBreaker(location, intervalId, timestep);
-    SIPPSNode* raw = node.get();
-    allNodes.push_back(std::move(node));
-    return raw;
+    return node;
   };
 
   auto pushNode = [&](SIPPSNode* node) {

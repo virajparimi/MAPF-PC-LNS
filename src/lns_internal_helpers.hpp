@@ -188,9 +188,6 @@ struct TaskAssignmentIndex {
   }
   return false;
 }
-}  // namespace
-
-namespace {
 [[maybe_unused]] void logInitialSegmentFailureDiagnostics(
     const Instance& instance, const Solution& solution,
     const ConstraintTable& constraintTable, int agent, int task, int taskPosition,

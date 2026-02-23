@@ -249,12 +249,20 @@ bool Instance::loadAgentsAndTasks() {
       return false;
     }
     tokenizer<char_separator<char>> tokenizer(line, sep);
-    if (std::distance(tokenizer.begin(), tokenizer.end()) < 2) {
+    auto firstToken = tokenizer.begin();
+    if (firstToken == tokenizer.end()) {
       PLOGE << "Invalid dependency line (expected two integers): " << line
             << "\n";
       return false;
     }
-    begin = tokenizer.begin();
+    auto secondToken = firstToken;
+    ++secondToken;
+    if (secondToken == tokenizer.end()) {
+      PLOGE << "Invalid dependency line (expected two integers): " << line
+            << "\n";
+      return false;
+    }
+    begin = firstToken;
     auto end = tokenizer.end();
     int predecessor = 0, successor = 0;
     if (!parse_helpers::parseNextInt(begin, end, predecessor) ||

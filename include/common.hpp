@@ -81,7 +81,7 @@ struct PathEntry {
   int location = -1;
 };
 
-enum IterationQuality {
+enum class IterationQuality {
   bestSolutionYet = 1,
   improvedSolution = 2,
   downgradedButAccepted = 3,

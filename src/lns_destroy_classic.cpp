@@ -242,15 +242,15 @@ void LNS::shawRemoval(int prioritySize) {
 
   // Initialize a queue to hold the related tasks and rank by relatedness
   pqRelatedTasks relatedQ;  // TODO: can change to ascending or descending here
-  set<RelatedTasks, RelatedTasks::RelatedTasksComparator> expandedTasks;
   vector<bool> alreadyExpanded(taskCount, false);
+  int expandedTaskCount = 0;
 
   // Adding the random task first
   RelatedTasks randomRelatedTask(randomTask, randomTaskAgent,
                                  randomTaskPosition, randomTaskST, randomTaskET,
                                  -1, -1);
-  expandedTasks.insert(randomRelatedTask);
   alreadyExpanded[randomTask] = true;
+  expandedTaskCount++;
 
   auto pushRelatedCandidate = [&](int relatedTask) {
     // Get information about related task
@@ -294,15 +294,15 @@ void LNS::shawRemoval(int prioritySize) {
                                      relatedTaskPosition, relatedTaskST,
                                      relatedTaskET, relatedManhattanDistance,
                                      relatedness);
-    expandedTasks.insert(relatedToRandomTask);
     relatedQ.emplace(relatedness, relatedToRandomTask);
     alreadyExpanded[relatedTask] = true;
+    expandedTaskCount++;
   };
 
   // Fill candidates uniformly at random.
   int candidateFillAttempts = 0;
   const int maxCandidateFillAttempts = max(64, taskCount * 8);
-  while ((int)expandedTasks.size() < cappedPrioritySize &&
+  while (expandedTaskCount < cappedPrioritySize &&
          candidateFillAttempts < maxCandidateFillAttempts) {
     const int relatedTask = distribution(rng_);
     candidateFillAttempts++;
@@ -311,9 +311,9 @@ void LNS::shawRemoval(int prioritySize) {
     }
     pushRelatedCandidate(relatedTask);
   }
-  if ((int)expandedTasks.size() < cappedPrioritySize) {
+  if (expandedTaskCount < cappedPrioritySize) {
     for (int task = 0;
-         task < taskCount && (int)expandedTasks.size() < cappedPrioritySize;
+         task < taskCount && expandedTaskCount < cappedPrioritySize;
          task++) {
       if (!alreadyExpanded[task]) {
         pushRelatedCandidate(task);
@@ -389,4 +389,3 @@ void LNS::shawRemoval(int prioritySize) {
           << " out of requested " << cappedNeighborSize << " tasks\n";
   }
 }
-

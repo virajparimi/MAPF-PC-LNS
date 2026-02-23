@@ -86,6 +86,49 @@ bool LNS::planTerminalReposition(const vector<int>& agentsToPlan,
               return lhs.first < rhs.first;
             });
 
+  struct LocationDemandSummary {
+    int bestAgent = UNASSIGNED;
+    int bestTime = -1;
+    int secondAgent = UNASSIGNED;
+    int secondTime = -1;
+  };
+  vector<LocationDemandSummary> demandByLocation(instance_.mapSize);
+  auto recordDemand = [&](int location, int agent, int timestep) {
+    if (location < 0 || location >= instance_.mapSize) {
+      return;
+    }
+    LocationDemandSummary& summary = demandByLocation[location];
+    if (summary.bestAgent == agent) {
+      summary.bestTime = max(summary.bestTime, timestep);
+      return;
+    }
+    if (summary.secondAgent == agent) {
+      summary.secondTime = max(summary.secondTime, timestep);
+      if (summary.secondTime > summary.bestTime) {
+        std::swap(summary.bestAgent, summary.secondAgent);
+        std::swap(summary.bestTime, summary.secondTime);
+      }
+      return;
+    }
+    if (timestep > summary.bestTime) {
+      summary.secondAgent = summary.bestAgent;
+      summary.secondTime = summary.bestTime;
+      summary.bestAgent = agent;
+      summary.bestTime = timestep;
+      return;
+    }
+    if (timestep > summary.secondTime) {
+      summary.secondAgent = agent;
+      summary.secondTime = timestep;
+    }
+  };
+  for (int otherAgent = 0; otherAgent < agentCount; otherAgent++) {
+    const auto& otherPath = solution_.agents[otherAgent].path;
+    for (int timestep = 0; timestep < (int)otherPath.size(); timestep++) {
+      recordDemand(otherPath.at(timestep).location, otherAgent, timestep);
+    }
+  }
+
   const auto reserveOtherAgents = [&](ConstraintTable& constraintTable,
                                       int planningAgent) {
     for (int otherAgent = 0; otherAgent < agentCount; otherAgent++) {
@@ -122,22 +165,15 @@ bool LNS::planTerminalReposition(const vector<int>& agentsToPlan,
     }
     const int finalGoal = instance_.getTaskLocations(finalTask);
 
+    const int fromTime = max(0, completionTime + 1);
     int lastDemandTime = -1;
-    for (int otherAgent = 0; otherAgent < agentCount; otherAgent++) {
-      if (otherAgent == agent) {
-        continue;
-      }
-      const auto& otherPath = solution_.agents[otherAgent].path;
-      if (otherPath.empty()) {
-        continue;
-      }
-      const int fromTime = max(0, completionTime + 1);
-      int demandScanEnd = (int)otherPath.size();
-      for (int timestep = fromTime; timestep < demandScanEnd;
-           timestep++) {
-        if (otherPath.at(timestep).location == finalGoal) {
-          lastDemandTime = max(lastDemandTime, timestep);
-        }
+    if (finalGoal >= 0 && finalGoal < (int)demandByLocation.size()) {
+      const LocationDemandSummary& demandSummary = demandByLocation[finalGoal];
+      const int lastDemandByOther =
+          (demandSummary.bestAgent != agent) ? demandSummary.bestTime
+                                             : demandSummary.secondTime;
+      if (lastDemandByOther >= fromTime) {
+        lastDemandTime = lastDemandByOther;
       }
     }
 

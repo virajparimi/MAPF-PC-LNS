@@ -41,8 +41,6 @@ void CBSReportExporter::writeReport(const Instance* inst,
     outputFile_.clear();
     return;
   }
-  assert(inst != nullptr);
-  assert(sol != nullptr);
 
   // Open file
   const auto now = std::chrono::system_clock::now();

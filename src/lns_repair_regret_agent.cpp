@@ -165,10 +165,14 @@ void LNS::computeRegretForTaskWithAgent(
           int successorRelease = 0;
           bool hasSuccessorRelease = false;
           auto consumePredecessorRelease = [&](int predecessorTask) {
+            bool usedPreviousFallback = false;
             const int predecessorEnd = resolveTaskEndTimeFromMixedState(
                 predecessorTask, workspace, workspaceIndex, previousSolution_,
-                lnsNeighborhood_, nullptr);
+                lnsNeighborhood_, &usedPreviousFallback);
             if (predecessorEnd >= 0) {
+              if (usedPreviousFallback) {
+                successorBeginFromPreviousCount++;
+              }
               successorRelease = max(successorRelease, predecessorEnd + 1);
               hasSuccessorRelease = true;
             }

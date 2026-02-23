@@ -236,6 +236,7 @@ bool topologicalSort(const Instance* instance,
     return false;
   }
 
+#ifndef NDEBUG
   vector<bool> tasksOrder(numTasks, false);
   for (int task : planningOrder) {
     if (task < 0 || task >= numTasks) {
@@ -261,6 +262,7 @@ bool topologicalSort(const Instance* instance,
     PLOGE << "Topological sort order does not cover all tasks\n";
     return false;
   }
+#endif
 
   assert((int)planningOrder.size() == numTasks);
   return true;

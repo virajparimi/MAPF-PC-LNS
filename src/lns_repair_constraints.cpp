@@ -276,6 +276,13 @@ int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue) {
 int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue,
                                   const vector<int>& newTaskQueue) {
   int localTaskPositionOffset = 0;
+  unordered_set<int> newTaskMembership;
+  if (!newTaskQueue.empty()) {
+    newTaskMembership.reserve(newTaskQueue.size());
+    for (int queuedTask : newTaskQueue) {
+      newTaskMembership.insert(queuedTask);
+    }
+  }
   // We need to compute the offset as we can invalidate multiple tasks associated with an agent. This means that simply querying the previous solution agent's task index is not enough as the it would be more than the actual task position value for the current solution
   for (int localTask : oldTaskQueue) {
     // We dont need to bother for the tasks that come after the current one since we are considering them in planning order
@@ -287,9 +294,7 @@ int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue,
     // accounted for it before! If not then the offset should only be
     // incremented if it was in conflict set.
     if (lnsNeighborhood_.immutableRemovedTasks.count(localTask) > 0 &&
-        find_if(begin(newTaskQueue), end(newTaskQueue), [localTask](int task) {
-          return task == localTask;
-        }) == end(newTaskQueue)) {
+        newTaskMembership.find(localTask) == newTaskMembership.end()) {
       localTaskPositionOffset++;
     }
   }

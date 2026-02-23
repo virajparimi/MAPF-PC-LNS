@@ -360,27 +360,41 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
     solution_.agents[bestRegretPacket.agent].pathPlanner->setGoalLocations(
         goalLocations);
 
-    // Need to recompute this task position as we may have added tasks in the agent's task queue when trying to account for the next task parents
-    const auto taskIt =
-        find(solution_.agents[bestRegretPacket.agent].taskAssignments.begin(),
-             solution_.agents[bestRegretPacket.agent].taskAssignments.end(),
-             bestRegretPacket.task);
-    if (taskIt ==
-        solution_.agents[bestRegretPacket.agent].taskAssignments.end()) {
+    // Ancestor injection may shift both the committed task and next task
+    // positions. Resolve both in one pass over the assignment queue.
+    int taskPosition = UNASSIGNED;
+    int nextTaskPosition = UNASSIGNED;
+    const auto& assignmentsForAgent =
+        solution_.agents[bestRegretPacket.agent].taskAssignments;
+    for (int idx = 0; idx < (int)assignmentsForAgent.size(); idx++) {
+      const int currentTask = assignmentsForAgent[idx];
+      if (currentTask == bestRegretPacket.task && taskPosition == UNASSIGNED) {
+        taskPosition = idx;
+      }
+      if (currentTask == nextTask && nextTaskPosition == UNASSIGNED) {
+        nextTaskPosition = idx;
+      }
+      if (taskPosition != UNASSIGNED && nextTaskPosition != UNASSIGNED) {
+        break;
+      }
+    }
+    if (taskPosition == UNASSIGNED) {
       PLOGE << "insertBestRegretTask: committed task "
             << bestRegretPacket.task
             << " missing from agent assignments after ancestor injection\n";
       return false;
     }
-    const int taskPosition =
-        (int)(taskIt -
-              solution_.agents[bestRegretPacket.agent].taskAssignments.begin());
     if (taskPosition < 0 ||
         taskPosition >=
             (int)solution_.agents[bestRegretPacket.agent].taskPaths.size()) {
       PLOGE << "insertBestRegretTask: invalid task position " << taskPosition
             << " for task " << bestRegretPacket.task << " (agent "
             << bestRegretPacket.agent << ")\n";
+      return false;
+    }
+    if (nextTaskPosition == UNASSIGNED) {
+      PLOGE << "insertBestRegretTask: next task " << nextTask
+            << " missing from assignments after commit\n";
       return false;
     }
 
@@ -426,19 +440,6 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
             << bestRegretPacket.agent << ")\n";
       return false;
     }
-    const auto nextTaskIt =
-        find(solution_.agents[bestRegretPacket.agent].taskAssignments.begin(),
-             solution_.agents[bestRegretPacket.agent].taskAssignments.end(),
-             nextTask);
-    if (nextTaskIt ==
-        solution_.agents[bestRegretPacket.agent].taskAssignments.end()) {
-      PLOGE << "insertBestRegretTask: next task " << nextTask
-            << " missing from assignments after commit\n";
-      return false;
-    }
-    const int nextTaskPosition =
-        (int)(nextTaskIt -
-              solution_.agents[bestRegretPacket.agent].taskAssignments.begin());
     if (nextTaskPosition <= 0 ||
         nextTaskPosition >=
             (int)solution_.agents[bestRegretPacket.agent].taskPaths.size()) {
@@ -507,4 +508,3 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
   patchAgentTaskPaths(bestRegretPacket.agent, 0);
   return true;
 }
-

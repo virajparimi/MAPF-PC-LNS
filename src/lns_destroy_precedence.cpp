@@ -20,6 +20,9 @@ void LNS::precedenceWaitRemoval(const ConflictMap* potentialNeighborhood) {
 
   const auto& predecessors = instance_.getAncestorsRef();
   const auto& successors = instance_.getSuccessorsRef();
+  const vector<int> taskPosByTask =
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_,
+                                                                  taskCount);
 
   vector<int> criticalPred(taskCount, UNASSIGNED);
   vector<int> releaseTime(taskCount, 0);
@@ -28,19 +31,22 @@ void LNS::precedenceWaitRemoval(const ConflictMap* potentialNeighborhood) {
   vector<int> taskToAgent(taskCount, UNASSIGNED);
   vector<int> taskToPosition(taskCount, -1);
   vector<TaskScheduleMetrics> scheduleMetrics;
-  computeTaskScheduleMetrics(scheduleMetrics, nullptr);
+  computeTaskScheduleMetricsFromIndex(taskPosByTask, scheduleMetrics, nullptr);
 
-  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    const auto& assignments = solution_.agents[agent].taskAssignments;
-    const auto& taskPaths = solution_.agents[agent].taskPaths;
-    const int maxPos = min((int)assignments.size(), (int)taskPaths.size());
-    for (int pos = 0; pos < maxPos; pos++) {
-      const int task = assignments[pos];
-      if (task >= 0 && task < taskCount) {
-        taskToAgent[task] = agent;
-        taskToPosition[task] = pos;
-      }
+  for (int task = 0; task < taskCount; task++) {
+    const int agent =
+        (task >= 0 && task < (int)solution_.taskAgentMap.size())
+            ? solution_.taskAgentMap[task]
+            : UNASSIGNED;
+    const int pos = (task >= 0 && task < (int)taskPosByTask.size())
+                        ? taskPosByTask[task]
+                        : -1;
+    if (agent < 0 || agent >= instance_.getAgentNum() || pos < 0 ||
+        pos >= (int)solution_.agents[agent].taskPaths.size()) {
+      continue;
     }
+    taskToAgent[task] = agent;
+    taskToPosition[task] = pos;
   }
 
   for (int task = 0; task < taskCount; task++) {
@@ -204,22 +210,28 @@ void LNS::lowSlackRemoval(const ConflictMap* potentialNeighborhood) {
   const auto& predecessors = instance_.getAncestorsRef();
   const auto& successors = instance_.getSuccessorsRef();
   const int INF = std::numeric_limits<int>::max() / 4;
+  const vector<int> taskPosByTask =
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_,
+                                                                  taskCount);
 
   vector<int> taskToAgent(taskCount, UNASSIGNED);
   vector<int> taskToPosition(taskCount, -1);
   vector<TaskScheduleMetrics> scheduleMetrics;
-  computeTaskScheduleMetrics(scheduleMetrics, nullptr);
-  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    const auto& assignments = solution_.agents[agent].taskAssignments;
-    const auto& taskPaths = solution_.agents[agent].taskPaths;
-    const int maxPos = min((int)assignments.size(), (int)taskPaths.size());
-    for (int pos = 0; pos < maxPos; pos++) {
-      const int task = assignments[pos];
-      if (task >= 0 && task < taskCount) {
-        taskToAgent[task] = agent;
-        taskToPosition[task] = pos;
-      }
+  computeTaskScheduleMetricsFromIndex(taskPosByTask, scheduleMetrics, nullptr);
+  for (int task = 0; task < taskCount; task++) {
+    const int agent =
+        (task >= 0 && task < (int)solution_.taskAgentMap.size())
+            ? solution_.taskAgentMap[task]
+            : UNASSIGNED;
+    const int pos = (task >= 0 && task < (int)taskPosByTask.size())
+                        ? taskPosByTask[task]
+                        : -1;
+    if (agent < 0 || agent >= instance_.getAgentNum() || pos < 0 ||
+        pos >= (int)solution_.agents[agent].taskPaths.size()) {
+      continue;
     }
+    taskToAgent[task] = agent;
+    taskToPosition[task] = pos;
   }
 
   struct CriticalEdge {
@@ -388,4 +400,3 @@ void LNS::lowSlackRemoval(const ConflictMap* potentialNeighborhood) {
           << cappedNeighborSize << " tasks\n";
   }
 }
-

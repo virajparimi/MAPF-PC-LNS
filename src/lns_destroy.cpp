@@ -26,15 +26,15 @@ void LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
       !adaptiveLNS_.destroyHeuristicHistory.empty()) {
     // Incorporate the results of the heuristic performance in the last iteration
     switch (iterationStats.back().quality) {
-      case bestSolutionYet:
+      case IterationQuality::bestSolutionYet:
         adaptiveLNS_.success[adaptiveLNS_.destroyHeuristicHistory.back()] +=
             adaptiveLNS_.delta1;
         break;
-      case improvedSolution:
+      case IterationQuality::improvedSolution:
         adaptiveLNS_.success[adaptiveLNS_.destroyHeuristicHistory.back()] +=
             adaptiveLNS_.delta2;
         break;
-      case downgradedButAccepted:
+      case IterationQuality::downgradedButAccepted:
         adaptiveLNS_.success[adaptiveLNS_.destroyHeuristicHistory.back()] +=
             adaptiveLNS_.delta3;
         break;

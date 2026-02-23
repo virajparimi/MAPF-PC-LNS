@@ -275,7 +275,7 @@ bool LNS::run() {
     appendIterationStatBounded(IterationStats(
         initialSolutionRuntime_, initialSolutionEffective_,
         instance_.getAgentNum(), instance_.getTasksNum(), solution_.sumOfCosts,
-        feasibleSolutionUpdated, bestSolutionYet));
+        feasibleSolutionUpdated, IterationQuality::bestSolutionYet));
   }
 
   ConflictMap oldNeighborhood;

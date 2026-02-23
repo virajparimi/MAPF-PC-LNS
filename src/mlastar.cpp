@@ -208,16 +208,9 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
       continue;
     }
 
-    // After the last relevant constraint timestamp, compress time progression
-    // for spatial moves to keep the state-space finite. Wait actions are
-    // skipped in that regime because they are dominated.
-    // Do not compress time progression before holding-time obligations are met.
-    // Otherwise stages that require waiting past the constraint horizon can
-    // become unreachable (no action can increase timestep further).
     // Correctness-first policy: keep explicit timestep progression even beyond
     // the finite constraint horizon. This avoids relying on compressed-time
     // state equivalence between gVal and timestep.
-    const bool compressTimeBeyondHorizon = false;
 
     auto tryExpandSuccessor = [&](int successor, int nextTimestep) {
       if (constraintTable.constrained(successor, nextTimestep) ||
@@ -328,28 +321,23 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
           return path;
         }
       }
-      int nextTimestep = current->timestep + 1;
-      if (compressTimeBeyondHorizon) {
-        nextTimestep = current->timestep;
-      }
+      const int nextTimestep = current->timestep + 1;
       tryExpandSuccessor(successor, nextTimestep);
     }
 
     // We can stay at the same location for the next timestep.
-    if (!compressTimeBeyondHorizon) {
-      expansionsSinceTimeoutProbe++;
-      if (expansionsSinceTimeoutProbe >= kTimeoutCheckStride) {
-        expansionsSinceTimeoutProbe = 0;
-        if (timedOut()) {
-          releaseNodes();
-          setLastSearchOutcome(SearchOutcome::timeout);
-          return path;
-        }
+    expansionsSinceTimeoutProbe++;
+    if (expansionsSinceTimeoutProbe >= kTimeoutCheckStride) {
+      expansionsSinceTimeoutProbe = 0;
+      if (timedOut()) {
+        releaseNodes();
+        setLastSearchOutcome(SearchOutcome::timeout);
+        return path;
       }
-      const int successor = current->location;
-      const int nextTimestep = current->timestep + 1;
-      tryExpandSuccessor(successor, nextTimestep);
     }
+    const int successor = current->location;
+    const int nextTimestep = current->timestep + 1;
+    tryExpandSuccessor(successor, nextTimestep);
   }
   if (path.empty() && getLastSearchOutcome() == SearchOutcome::unknown) {
     setLastSearchOutcome(SearchOutcome::search_exhausted);

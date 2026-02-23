@@ -20,6 +20,7 @@
 #include <queue>
 #include <random>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 #include "common.hpp"
@@ -96,9 +97,10 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
     return false;
   }
 
-  // Run a child process to spawn the MAPC-PC codebase with the current map and agent informations
+  // Run a child process to spawn the MAPC-PC codebase with the current map and
+  // agent information.
   namespace bp = boost::process;
-  bp::ipstream inputStream;
+  namespace fs = std::filesystem;
   const auto taskAssignmentExe = resolveTaskAssignmentExecutable();
   if (!taskAssignmentExe.has_value()) {
     PLOGE << "MAPF-PC task_assignment executable not found. "
@@ -106,6 +108,45 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
           << "or set MAPF_PC_TASK_ASSIGNMENT_EXE.\n";
     return false;
   }
+  auto parsePositiveEnvInt = [](const char* varName) -> std::optional<int> {
+    if (const char* raw = std::getenv(varName);
+        raw != nullptr && raw[0] != '\0') {
+      try {
+        const int value = std::stoi(raw);
+        if (value > 0) {
+          return value;
+        }
+      } catch (...) {
+      }
+    }
+    return std::nullopt;
+  };
+  int wallClockTimeoutSec = max(10, solverTimeoutSec + 30);
+  if (const auto timeoutFromEnv =
+          parsePositiveEnvInt("MAPF_PC_TASK_ASSIGNMENT_WALL_TIMEOUT_SEC");
+      timeoutFromEnv.has_value()) {
+    wallClockTimeoutSec = *timeoutFromEnv;
+  }
+
+  std::error_code tempDirEc;
+  fs::path tempDir = fs::temp_directory_path(tempDirEc);
+  if (tempDirEc || tempDir.empty()) {
+    tempDir = fs::current_path(tempDirEc);
+  }
+  if (tempDirEc || tempDir.empty()) {
+    PLOGE << "Failed to resolve temporary directory for MAPF-PC stdout capture\n";
+    return false;
+  }
+  const fs::path stdoutCapturePath =
+      tempDir /
+      ("mapf_pc_task_assignment_" + std::to_string(seed_) + "_" +
+       std::to_string((long long)Time::now().time_since_epoch().count()) +
+       ".log");
+  auto cleanupStdoutCapture = [&stdoutCapturePath]() {
+    std::error_code removeEc;
+    fs::remove(stdoutCapturePath, removeEc);
+  };
+
   const std::vector<std::string> args = {
       "-m", instance_.getMapName(),
       "-a", instance_.getAgentTaskFName(),
@@ -118,20 +159,50 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
   try {
 #if MAPF_PC_LNS_HAS_BOOST_PROCESS_NULL
     childProcess.emplace(taskAssignmentExe->string(), bp::args(args),
-                         bp::std_out > inputStream, bp::std_err > bp::null);
+                         bp::std_out > stdoutCapturePath.string(),
+                         bp::std_err > bp::null);
 #else
     // Some Boost.Process installations don't ship <boost/process/null.hpp>.
     // In that case, don't suppress stderr.
     childProcess.emplace(taskAssignmentExe->string(), bp::args(args),
-                         bp::std_out > inputStream);
+                         bp::std_out > stdoutCapturePath.string());
 #endif
   } catch (const bp::process_error& e) {
     PLOGE << "Failed to launch MAPF-PC task_assignment at '"
           << taskAssignmentExe->string() << "': " << e.what() << "\n";
+    cleanupStdoutCapture();
     return false;
   }
 
   bp::child& child = *childProcess;
+  const auto wallClockDeadline =
+      std::chrono::steady_clock::now() +
+      std::chrono::seconds(wallClockTimeoutSec);
+  while (child.running() && std::chrono::steady_clock::now() < wallClockDeadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (child.running()) {
+    PLOGE << "MAPF-PC task_assignment exceeded wall-clock timeout ("
+          << wallClockTimeoutSec << "s); terminating process\n";
+    child.terminate();
+    child.wait();
+    cleanupStdoutCapture();
+    return false;
+  }
+  child.wait();
+  if (child.exit_code() != 0) {
+    PLOGE << "MAPF-PC task_assignment exited with code " << child.exit_code()
+          << "\n";
+    cleanupStdoutCapture();
+    return false;
+  }
+  std::ifstream inputStream(stdoutCapturePath);
+  if (!inputStream.is_open()) {
+    PLOGE << "Failed to open captured MAPF-PC stdout at '"
+          << stdoutCapturePath.string() << "'\n";
+    cleanupStdoutCapture();
+    return false;
+  }
 
   // The output sequence of the MAPF-PC codebase is as follows:
   // 1. Output TASK ASSIGNMENTS
@@ -195,8 +266,7 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
         const auto task = parseInt(token);
         if (!task.has_value()) {
           PLOGE << "Failed to parse task assignment token: '" << token << "'\n";
-          child.terminate();
-          child.wait();
+          cleanupStdoutCapture();
           return false;
         }
         solution_.assignTaskToAgent(agent, *task);
@@ -316,19 +386,13 @@ bool LNS::buildGreedySolutionWithMAPFPC(const string& variant,
             taskPath;
       }
       if (!ok) {
-        child.terminate();
-        child.wait();
+        cleanupStdoutCapture();
         return false;
       }
     }
   }
-
-  child.wait();
-  if (child.exit_code() != 0) {
-    PLOGE << "MAPF-PC task_assignment exited with code " << child.exit_code()
-          << "\n";
-    return false;
-  }
+  inputStream.close();
+  cleanupStdoutCapture();
 
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     vector<int> taskLocations =

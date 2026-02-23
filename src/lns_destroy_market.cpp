@@ -23,9 +23,12 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
     return;
   }
 
+  const vector<int> taskPosByTask =
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_,
+                                                                  taskCount);
   vector<TaskScheduleMetrics> perTask;
   vector<double> blockedWaitSum;
-  computeTaskScheduleMetrics(perTask, &blockedWaitSum);
+  computeTaskScheduleMetricsFromIndex(taskPosByTask, perTask, &blockedWaitSum);
   unordered_map<uint64_t, int> vertexDemand;
   unordered_map<uint64_t, int> edgeDemand;
   buildMarketDemandFromCurrentOccupancy(vertexDemand, edgeDemand);
@@ -33,15 +36,19 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
   const auto& successors = instance_.getSuccessorsRef();
   vector<int> taskToAgent(taskCount, UNASSIGNED);
   vector<int> taskToPosition(taskCount, UNASSIGNED);
-  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
-    const auto& assignments = solution_.agents[agent].taskAssignments;
-    for (int pos = 0; pos < (int)assignments.size(); pos++) {
-      const int task = assignments[pos];
-      if (task >= 0 && task < taskCount) {
-        taskToAgent[task] = agent;
-        taskToPosition[task] = pos;
-      }
+  for (int task = 0; task < taskCount; task++) {
+    const int agent =
+        (task >= 0 && task < (int)solution_.taskAgentMap.size())
+            ? solution_.taskAgentMap[task]
+            : UNASSIGNED;
+    const int pos = (task >= 0 && task < (int)taskPosByTask.size())
+                        ? taskPosByTask[task]
+                        : UNASSIGNED;
+    if (agent < 0 || agent >= instance_.getAgentNum() || pos < 0) {
+      continue;
     }
+    taskToAgent[task] = agent;
+    taskToPosition[task] = pos;
   }
 
   struct RankedTask {
@@ -268,4 +275,3 @@ void LNS::marketTatonnementRemoval(const ConflictMap* potentialNeighborhood) {
     }
   }
 }
-
