@@ -201,17 +201,79 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable, int task) {
 bool LNS::buildConstraintTable(
     ConstraintTable& constraintTable, int task,
     const vector<pair<int, int>>& precedenceConstraints) {
-  if (task < 0 || task >= instance_.getTasksNum()) {
+  const int taskCount = instance_.getTasksNum();
+  if (task < 0 || task >= taskCount) {
     PLOGE << "buildConstraintTable: invalid task id " << task << "\n";
     return false;
   }
+
+  vector<int> taskOwner(taskCount, UNASSIGNED);
+  vector<int> taskToPosition(taskCount, UNASSIGNED);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    for (int pos = 0; pos < (int)assignments.size(); pos++) {
+      const int assignedTask = assignments[pos];
+      if (assignedTask < 0 || assignedTask >= taskCount) {
+        continue;
+      }
+      taskOwner[assignedTask] = agent;
+      taskToPosition[assignedTask] = pos;
+    }
+  }
+  vector<int> previousTaskOwner(taskCount, UNASSIGNED);
+  vector<int> previousTaskToPosition(taskCount, UNASSIGNED);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& assignments = previousSolution_.agents[agent].taskAssignments;
+    for (int pos = 0; pos < (int)assignments.size(); pos++) {
+      const int assignedTask = assignments[pos];
+      if (assignedTask < 0 || assignedTask >= taskCount) {
+        continue;
+      }
+      previousTaskOwner[assignedTask] = agent;
+      previousTaskToPosition[assignedTask] = pos;
+    }
+  }
+
+  int taskAgent = taskOwner[task];
+  if (taskAgent == UNASSIGNED && isPendingCommitState(lnsNeighborhood_, task)) {
+    taskAgent = previousTaskOwner[task];
+  }
+  if (taskAgent == UNASSIGNED &&
+      task >= 0 && task < (int)solution_.taskAgentMap.size()) {
+    taskAgent = solution_.taskAgentMap[task];
+  }
+  if (taskAgent == UNASSIGNED &&
+      task >= 0 && task < (int)previousSolution_.taskAgentMap.size()) {
+    taskAgent = previousSolution_.taskAgentMap[task];
+  }
+  vector<bool> finalTasks(taskCount, false);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    if (!assignments.empty()) {
+      const int finalTask = assignments.back();
+      if (finalTask >= 0 && finalTask < taskCount) {
+        finalTasks[finalTask] = true;
+      }
+    }
+  }
+  vector<bool> previousFinalTasks(taskCount, false);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& assignments = previousSolution_.agents[agent].taskAssignments;
+    if (!assignments.empty()) {
+      const int finalTask = assignments.back();
+      if (finalTask >= 0 && finalTask < taskCount) {
+        previousFinalTasks[finalTask] = true;
+      }
+    }
+  }
+
   constraintTable.goalLocation = instance_.getTaskLocations(task);
 
-  vector<vector<int>> ancestors(instance_.getTasksNum());
+  vector<vector<int>> ancestors(taskCount);
   for (const auto& precConstraint : precedenceConstraints) {
     if (precConstraint.first < 0 || precConstraint.second < 0 ||
-        precConstraint.first >= instance_.getTasksNum() ||
-        precConstraint.second >= instance_.getTasksNum()) {
+        precConstraint.first >= taskCount ||
+        precConstraint.second >= taskCount) {
       continue;
     }
     ancestors[precConstraint.second].push_back(precConstraint.first);
@@ -227,40 +289,113 @@ bool LNS::buildConstraintTable(
     if (!ancestorsOfTask[ancestorTask]) {
       continue;
     }
-    const int ancestorTaskAgent =
-        (ancestorTask >= 0 && ancestorTask < (int)solution_.taskAgentMap.size())
-            ? solution_.taskAgentMap[ancestorTask]
+    const bool pendingAncestor =
+        isPendingCommitState(lnsNeighborhood_, ancestorTask);
+    int ancestorTaskAgent =
+        (ancestorTask >= 0 && ancestorTask < taskCount)
+            ? (pendingAncestor ? previousTaskOwner[ancestorTask]
+                               : taskOwner[ancestorTask])
             : UNASSIGNED;
+    int ancestorTaskPosition =
+        (ancestorTask >= 0 && ancestorTask < taskCount)
+            ? (pendingAncestor ? previousTaskToPosition[ancestorTask]
+                               : taskToPosition[ancestorTask])
+            : UNASSIGNED;
+    if (ancestorTaskAgent == UNASSIGNED && ancestorTask >= 0 &&
+        ancestorTask < (int)solution_.taskAgentMap.size() && !pendingAncestor) {
+      ancestorTaskAgent = solution_.taskAgentMap[ancestorTask];
+      if (ancestorTaskAgent != UNASSIGNED) {
+        ancestorTaskPosition =
+            solution_.getLocalTaskIndex(ancestorTaskAgent, ancestorTask);
+      }
+    }
+    if (ancestorTaskAgent == UNASSIGNED && ancestorTask >= 0 &&
+        ancestorTask < (int)previousSolution_.taskAgentMap.size()) {
+      ancestorTaskAgent = previousSolution_.taskAgentMap[ancestorTask];
+      if (ancestorTaskAgent != UNASSIGNED) {
+        ancestorTaskPosition =
+            previousSolution_.getLocalTaskIndex(ancestorTaskAgent, ancestorTask);
+      }
+    }
     if (ancestorTaskAgent == UNASSIGNED) {
-      PLOGE << "Missing agent assignment for ancestor task "
-            << ancestorTask << " in current solution\n";
+      PLOGE << "Missing agent assignment for ancestor task " << ancestorTask
+            << (pendingAncestor ? " in previous solution\n"
+                                : " in current solution\n");
       return false;
     }
-    const int ancestorTaskPosition =
-        solution_.getLocalTaskIndex(ancestorTaskAgent, ancestorTask);
     if (ancestorTaskPosition == UNASSIGNED ||
+        ancestorTaskAgent < 0 || ancestorTaskAgent >= instance_.getAgentNum() ||
         ancestorTaskPosition >=
-            (int)solution_.agents[ancestorTaskAgent].taskPaths.size()) {
+            (pendingAncestor
+                 ? (int)previousSolution_.agents[ancestorTaskAgent]
+                       .taskPaths.size()
+                 : (int)solution_.agents[ancestorTaskAgent].taskPaths.size())) {
       PLOGE << "buildConstraintTable: invalid local index for ancestor task "
             << ancestorTask << " on agent " << ancestorTaskAgent << "\n";
       return false;
     }
-    const auto& pathRef =
-        solution_.agents[ancestorTaskAgent].taskPaths[ancestorTaskPosition];
+    const auto& pathRef = pendingAncestor
+                              ? previousSolution_.agents[ancestorTaskAgent]
+                                    .taskPaths[ancestorTaskPosition]
+                              : solution_.agents[ancestorTaskAgent]
+                                    .taskPaths[ancestorTaskPosition];
     if (pathRef.empty()) {
       PLOGE << "Missing path for ancestor task " << ancestorTask
-            << " in current solution\n";
+            << (pendingAncestor ? " in previous solution\n"
+                                : " in current solution\n");
       return false;
     }
-    const bool isFinalTask =
-        ancestorTask ==
-        (int)solution_.agents[ancestorTaskAgent].taskAssignments.back();
+    const bool isFinalTask = (ancestorTask >= 0 && ancestorTask < taskCount) &&
+                             (pendingAncestor ? previousFinalTasks[ancestorTask]
+                                              : finalTasks[ancestorTask]);
     reservePathWithGoalPolicy(constraintTable, pathRef, isFinalTask);
     if (isFinalTask) {
       reserveTerminalPathIfActive(constraintTable, ancestorTaskAgent);
     }
     constraintTable.lengthMin =
         max(constraintTable.lengthMin, pathRef.endTime() + 1);
+  }
+
+  // Reserve occupancy for non-ancestor agents as well. This keeps commit/prepare
+  // replans consistent with regret-eval replans and avoids reintroducing
+  // cross-agent collisions outside the ancestor closure.
+  vector<char> isAncestorTask(taskCount, 0);
+  for (int t = 0; t < (int)ancestorsOfTask.size(); t++) {
+    if (ancestorsOfTask[t]) {
+      isAncestorTask[t] = 1;
+    }
+  }
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    if (agent == taskAgent) {
+      continue;
+    }
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    const auto& paths = solution_.agents[agent].taskPaths;
+    const int localCount = min((int)assignments.size(), (int)paths.size());
+    for (int localTask = 0; localTask < localCount; localTask++) {
+      const int otherTask = assignments[localTask];
+      if (otherTask < 0 || otherTask >= taskCount) {
+        continue;
+      }
+      if (isAncestorTask[otherTask]) {
+        continue;
+      }
+      if (taskOwner[otherTask] != agent) {
+        continue;
+      }
+      if (taskToPosition[otherTask] != localTask) {
+        continue;
+      }
+      const auto& pathRef = paths[localTask];
+      if (pathRef.empty()) {
+        continue;
+      }
+      const bool isFinalTask = (localTask + 1 == (int)assignments.size());
+      reservePathWithGoalPolicy(constraintTable, pathRef, isFinalTask);
+      if (isFinalTask) {
+        reserveTerminalPathIfActive(constraintTable, agent);
+      }
+    }
   }
 
   constraintTable.latestTimestep =

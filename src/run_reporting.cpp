@@ -94,6 +94,16 @@ vector<double> computeIterationDurations(const vector<IterationStats>& stats) {
   return durations;
 }
 
+int countLnsIterations(const vector<IterationStats>& stats) {
+  int count = 0;
+  for (const IterationStats& iter : stats) {
+    if (iter.algorithm == "LNS") {
+      count++;
+    }
+  }
+  return count;
+}
+
 double computeTimeToBestFeasible(const vector<IterationStats>& stats) {
   int bestSoC = std::numeric_limits<int>::max();
   double timeToBest = std::numeric_limits<double>::infinity();
@@ -368,6 +378,7 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
                            bool success, bool marketHeuristics,
                            bool incrementalRegret,
                            const FeasibleTrajectoryStats& stats) {
+  const int lnsIterations = countLnsIterations(lns.iterationStats);
   const vector<double> iterDurations = computeIterationDurations(lns.iterationStats);
   const double avgIterSec = iterDurations.empty()
                                 ? 0.0
@@ -376,10 +387,9 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
                                                   0.0) /
                                       static_cast<double>(iterDurations.size());
   const double p95IterSec = percentileValue(iterDurations, 0.95);
-  const double iterPerSec = lns.runtime > 0.0
-                                ? static_cast<double>(lns.iterationStats.size()) /
-                                      lns.runtime
-                                : 0.0;
+  const double iterPerSec =
+      lns.runtime > 0.0 ? static_cast<double>(lnsIterations) / lns.runtime
+                        : 0.0;
   const double timeToBestFeasible = computeTimeToBestFeasible(lns.iterationStats);
   const FinalSolutionScheduleMetrics finalSolutionMetrics =
       computeFinalSolutionScheduleMetrics(solution, lns.getInstance());
@@ -435,7 +445,7 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Initial fallback reason",
               lns.getInitialSolutionFallbackReason());
   printMetric("Runtime (s)", lns.runtime);
-  printMetric("Iterations", (int)lns.iterationStats.size());
+  printMetric("Iterations", lnsIterations);
   printMetric("Iterations/sec", iterPerSec);
   printMetric("Avg iteration runtime (ms)", avgIterSec * 1000.0);
   printMetric("P95 iteration runtime (ms)", p95IterSec * 1000.0);
@@ -505,6 +515,34 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("LL outcome budget-exhausted",
               static_cast<int64_t>(lowLevelStats.budgetExhausted));
   printMetric("LL outcome unknown", static_cast<int64_t>(lowLevelStats.unknown));
+  printMetric("LL timeout reason goal-permanent-before-lb",
+              static_cast<int64_t>(
+                  lowLevelStats.timeoutGoalPermanentBeforeArrivalLb));
+  printMetric("LL timeout reason start-trapped@t+1",
+              static_cast<int64_t>(lowLevelStats.timeoutStartTrappedAtTPlus1));
+  printMetric("LL timeout reason static-disconnected",
+              static_cast<int64_t>(
+                  lowLevelStats.timeoutStaticDisconnectedPermanent));
+  printMetric("LL timeout reason other",
+              static_cast<int64_t>(lowLevelStats.timeoutOther));
+  printMetric("LL timeout reduced-by-global-budget",
+              static_cast<int64_t>(lowLevelStats.timeoutReducedByGlobalBudget));
+  printMetric("LL timeout multi-certificate",
+              static_cast<int64_t>(lowLevelStats.timeoutMultiCertificate));
+  printMetric("LL structural pre-pruned",
+              static_cast<int64_t>(lowLevelStats.structuralPrePruned));
+  printMetric("LL structural pre-pruned goal-permanent-before-lb",
+              static_cast<int64_t>(
+                  lowLevelStats.structuralPrePrunedGoalPermanentBeforeArrivalLb));
+  printMetric("LL structural pre-pruned start-trapped@t+1",
+              static_cast<int64_t>(
+                  lowLevelStats.structuralPrePrunedStartTrappedAtTPlus1));
+  printMetric("LL structural pre-pruned static-disconnected",
+              static_cast<int64_t>(
+                  lowLevelStats.structuralPrePrunedStaticDisconnectedPermanent));
+  printMetric("LL structural pre-pruned multi-certificate",
+              static_cast<int64_t>(
+                  lowLevelStats.structuralPrePrunedMultiCertificate));
   printMetric("LL found rate", llFoundRate);
   printMetric("LL timeout rate", llTimeoutRate);
   printMetric("LL exhausted rate", llExhaustedRate);
@@ -829,6 +867,226 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
                 successorAvgDepthGt1Contribution);
     printMetric("Successor-pressure descendant contribution share",
                 successorDescendantContributionShare);
+  }
+
+  if (lns.isDebugImprovementDiagnosticsEnabled()) {
+    const auto& debugStats = lns.getImprovementDiagnosticsStats();
+    const int64_t started = debugStats.iterationsStarted;
+    const int64_t candidateEvaluated =
+        debugStats.candidateValid + debugStats.candidateInvalid;
+    const int64_t accepted = debugStats.accepted;
+    const int64_t rejected = debugStats.rejected;
+    const int64_t decisions = accepted + rejected;
+    const double acceptanceRate =
+        decisions > 0 ? (double)accepted / (double)decisions : 0.0;
+    const double candidateValidRate =
+        candidateEvaluated > 0
+            ? (double)debugStats.candidateValid / (double)candidateEvaluated
+            : 0.0;
+    const double acceptedFeasibleNoBestRate =
+        accepted > 0
+            ? (double)debugStats.acceptedFeasibleNoBestUpdate /
+                  (double)accepted
+            : 0.0;
+    const double acceptedFingerprintRepeatRate =
+        accepted > 0
+            ? (double)debugStats.acceptedFingerprintRepeat / (double)accepted
+            : 0.0;
+    const int64_t neighborhoodFingerprintSamples =
+        debugStats.neighborhoodFingerprintUnique +
+        debugStats.neighborhoodFingerprintRepeat;
+    const double neighborhoodFingerprintRepeatRate =
+        neighborhoodFingerprintSamples > 0
+            ? (double)debugStats.neighborhoodFingerprintRepeat /
+                  (double)neighborhoodFingerprintSamples
+            : 0.0;
+    const double neighborhoodMeanJaccardPrev =
+        debugStats.neighborhoodJaccardPrevSamples > 0
+            ? debugStats.neighborhoodJaccardPrevSum /
+                  (double)debugStats.neighborhoodJaccardPrevSamples
+            : 0.0;
+    const double neighborhoodMeanJaccardPrevWhenRepeat =
+        debugStats.neighborhoodJaccardPrevRepeatSamples > 0
+            ? debugStats.neighborhoodJaccardPrevRepeatSum /
+                  (double)debugStats.neighborhoodJaccardPrevRepeatSamples
+            : 0.0;
+    const double avgRemovedTasksPerNeighborhood =
+        debugStats.neighborhoodsCount > 0
+            ? (double)debugStats.removedTasksTotal /
+                  (double)debugStats.neighborhoodsCount
+            : 0.0;
+    const double avgChangedRemovedTasksPerNeighborhood =
+        debugStats.neighborhoodsCount > 0
+            ? (double)(debugStats.removedTasksChangedAgentTotal +
+                       debugStats.removedTasksChangedOrderTotal) /
+                  (double)debugStats.neighborhoodsCount
+            : 0.0;
+    const double changedNeighborhoodRate =
+        debugStats.neighborhoodsCount > 0
+            ? (double)debugStats.neighborhoodsWithChanges /
+                  (double)debugStats.neighborhoodsCount
+            : 0.0;
+    const double avgAcceptedRemovedTasks =
+        debugStats.accepted > 0
+            ? (double)debugStats.acceptedRemovedTasksTotal /
+                  (double)debugStats.accepted
+            : 0.0;
+    const double avgAcceptedChangedRemovedTasks =
+        debugStats.accepted > 0
+            ? (double)(debugStats.acceptedRemovedTasksChangedAgentTotal +
+                       debugStats.acceptedRemovedTasksChangedOrderTotal) /
+                  (double)debugStats.accepted
+            : 0.0;
+    const double meanPreviousSoc =
+        started > 0 ? debugStats.sumPreviousSoc / (double)started : 0.0;
+    const double meanCandidateSoc =
+        candidateEvaluated > 0
+            ? debugStats.sumCandidateSoc / (double)candidateEvaluated
+            : 0.0;
+    const double meanIncumbentSoc =
+        debugStats.incumbentSocSamples > 0
+            ? debugStats.sumIncumbentSoc /
+                  (double)debugStats.incumbentSocSamples
+            : 0.0;
+    const double meanPreviousConflictSignal =
+        candidateEvaluated > 0
+            ? debugStats.sumPreviousConflictSignal /
+                  (double)candidateEvaluated
+            : 0.0;
+    const double meanCandidateConflictSignal =
+        candidateEvaluated > 0
+            ? debugStats.sumCandidateConflictSignal /
+                  (double)candidateEvaluated
+            : 0.0;
+
+    const double measuredDebugSec =
+        debugStats.timeDestroyAndPrepareSec +
+        debugStats.timeRepairAndCommitSec + debugStats.timeJoinPathsSec +
+        debugStats.timeTerminalReplanSec + debugStats.timeRecomputeSocSec +
+        debugStats.timeValidationSec + debugStats.timeAcceptanceSec +
+        debugStats.timeBookkeepingSec;
+    const double measuredShareOfRuntime =
+        lns.runtime > 0.0 ? measuredDebugSec / lns.runtime : 0.0;
+    const auto phaseShare = [&](double phaseSec) -> double {
+      return measuredDebugSec > 0.0 ? phaseSec / measuredDebugSec : 0.0;
+    };
+
+    std::cout << "\n=== Improvement Diagnostics ===\n";
+    printMetric("Iterations started", started);
+    printMetric("Iterations with candidate eval", candidateEvaluated);
+    printMetric("Candidate valid", debugStats.candidateValid);
+    printMetric("Candidate invalid", debugStats.candidateInvalid);
+    printMetric("Candidate valid rate", candidateValidRate);
+    printMetric("Accepted", accepted);
+    printMetric("Rejected", rejected);
+    printMetric("Guard rejected", debugStats.guardRejected);
+    printMetric("Acceptance rate", acceptanceRate);
+    printMetric("Accepted utility better/equal",
+                debugStats.acceptedAsBetterOrEqualUtility);
+    printMetric("Accepted utility worse", debugStats.acceptedAsWorseUtility);
+    printMetric("Accepted SoC better vs previous",
+                debugStats.acceptedSocBetterVsPrevious);
+    printMetric("Accepted SoC equal vs previous",
+                debugStats.acceptedSocEqualVsPrevious);
+    printMetric("Accepted SoC worse vs previous",
+                debugStats.acceptedSocWorseVsPrevious);
+    printMetric("Accepted SoC better vs incumbent",
+                debugStats.acceptedSocBetterVsIncumbent);
+    printMetric("Accepted SoC equal vs incumbent",
+                debugStats.acceptedSocEqualVsIncumbent);
+    printMetric("Accepted SoC worse vs incumbent",
+                debugStats.acceptedSocWorseVsIncumbent);
+    printMetric("Feasible best updates", debugStats.feasibleBestUpdates);
+    printMetric("Feasible no-best updates", debugStats.feasibleNoBestUpdate);
+    printMetric("Accepted feasible no-best updates",
+                debugStats.acceptedFeasibleNoBestUpdate);
+    printMetric("Accepted feasible-no-best rate",
+                acceptedFeasibleNoBestRate);
+    printMetric("Accepted invalid", debugStats.acceptedInvalid);
+    printMetric("Conflict signal better", debugStats.conflictSignalBetter);
+    printMetric("Conflict signal equal", debugStats.conflictSignalEqual);
+    printMetric("Conflict signal worse", debugStats.conflictSignalWorse);
+    printMetric("Accepted conflict better",
+                debugStats.acceptedConflictSignalBetter);
+    printMetric("Accepted conflict equal",
+                debugStats.acceptedConflictSignalEqual);
+    printMetric("Accepted conflict worse",
+                debugStats.acceptedConflictSignalWorse);
+    printMetric("Accepted fingerprint unique",
+                debugStats.acceptedFingerprintUnique);
+    printMetric("Accepted fingerprint repeat",
+                debugStats.acceptedFingerprintRepeat);
+    printMetric("Accepted fingerprint repeat rate",
+                acceptedFingerprintRepeatRate);
+    printMetric("Neighborhoods analyzed", debugStats.neighborhoodsCount);
+    printMetric("Neighborhoods with changes",
+                debugStats.neighborhoodsWithChanges);
+    printMetric("Neighborhoods without changes",
+                debugStats.neighborhoodsWithoutChanges);
+    printMetric("Neighborhood fingerprint unique",
+                debugStats.neighborhoodFingerprintUnique);
+    printMetric("Neighborhood fingerprint repeat",
+                debugStats.neighborhoodFingerprintRepeat);
+    printMetric("Neighborhood fingerprint repeat rate",
+                neighborhoodFingerprintRepeatRate);
+    printMetric("Neighborhood repeat streak max",
+                debugStats.neighborhoodRepeatStreakMax);
+    printMetric("Neighborhood mean Jaccard vs previous",
+                neighborhoodMeanJaccardPrev);
+    printMetric("Neighborhood mean Jaccard vs previous (repeat only)",
+                neighborhoodMeanJaccardPrevWhenRepeat);
+    printMetric("Neighborhoods with changes rate",
+                changedNeighborhoodRate);
+    printMetric("Avg removed tasks/neighborhood",
+                avgRemovedTasksPerNeighborhood);
+    printMetric("Avg changed removed tasks/neighborhood",
+                avgChangedRemovedTasksPerNeighborhood);
+    printMetric("Max removed tasks/neighborhood",
+                debugStats.removedTasksMax);
+    printMetric("Max changed removed tasks/neighborhood",
+                debugStats.changedTasksPerNeighborhoodMax);
+    printMetric("Avg accepted removed tasks",
+                avgAcceptedRemovedTasks);
+    printMetric("Avg accepted changed removed tasks",
+                avgAcceptedChangedRemovedTasks);
+    printMetric("Max accepted removed tasks",
+                debugStats.acceptedRemovedTasksMax);
+    printMetric("Max accepted changed removed tasks",
+                debugStats.acceptedChangedTasksPerNeighborhoodMax);
+    printMetric("Early aborts (prepare)", debugStats.earlyAbortPrepare);
+    printMetric("Early aborts (repair)", debugStats.earlyAbortRepair);
+    printMetric("Early aborts (join)", debugStats.earlyAbortJoin);
+    printMetric("Early aborts (terminal)", debugStats.earlyAbortTerminal);
+    printMetric("Mean previous SoC", meanPreviousSoc);
+    printMetric("Mean candidate SoC", meanCandidateSoc);
+    printMetric("Mean incumbent SoC", meanIncumbentSoc);
+    printMetric("Mean previous conflict signal",
+                meanPreviousConflictSignal);
+    printMetric("Mean candidate conflict signal",
+                meanCandidateConflictSignal);
+
+    std::cout << "\n=== Iteration Time Split (Debug) ===\n";
+    printMetric("Measured debug time (s)", measuredDebugSec);
+    printMetric("Measured time / runtime", measuredShareOfRuntime);
+    printMetric("Destroy+prepare time (s)",
+                debugStats.timeDestroyAndPrepareSec);
+    printMetric("Repair+commit time (s)",
+                debugStats.timeRepairAndCommitSec);
+    printMetric("Join paths time (s)", debugStats.timeJoinPathsSec);
+    printMetric("Terminal replan time (s)",
+                debugStats.timeTerminalReplanSec);
+    printMetric("Recompute SoC time (s)", debugStats.timeRecomputeSocSec);
+    printMetric("Validation time (s)", debugStats.timeValidationSec);
+    printMetric("Acceptance time (s)", debugStats.timeAcceptanceSec);
+    printMetric("Bookkeeping time (s)", debugStats.timeBookkeepingSec);
+    printMetric("Destroy+prepare share", phaseShare(debugStats.timeDestroyAndPrepareSec));
+    printMetric("Repair+commit share", phaseShare(debugStats.timeRepairAndCommitSec));
+    printMetric("Join paths share", phaseShare(debugStats.timeJoinPathsSec));
+    printMetric("Terminal replan share", phaseShare(debugStats.timeTerminalReplanSec));
+    printMetric("Recompute SoC share", phaseShare(debugStats.timeRecomputeSocSec));
+    printMetric("Validation share", phaseShare(debugStats.timeValidationSec));
+    printMetric("Acceptance share", phaseShare(debugStats.timeAcceptanceSec));
+    printMetric("Bookkeeping share", phaseShare(debugStats.timeBookkeepingSec));
   }
 
   if (!incrementalRegret) {

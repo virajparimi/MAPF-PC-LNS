@@ -65,6 +65,7 @@ void LNS::conflictRemoval(const ConflictMap* potentialNeighborhood) {
   const vector<int> taskToPosition =
       mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
   const int cappedNeighborSize = min(neighborSize_, taskCount);
+
   if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
     // Augment conflicts without unbounded rejection-sampling loops.
     vector<int> candidates;

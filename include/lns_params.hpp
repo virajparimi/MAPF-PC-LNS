@@ -18,6 +18,34 @@ struct LNSParams {
     // Portfolio warm-start budget as a fraction of total cutoff.
     // Used only when initialSolutionStrategy == "portfolio".
     double initialPortfolioTimeFraction = 0.10;
+    // If true, scale initialPortfolioTimeFraction by instance difficulty
+    // (agents/tasks/precedence), then clamp to [0.05, 0.35].
+    bool adaptiveInitialPortfolioBudget = false;
+    // Optional path to a MAPF-PC/PBS log containing TASK ASSIGNMENTS and
+    // TASK PATHS sections. If set, initialization can be seeded directly from
+    // this log instead of running an initializer arm.
+    string initialSeedFromPbsLog;
+    // Optional post-LNS refinement stage: rerun MAPF-PC (PBS/CBS) on a fixed
+    // task assignment to improve final routed paths.
+    bool postRefineWithMapfpc = false;
+    // Assignment source for post-refinement:
+    // - "solution": use the current LNS assignment
+    // - "log": parse TASK ASSIGNMENTS from postRefineAssignmentLog
+    string postRefineAssignmentSource = "solution";
+    // Used when postRefineAssignmentSource == "log".
+    string postRefineAssignmentLog;
+    // Solver used by MAPF-PC post-refinement: "pbs" or "cbs".
+    string postRefineSolver = "pbs";
+    // MAPF-PC solver cutoff in seconds for post-refinement.
+    int postRefineTimeoutSec = 120;
+    // If true, adopt post-refinement only when SoC is strictly better.
+    bool postRefineAcceptOnlyIfBetter = true;
+    // Emit additional end-of-run diagnostics to explain why accepted
+    // iterations may fail to improve global best SoC and where time is spent.
+    bool debugImprovementDiagnostics = false;
+    // Optional output TSV path for per-iteration debug records.
+    // Empty means disabled.
+    string debugIterationTsvPath;
     // Final-goal occupancy policy used when reserving completed task paths in
     // constraint tables:
     // - "stay": reserve final goal indefinitely (legacy behavior)
@@ -61,6 +89,7 @@ struct LNSParams {
     string planner = "mlastar";
     double segmentTimeout = 600.0;
     bool parityCheck = false;
+    bool structuralPrePrune = false;
   } lowLevel;
 
   struct Market {

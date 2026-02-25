@@ -404,6 +404,63 @@ struct FeasibleSolution {
       }
       result += "\n";
     }
+
+    if (!agentTaskAssignments.empty()) {
+      result += "TASK ASSIGNMENTS\n";
+      for (int agent = 0; agent < (int)agentTaskAssignments.size(); agent++) {
+        result += "Agent " + std::to_string(agent) + "\n";
+        const auto& assignments = agentTaskAssignments[agent];
+        for (int i = 0; i < (int)assignments.size(); i++) {
+          if (i > 0) {
+            result += ", ";
+          }
+          result += std::to_string(assignments[i]);
+        }
+        result += "\n";
+      }
+    }
+
+    if (!agentTaskPaths.empty()) {
+      result += "TASK PATHS\n";
+      for (int agent = 0; agent < (int)agentTaskPaths.size(); agent++) {
+        result += "Agent " + std::to_string(agent) + "\n";
+        const auto& taskPaths = agentTaskPaths[agent];
+        const bool hasAssignments =
+            agent < (int)agentTaskAssignments.size();
+        for (int localTask = 0; localTask < (int)taskPaths.size();
+             localTask++) {
+          int taskId = -1;
+          if (hasAssignments &&
+              localTask < (int)agentTaskAssignments[agent].size()) {
+            taskId = agentTaskAssignments[agent][localTask];
+          }
+          if (taskId >= 0) {
+            result += "Task " + std::to_string(taskId) + ": ";
+          } else {
+            result += "Task #" + std::to_string(localTask) + ": ";
+          }
+
+          const AgentTaskPath& taskPath = taskPaths[localTask];
+          if (taskPath.empty()) {
+            result += "(empty)\n";
+            continue;
+          }
+          for (int step = 0; step < (int)taskPath.path.size(); step++) {
+            pair<int, int> coord = getCoordinate(taskPath.path[step].location);
+            result += "(" + std::to_string(coord.first) + ", " +
+                      std::to_string(coord.second) + ")@" +
+                      std::to_string(taskPath.beginTime + step);
+            if (taskPath.path[step].isGoal) {
+              result += "*";
+            }
+            if (step != (int)taskPath.path.size() - 1) {
+              result += " -> ";
+            }
+          }
+          result += "\n";
+        }
+      }
+    }
     return result;
   }
 };

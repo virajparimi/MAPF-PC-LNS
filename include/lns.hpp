@@ -1,5 +1,7 @@
 #pragma once
 
+#include <iosfwd>
+
 #include "lns_params.hpp"
 #include "lns_types.hpp"
 
@@ -19,6 +21,17 @@ class LNS {
     uint64_t invalidInput = 0;
     uint64_t budgetExhausted = 0;
     uint64_t unknown = 0;
+    uint64_t timeoutGoalPermanentBeforeArrivalLb = 0;
+    uint64_t timeoutStartTrappedAtTPlus1 = 0;
+    uint64_t timeoutStaticDisconnectedPermanent = 0;
+    uint64_t timeoutOther = 0;
+    uint64_t timeoutReducedByGlobalBudget = 0;
+    uint64_t timeoutMultiCertificate = 0;
+    uint64_t structuralPrePruned = 0;
+    uint64_t structuralPrePrunedGoalPermanentBeforeArrivalLb = 0;
+    uint64_t structuralPrePrunedStartTrappedAtTPlus1 = 0;
+    uint64_t structuralPrePrunedStaticDisconnectedPermanent = 0;
+    uint64_t structuralPrePrunedMultiCertificate = 0;
   };
 
   struct RegretEvalStats {
@@ -129,8 +142,132 @@ class LNS {
     void reset() { *this = SolutionRestoreStats(); }
   };
 
+  struct ImprovementDiagnosticsStats {
+    int64_t iterationsStarted = 0;
+    int64_t earlyAbortPrepare = 0;
+    int64_t earlyAbortRepair = 0;
+    int64_t earlyAbortJoin = 0;
+    int64_t earlyAbortTerminal = 0;
+
+    int64_t candidateValid = 0;
+    int64_t candidateInvalid = 0;
+
+    int64_t accepted = 0;
+    int64_t rejected = 0;
+    int64_t guardRejected = 0;
+    int64_t acceptedAsWorseUtility = 0;
+    int64_t acceptedAsBetterOrEqualUtility = 0;
+
+    int64_t acceptedSocBetterVsPrevious = 0;
+    int64_t acceptedSocEqualVsPrevious = 0;
+    int64_t acceptedSocWorseVsPrevious = 0;
+
+    int64_t acceptedSocBetterVsIncumbent = 0;
+    int64_t acceptedSocEqualVsIncumbent = 0;
+    int64_t acceptedSocWorseVsIncumbent = 0;
+
+    int64_t feasibleBestUpdates = 0;
+    int64_t feasibleNoBestUpdate = 0;
+    int64_t acceptedFeasibleNoBestUpdate = 0;
+    int64_t acceptedInvalid = 0;
+
+    int64_t conflictSignalBetter = 0;
+    int64_t conflictSignalEqual = 0;
+    int64_t conflictSignalWorse = 0;
+    int64_t acceptedConflictSignalBetter = 0;
+    int64_t acceptedConflictSignalEqual = 0;
+    int64_t acceptedConflictSignalWorse = 0;
+    int64_t acceptedFingerprintUnique = 0;
+    int64_t acceptedFingerprintRepeat = 0;
+
+    int64_t neighborhoodsCount = 0;
+    int64_t neighborhoodsWithChanges = 0;
+    int64_t neighborhoodsWithoutChanges = 0;
+    int64_t neighborhoodFingerprintUnique = 0;
+    int64_t neighborhoodFingerprintRepeat = 0;
+    int64_t neighborhoodRepeatStreakMax = 0;
+    double neighborhoodJaccardPrevSum = 0.0;
+    int64_t neighborhoodJaccardPrevSamples = 0;
+    double neighborhoodJaccardPrevRepeatSum = 0.0;
+    int64_t neighborhoodJaccardPrevRepeatSamples = 0;
+    int64_t removedTasksTotal = 0;
+    int64_t removedTasksChangedAgentTotal = 0;
+    int64_t removedTasksChangedOrderTotal = 0;
+    int64_t removedTasksUnchangedTotal = 0;
+    int64_t removedTasksMax = 0;
+    int64_t changedTasksPerNeighborhoodMax = 0;
+
+    int64_t acceptedRemovedTasksTotal = 0;
+    int64_t acceptedRemovedTasksChangedAgentTotal = 0;
+    int64_t acceptedRemovedTasksChangedOrderTotal = 0;
+    int64_t acceptedRemovedTasksUnchangedTotal = 0;
+    int64_t acceptedRemovedTasksMax = 0;
+    int64_t acceptedChangedTasksPerNeighborhoodMax = 0;
+
+    double sumPreviousSoc = 0.0;
+    double sumCandidateSoc = 0.0;
+    double sumIncumbentSoc = 0.0;
+    int64_t incumbentSocSamples = 0;
+    double sumPreviousConflictSignal = 0.0;
+    double sumCandidateConflictSignal = 0.0;
+
+    double timeDestroyAndPrepareSec = 0.0;
+    double timeRepairAndCommitSec = 0.0;
+    double timeJoinPathsSec = 0.0;
+    double timeTerminalReplanSec = 0.0;
+    double timeRecomputeSocSec = 0.0;
+    double timeValidationSec = 0.0;
+    double timeAcceptanceSec = 0.0;
+    double timeBookkeepingSec = 0.0;
+
+    void reset() { *this = ImprovementDiagnosticsStats(); }
+  };
+
+  struct IterationDebugRecord {
+    int64_t iteration = -1;
+    double runtimeSec = 0.0;
+    int previousSoc = 0;
+    int candidateSoc = 0;
+    int incumbentSocBefore = std::numeric_limits<int>::max();
+    int previousConflictSignal = -1;
+    int candidateConflictSignal = -1;
+    int removedTasks = 0;
+    string removedTaskIdsCsv;
+    int removedTasksChangedAgent = -1;
+    int removedTasksChangedOrder = -1;
+    int removedTasksUnchanged = -1;
+    bool neighborhoodFingerprintSeenBefore = false;
+    uint64_t neighborhoodFingerprint = 0;
+    double neighborhoodJaccardPrev = -1.0;
+    int neighborhoodRepeatStreak = 0;
+    bool candidateValid = false;
+    bool accepted = false;
+    bool guardRejected = false;
+    bool acceptedAsWorseUtility = false;
+    bool feasibleBestUpdate = false;
+    bool fingerprintSeenBefore = false;
+    uint64_t fingerprint = 0;
+    string earlyAbortReason;
+    string quality;
+    double timeDestroyAndPrepareSec = 0.0;
+    double timeRepairAndCommitSec = 0.0;
+    double timeJoinPathsSec = 0.0;
+    double timeTerminalReplanSec = 0.0;
+    double timeRecomputeSocSec = 0.0;
+    double timeValidationSec = 0.0;
+    double timeAcceptanceSec = 0.0;
+    double timeBookkeepingSec = 0.0;
+  };
+
  private:
   int numOfIterations_;
+  bool debugImprovementDiagnostics_ = false;
+  string debugIterationTsvPath_;
+  unordered_set<uint64_t> acceptedSolutionFingerprints_;
+  unordered_set<uint64_t> seenNeighborhoodFingerprints_;
+  vector<int> previousNeighborhoodTasksSorted_;
+  int currentNeighborhoodRepeatStreak_ = 0;
+  vector<IterationDebugRecord> iterationDebugRecords_;
   bool incrementalRegret_ = false;
   LowLevelPlannerType lowLevelPlannerType_ = LowLevelPlannerType::mlastar;
   double lowLevelSegmentTimeout_ = 600.0;
@@ -193,12 +330,41 @@ class LNS {
   AgentTaskPath runLowLevelSearch(SingleAgentSolver& solver,
                                   ConstraintTable& constraintTable,
                                   int startTime, int stage, int lowerBound);
+  void recordLowLevelTimeoutDiagnostics(const SingleAgentSolver& solver,
+                                        const ConstraintTable& constraintTable,
+                                        int startTime, int stage, int lowerBound,
+                                        double configuredTimeout,
+                                        double effectiveTimeout);
   double elapsedRuntimeSec() const;
   double remainingRuntimeBudgetSec() const;
   bool runtimeBudgetExhausted() const;
   int cascadeTaskBudget() const;
   void clearNeighborhood();
   void restoreSolutionFromPrevious();
+  uint64_t computeSolutionFingerprint(const Solution& solution) const;
+  uint64_t computeNeighborhoodFingerprint(
+      const ConflictMap& removedTasks) const;
+  string iterationQualityName(IterationQuality quality) const;
+  bool writeIterationDebugTsv(const string& outputPath) const;
+  bool parseMAPFPCStreamIntoSolution(std::istream& inputStream,
+                                     const string& sourceLabel);
+  bool parseMAPFPCAssignmentsFromStream(
+      std::istream& inputStream, const string& sourceLabel,
+      vector<vector<int>>& outAssignments) const;
+  bool writeMAPFPCAssignmentFile(const vector<vector<int>>& assignments,
+                                 const string& outputPath,
+                                 string& errorMessage) const;
+  bool runMAPFPCForAgentFile(const string& agentFilePath,
+                             const string& solverVariant,
+                             int solverTimeoutSec,
+                             const string& sourceLabel,
+                             const string& fixedAssignmentFilePath = "");
+  bool runMAPFPCOnAssignments(const vector<vector<int>>& assignments,
+                              const string& solverVariant,
+                              int solverTimeoutSec,
+                              const string& sourceLabel);
+  bool runPostMAPFPCRefinement();
+  void overwriteIncumbentFromCurrentSolution();
 
  protected:
   ALNS adaptiveLNS_;
@@ -226,6 +392,7 @@ class LNS {
   vector<int> lastPrepareAffectedAgents_;
   CascadeStats cascadeStats_;
   SolutionRestoreStats solutionRestoreStats_;
+  ImprovementDiagnosticsStats improvementDiagnosticsStats_;
   vector<pair<int, int>> fullPrecedenceConstraintsScratch_;
   Neighbor lnsNeighborhood_;
   const Instance& instance_;
@@ -243,11 +410,24 @@ class LNS {
   uint64_t lowLevelInvalidInput_ = 0;
   uint64_t lowLevelBudgetExhausted_ = 0;
   uint64_t lowLevelUnknown_ = 0;
+  uint64_t lowLevelTimeoutGoalPermanentBeforeArrivalLb_ = 0;
+  uint64_t lowLevelTimeoutStartTrappedAtTPlus1_ = 0;
+  uint64_t lowLevelTimeoutStaticDisconnectedPermanent_ = 0;
+  uint64_t lowLevelTimeoutOther_ = 0;
+  uint64_t lowLevelTimeoutReducedByGlobalBudget_ = 0;
+  uint64_t lowLevelTimeoutMultiCertificate_ = 0;
+  uint64_t lowLevelTimeoutDiagnosticsLogsEmitted_ = 0;
+  uint64_t lowLevelStructuralPrePruned_ = 0;
+  uint64_t lowLevelStructuralPrePrunedGoalPermanentBeforeArrivalLb_ = 0;
+  uint64_t lowLevelStructuralPrePrunedStartTrappedAtTPlus1_ = 0;
+  uint64_t lowLevelStructuralPrePrunedStaticDisconnectedPermanent_ = 0;
+  uint64_t lowLevelStructuralPrePrunedMultiCertificate_ = 0;
   SingleAgentSolver::SearchOutcome lastLowLevelOutcome_ =
       SingleAgentSolver::SearchOutcome::unknown;
   double lastLowLevelRemainingBudgetSec_ = 0.0;
   double lastLowLevelEffectiveTimeoutSec_ = 0.0;
   double initialTemperature_ = 0.0;
+  bool lowLevelStructuralPrePrune_ = false;
   double maxTemperature_ = std::numeric_limits<double>::infinity();
   double greatDelugeDecay_ = 0.0;
   double timeLimit_, initialSolutionRuntime_ = 0, temperature_ = 100,
@@ -264,6 +444,14 @@ class LNS {
   bool initialSolutionFallbackUsed_ = false;
   string initialSolutionFallbackReason_;
   double initialPortfolioTimeFraction_ = 0.10;
+  bool adaptiveInitialPortfolioBudget_ = false;
+  string initialSeedFromPbsLog_;
+  bool postRefineWithMapfpc_ = false;
+  string postRefineAssignmentSource_ = "solution";
+  string postRefineAssignmentLog_;
+  string postRefineSolver_ = "pbs";
+  int postRefineTimeoutSec_ = 120;
+  bool postRefineAcceptOnlyIfBetter_ = true;
  public:
   double runtime = 0;
   int numOfFailures = 0, sumOfCosts = 0;
@@ -305,6 +493,7 @@ class LNS {
   bool buildPrioritizedInitialSolution();
   bool buildGreedySolutionWithMAPFPC(const string& variant,
                                      int solverTimeoutSec = 120);
+  bool buildSeededSolutionFromMAPFPCLog(const string& logFilePath);
   bool planTerminalReposition(const vector<int>& agentsToPlan,
                               bool fullRebuild);
 
@@ -433,6 +622,12 @@ class LNS {
   const SolutionRestoreStats& getSolutionRestoreStats() const {
     return solutionRestoreStats_;
   }
+  bool isDebugImprovementDiagnosticsEnabled() const {
+    return debugImprovementDiagnostics_;
+  }
+  const ImprovementDiagnosticsStats& getImprovementDiagnosticsStats() const {
+    return improvementDiagnosticsStats_;
+  }
   const TerminalRepositionStats& getTerminalRepositionStats() const {
     return terminalRepositionStats_;
   }
@@ -440,7 +635,15 @@ class LNS {
     return {lowLevelCalls_,         lowLevelExpanded_,      lowLevelGenerated_,
             lowLevelFound_,         lowLevelTimeout_,       lowLevelSearchExhausted_,
             lowLevelInvalidInput_,  lowLevelBudgetExhausted_,
-            lowLevelUnknown_};
+            lowLevelUnknown_,        lowLevelTimeoutGoalPermanentBeforeArrivalLb_,
+            lowLevelTimeoutStartTrappedAtTPlus1_,
+            lowLevelTimeoutStaticDisconnectedPermanent_, lowLevelTimeoutOther_,
+            lowLevelTimeoutReducedByGlobalBudget_,
+            lowLevelTimeoutMultiCertificate_, lowLevelStructuralPrePruned_,
+            lowLevelStructuralPrePrunedGoalPermanentBeforeArrivalLb_,
+            lowLevelStructuralPrePrunedStartTrappedAtTPlus1_,
+            lowLevelStructuralPrePrunedStaticDisconnectedPermanent_,
+            lowLevelStructuralPrePrunedMultiCertificate_};
   }
   const char* getLastLowLevelOutcomeName() const {
     return SingleAgentSolver::searchOutcomeName(lastLowLevelOutcome_);

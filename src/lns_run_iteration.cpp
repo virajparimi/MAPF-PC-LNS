@@ -19,6 +19,73 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   const double previousWaitForIter =
       market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
   int alnsHeuristicForIter = -1;
+  const int64_t iterationIndex =
+      static_cast<int64_t>(iterationDebugRecords_.size());
+  const int incumbentSocBeforeIter =
+      incumbentSolution_.agentPaths.empty()
+          ? std::numeric_limits<int>::max()
+          : incumbentSolution_.sumOfCosts;
+  IterationQuality quality = IterationQuality::none;
+  const bool collectIterationDebug =
+      debugImprovementDiagnostics_ || !debugIterationTsvPath_.empty();
+  IterationDebugRecord debugRow;
+  debugRow.iteration = iterationIndex;
+  debugRow.previousSoc = previousSocForIter;
+  debugRow.candidateSoc = previousSocForIter;
+  debugRow.incumbentSocBefore = incumbentSocBeforeIter;
+  improvementDiagnosticsStats_.iterationsStarted++;
+  improvementDiagnosticsStats_.sumPreviousSoc +=
+      static_cast<double>(previousSocForIter);
+  if (incumbentSocBeforeIter != std::numeric_limits<int>::max()) {
+    improvementDiagnosticsStats_.sumIncumbentSoc +=
+        static_cast<double>(incumbentSocBeforeIter);
+    improvementDiagnosticsStats_.incumbentSocSamples++;
+  }
+  auto elapsedSecSince = [](const Time::time_point& startTimePoint) -> double {
+    return ((fsec)(Time::now() - startTimePoint)).count();
+  };
+  double timeDestroyAndPrepareSec = 0.0;
+  double timeRepairAndCommitSec = 0.0;
+  double timeJoinPathsSec = 0.0;
+  double timeTerminalReplanSec = 0.0;
+  double timeRecomputeSocSec = 0.0;
+  double timeValidationSec = 0.0;
+  double timeAcceptanceSec = 0.0;
+  double timeBookkeepingSec = 0.0;
+  bool iterationTimingCommitted = false;
+  bool iterationRowCommitted = false;
+  auto commitIterationTiming = [&]() {
+    if (iterationTimingCommitted) {
+      return;
+    }
+    improvementDiagnosticsStats_.timeDestroyAndPrepareSec +=
+        timeDestroyAndPrepareSec;
+    improvementDiagnosticsStats_.timeRepairAndCommitSec +=
+        timeRepairAndCommitSec;
+    improvementDiagnosticsStats_.timeJoinPathsSec += timeJoinPathsSec;
+    improvementDiagnosticsStats_.timeTerminalReplanSec +=
+        timeTerminalReplanSec;
+    improvementDiagnosticsStats_.timeRecomputeSocSec += timeRecomputeSocSec;
+    improvementDiagnosticsStats_.timeValidationSec += timeValidationSec;
+    improvementDiagnosticsStats_.timeAcceptanceSec += timeAcceptanceSec;
+    improvementDiagnosticsStats_.timeBookkeepingSec += timeBookkeepingSec;
+    iterationTimingCommitted = true;
+    if (collectIterationDebug && !iterationRowCommitted) {
+      debugRow.runtimeSec = runtime;
+      debugRow.quality = iterationQualityName(quality);
+      debugRow.timeDestroyAndPrepareSec = timeDestroyAndPrepareSec;
+      debugRow.timeRepairAndCommitSec = timeRepairAndCommitSec;
+      debugRow.timeJoinPathsSec = timeJoinPathsSec;
+      debugRow.timeTerminalReplanSec = timeTerminalReplanSec;
+      debugRow.timeRecomputeSocSec = timeRecomputeSocSec;
+      debugRow.timeValidationSec = timeValidationSec;
+      debugRow.timeAcceptanceSec = timeAcceptanceSec;
+      debugRow.timeBookkeepingSec = timeBookkeepingSec;
+      iterationDebugRecords_.push_back(debugRow);
+      iterationRowCommitted = true;
+    }
+  };
+  Time::time_point phaseStart = Time::now();
 
   // These functions populate the LNS neighborhoods' removedTask parameter
   if (destroyHeuristic == "conflict") {
@@ -49,11 +116,13 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     }
   } else {
     PLOGE << "Unknown destroy heuristic: " << destroyHeuristic << "\n";
+    debugRow.earlyAbortReason = "destroy_heuristic_error";
+    runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
+    commitIterationTiming();
     return false;
   }
 
   oldNeighborhood = lnsNeighborhood_.removedTasks;
-  IterationQuality quality = IterationQuality::none;
 
   PLOGD << "Printing neighborhood conflict tasks\n";
   PLOGD << "Size: " << lnsNeighborhood_.removedTasks.size() << "\n";
@@ -62,6 +131,8 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   }
 
   if (!prepareNextIteration()) {
+    timeDestroyAndPrepareSec += elapsedSecSince(phaseStart);
+    improvementDiagnosticsStats_.earlyAbortPrepare++;
     const bool cascadeAbort = lastPrepareAbortedByCascade_;
     if (alnsHeuristicForIter >= 0 &&
         alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
@@ -76,16 +147,24 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     }
     feasibleSolutionUpdated = false;
     quality = IterationQuality::couldNotFind;
+    const Time::time_point bookkeepingStart = Time::now();
     runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
     appendIterationStatBounded(IterationStats(
         runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
         solution_.sumOfCosts, feasibleSolutionUpdated, quality));
+    timeBookkeepingSec += elapsedSecSince(bookkeepingStart);
     if (cascadeAbort) {
       PLOGD << "prepareNextIteration aborted due to cascade budget\n";
+      debugRow.earlyAbortReason = "cascade_budget_abort";
+    } else {
+      debugRow.earlyAbortReason = "prepare_failed";
     }
     maybeUpdateMarketState(false);
+    commitIterationTiming();
     return true;
   }
+  timeDestroyAndPrepareSec += elapsedSecSince(phaseStart);
+  phaseStart = Time::now();
 
   // This needs to happen after prepare iteration since we updated the conflictedTasks variable in the prepare next iteration function
   for (const auto& [_, conflictedTask] : lnsNeighborhood_.removedTasks) {
@@ -95,6 +174,87 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     }
   }
   lnsNeighborhood_.immutableRemovedTasks = lnsNeighborhood_.removedTasks;
+  debugRow.removedTasks = (int)lnsNeighborhood_.immutableRemovedTasks.size();
+
+  const uint64_t neighborhoodFingerprint =
+      computeNeighborhoodFingerprint(lnsNeighborhood_.immutableRemovedTasks);
+  debugRow.neighborhoodFingerprint = neighborhoodFingerprint;
+  const auto [_, neighborhoodInserted] =
+      seenNeighborhoodFingerprints_.insert(neighborhoodFingerprint);
+  const bool neighborhoodSeenBefore = !neighborhoodInserted;
+  debugRow.neighborhoodFingerprintSeenBefore = neighborhoodSeenBefore;
+  if (neighborhoodSeenBefore) {
+    improvementDiagnosticsStats_.neighborhoodFingerprintRepeat++;
+    currentNeighborhoodRepeatStreak_++;
+    debugRow.neighborhoodRepeatStreak = currentNeighborhoodRepeatStreak_;
+    improvementDiagnosticsStats_.neighborhoodRepeatStreakMax =
+        max(improvementDiagnosticsStats_.neighborhoodRepeatStreakMax,
+            (int64_t)currentNeighborhoodRepeatStreak_);
+  } else {
+    improvementDiagnosticsStats_.neighborhoodFingerprintUnique++;
+    currentNeighborhoodRepeatStreak_ = 0;
+    debugRow.neighborhoodRepeatStreak = 0;
+  }
+
+  vector<int> currentNeighborhoodTasksSorted;
+  currentNeighborhoodTasksSorted.reserve(
+      lnsNeighborhood_.immutableRemovedTasks.size());
+  for (const auto& [task, _] : lnsNeighborhood_.immutableRemovedTasks) {
+    currentNeighborhoodTasksSorted.push_back(task);
+  }
+  if (!currentNeighborhoodTasksSorted.empty()) {
+    string taskIdsCsv;
+    taskIdsCsv.reserve(currentNeighborhoodTasksSorted.size() * 6);
+    for (size_t idx = 0; idx < currentNeighborhoodTasksSorted.size(); idx++) {
+      if (idx > 0) {
+        taskIdsCsv.push_back(',');
+      }
+      taskIdsCsv += std::to_string(currentNeighborhoodTasksSorted[idx]);
+    }
+    debugRow.removedTaskIdsCsv = std::move(taskIdsCsv);
+  } else {
+    debugRow.removedTaskIdsCsv.clear();
+  }
+
+  if (!previousNeighborhoodTasksSorted_.empty()) {
+    size_t i = 0;
+    size_t j = 0;
+    size_t intersection = 0;
+    while (i < currentNeighborhoodTasksSorted.size() &&
+           j < previousNeighborhoodTasksSorted_.size()) {
+      if (currentNeighborhoodTasksSorted[i] ==
+          previousNeighborhoodTasksSorted_[j]) {
+        intersection++;
+        i++;
+        j++;
+      } else if (currentNeighborhoodTasksSorted[i] <
+                 previousNeighborhoodTasksSorted_[j]) {
+        i++;
+      } else {
+        j++;
+      }
+    }
+    const size_t unionCount =
+        currentNeighborhoodTasksSorted.size() +
+        previousNeighborhoodTasksSorted_.size() - intersection;
+    const double jaccardPrev =
+        unionCount > 0 ? (double)intersection / (double)unionCount : 1.0;
+    debugRow.neighborhoodJaccardPrev = jaccardPrev;
+    improvementDiagnosticsStats_.neighborhoodJaccardPrevSum += jaccardPrev;
+    improvementDiagnosticsStats_.neighborhoodJaccardPrevSamples++;
+    if (neighborhoodSeenBefore) {
+      improvementDiagnosticsStats_.neighborhoodJaccardPrevRepeatSum +=
+          jaccardPrev;
+      improvementDiagnosticsStats_.neighborhoodJaccardPrevRepeatSamples++;
+    }
+  }
+  previousNeighborhoodTasksSorted_.swap(currentNeighborhoodTasksSorted);
+
+  improvementDiagnosticsStats_.neighborhoodsCount++;
+  improvementDiagnosticsStats_.removedTasksTotal += debugRow.removedTasks;
+  improvementDiagnosticsStats_.removedTasksMax =
+      max(improvementDiagnosticsStats_.removedTasksMax,
+          (int64_t)debugRow.removedTasks);
   // Collect agents impacted by this neighborhood once and reuse across:
   // 1) terminal-path invalidation, 2) path-join scope, 3) terminal replanning.
   vector<int> agentsToCompute;
@@ -361,8 +521,12 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     // Stats are collected and printed in a dedicated summary section.
   }
 
+  timeRepairAndCommitSec += elapsedSecSince(phaseStart);
+
   // If we could not successfully compute the regrets and commit to all the tasks in the neighborhood then we need to reset this neighborhood!
   if (repairFailed || !lnsNeighborhood_.removedTasks.empty()) {
+    debugRow.earlyAbortReason = "repair_failed_or_incomplete";
+    improvementDiagnosticsStats_.earlyAbortRepair++;
     if (alnsHeuristicForIter >= 0 &&
         alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
       adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
@@ -371,58 +535,129 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     restoreSolutionFromPrevious();
     feasibleSolutionUpdated = false;
     quality = IterationQuality::couldNotFind;
+    const Time::time_point bookkeepingStart = Time::now();
     runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
     appendIterationStatBounded(IterationStats(
         runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
         solution_.sumOfCosts, feasibleSolutionUpdated, quality));
+    timeBookkeepingSec += elapsedSecSince(bookkeepingStart);
     // Skip everything after this statement
     PLOGD << "Could not find paths for the neighborhood! Attempting a new "
              "neighborhood computation\n";
     maybeUpdateMarketState(false);
+    commitIterationTiming();
     return true;
   }
 
+  // Refresh impacted agents after repair/commit. The pre-repair set can miss
+  // agents that only appear due to reassignment decisions made during repair.
+  {
+    vector<char> joinMarked(instance_.getAgentNum(), 0);
+    vector<int> refreshedAgents;
+    refreshedAgents.reserve(instance_.getAgentNum());
+    auto markForJoin = [&](int agent) {
+      if (agent < 0 || agent >= instance_.getAgentNum() || joinMarked[agent]) {
+        return;
+      }
+      joinMarked[agent] = 1;
+      refreshedAgents.push_back(agent);
+    };
+
+    for (int agent : agentsToCompute) {
+      markForJoin(agent);
+    }
+
+    const int taskCount = instance_.getTasksNum();
+    for (int task = 0; task < taskCount; task++) {
+      const int prevOwner =
+          (task >= 0 && task < (int)previousSolution_.taskAgentMap.size())
+              ? previousSolution_.taskAgentMap[task]
+              : UNASSIGNED;
+      const int curOwner =
+          (task >= 0 && task < (int)solution_.taskAgentMap.size())
+              ? solution_.taskAgentMap[task]
+              : UNASSIGNED;
+      if (prevOwner != curOwner) {
+        markForJoin(prevOwner);
+        markForJoin(curOwner);
+      }
+    }
+
+    for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+      if (solution_.agents[agent].taskAssignments !=
+              previousSolution_.agents[agent].taskAssignments ||
+          solution_.agents[agent].path.empty()) {
+        markForJoin(agent);
+      }
+    }
+
+    if (refreshedAgents.empty()) {
+      refreshedAgents.resize(instance_.getAgentNum());
+      std::iota(refreshedAgents.begin(), refreshedAgents.end(), 0);
+    }
+    agentsToCompute.swap(refreshedAgents);
+  }
+
   // Join only agents impacted by this neighborhood.
+  const Time::time_point joinStart = Time::now();
   if (!solution_.joinPaths(agentsToCompute)) {
+    timeJoinPathsSec += elapsedSecSince(joinStart);
+    improvementDiagnosticsStats_.earlyAbortJoin++;
     PLOGE << "run: failed to join agent paths for candidate solution\n";
     if (alnsHeuristicForIter >= 0 &&
         alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
       adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
     }
     restoreSolutionFromPrevious();
+    debugRow.earlyAbortReason = "join_failed";
     feasibleSolutionUpdated = false;
     quality = IterationQuality::couldNotFind;
+    const Time::time_point bookkeepingStart = Time::now();
     runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
     appendIterationStatBounded(IterationStats(
         runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
         solution_.sumOfCosts, feasibleSolutionUpdated, quality));
+    timeBookkeepingSec += elapsedSecSince(bookkeepingStart);
     maybeUpdateMarketState(false);
+    commitIterationTiming();
     return true;
   }
+  timeJoinPathsSec += elapsedSecSince(joinStart);
   if (goalOccupationMode_ == "reposition_true") {
     const vector<int> terminalReplanAgents =
         selectTerminalReplanAgents(agentsToCompute);
-    if (!terminalReplanAgents.empty() &&
-        !planTerminalReposition(terminalReplanAgents, false)) {
-      PLOGE << "run: failed to replan terminal reposition paths for "
-               "candidate solution\n";
-      if (alnsHeuristicForIter >= 0 &&
-          alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
-        adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
+    if (!terminalReplanAgents.empty()) {
+      const Time::time_point terminalStart = Time::now();
+      const bool terminalOk =
+          planTerminalReposition(terminalReplanAgents, false);
+      timeTerminalReplanSec += elapsedSecSince(terminalStart);
+      if (!terminalOk) {
+        improvementDiagnosticsStats_.earlyAbortTerminal++;
+        debugRow.earlyAbortReason = "terminal_replan_failed";
+        PLOGE << "run: failed to replan terminal reposition paths for "
+                 "candidate solution\n";
+        if (alnsHeuristicForIter >= 0 &&
+            alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
+          adaptiveLNS_.couldNotFind[alnsHeuristicForIter]++;
+        }
+        restoreSolutionFromPrevious();
+        feasibleSolutionUpdated = false;
+        quality = IterationQuality::couldNotFind;
+        const Time::time_point bookkeepingStart = Time::now();
+        runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
+        appendIterationStatBounded(IterationStats(
+            runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
+            solution_.sumOfCosts, feasibleSolutionUpdated, quality));
+        timeBookkeepingSec += elapsedSecSince(bookkeepingStart);
+        maybeUpdateMarketState(false);
+        commitIterationTiming();
+        return true;
       }
-      restoreSolutionFromPrevious();
-      feasibleSolutionUpdated = false;
-      quality = IterationQuality::couldNotFind;
-      runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
-      appendIterationStatBounded(IterationStats(
-          runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
-          solution_.sumOfCosts, feasibleSolutionUpdated, quality));
-      maybeUpdateMarketState(false);
-      return true;
     }
   }
 
   // Compute the updated sum of costs
+  const Time::time_point recomputeSocStart = Time::now();
   long long recomputedSoc = 0;
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     recomputedSoc +=
@@ -442,13 +677,76 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
 
   PLOGD << "Old sum of costs = " << previousSolution_.sumOfCosts << "\n";
   PLOGD << "New sum of costs = " << solution_.sumOfCosts << "\n";
+  timeRecomputeSocSec += elapsedSecSince(recomputeSocStart);
+
+  const vector<int> previousTaskPosByTask =
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(
+          previousSolution_, instance_.getTasksNum());
+  const vector<int> candidateTaskPosByTask =
+      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(
+          solution_, instance_.getTasksNum());
+  int removedTasksChangedAgent = 0;
+  int removedTasksChangedOrder = 0;
+  int removedTasksUnchanged = 0;
+  for (const auto& [_, conflict] : lnsNeighborhood_.immutableRemovedTasks) {
+    const int task = conflict.task;
+    if (task < 0 || task >= instance_.getTasksNum()) {
+      continue;
+    }
+    const int prevAgent =
+        (task < (int)previousSolution_.taskAgentMap.size())
+            ? previousSolution_.taskAgentMap[task]
+            : UNASSIGNED;
+    const int candAgent =
+        (task < (int)solution_.taskAgentMap.size())
+            ? solution_.taskAgentMap[task]
+            : UNASSIGNED;
+    if (prevAgent != candAgent) {
+      removedTasksChangedAgent++;
+      continue;
+    }
+    const int prevPos =
+        (task < (int)previousTaskPosByTask.size())
+            ? previousTaskPosByTask[task]
+            : UNASSIGNED;
+    const int candPos =
+        (task < (int)candidateTaskPosByTask.size())
+            ? candidateTaskPosByTask[task]
+            : UNASSIGNED;
+    if (prevPos != candPos) {
+      removedTasksChangedOrder++;
+    } else {
+      removedTasksUnchanged++;
+    }
+  }
+  debugRow.removedTasksChangedAgent = removedTasksChangedAgent;
+  debugRow.removedTasksChangedOrder = removedTasksChangedOrder;
+  debugRow.removedTasksUnchanged = removedTasksUnchanged;
+  const int changedRemovedTasks =
+      removedTasksChangedAgent + removedTasksChangedOrder;
+  improvementDiagnosticsStats_.removedTasksChangedAgentTotal +=
+      removedTasksChangedAgent;
+  improvementDiagnosticsStats_.removedTasksChangedOrderTotal +=
+      removedTasksChangedOrder;
+  improvementDiagnosticsStats_.removedTasksUnchangedTotal +=
+      removedTasksUnchanged;
+  improvementDiagnosticsStats_.changedTasksPerNeighborhoodMax =
+      max(improvementDiagnosticsStats_.changedTasksPerNeighborhoodMax,
+          (int64_t)changedRemovedTasks);
+  if (changedRemovedTasks > 0) {
+    improvementDiagnosticsStats_.neighborhoodsWithChanges++;
+  } else {
+    improvementDiagnosticsStats_.neighborhoodsWithoutChanges++;
+  }
 
   const int previousConflictSignalForIter =
       previousValidationStatsForIter.totalConflictEvents();
+  debugRow.previousConflictSignal = previousConflictSignalForIter;
   PLOGD << "Conflict signal in old solution: "
         << previousConflictSignalForIter << "\n";
 
   // Extract the set of conflicting tasks
+  const Time::time_point validationStart = Time::now();
   potentialNeighborhood.clear();
   ValidationStats candidateValidationStats;
   useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
@@ -458,6 +756,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
 
   const int candidateConflictSignal =
       candidateValidationStats.totalConflictEvents();
+  debugRow.candidateConflictSignal = candidateConflictSignal;
   PLOGD << "Conflict signal in new solution: " << candidateConflictSignal
         << "\n";
 
@@ -469,19 +768,49 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   if (!candidateValid) {
     // Solution was not valid as we found some conflicts!
     feasibleSolutionUpdated = false;
+    debugRow.feasibleBestUpdate = false;
     PLOGE << "The solution was not valid!\n";
   } else {
     if (extractFeasibleSolution()) {
       // This is the case when the feasible solution was updated!
       quality = IterationQuality::bestSolutionYet;
       feasibleSolutionUpdated = true;
+      debugRow.feasibleBestUpdate = true;
     } else {
       feasibleSolutionUpdated = false;
+      debugRow.feasibleBestUpdate = false;
     }
   }
+  timeValidationSec += elapsedSecSince(validationStart);
 
   // Ensure that we are either accepting or rejecting a solution here!
   const int proposedSocForIter = solution_.sumOfCosts;
+  debugRow.candidateSoc = proposedSocForIter;
+  improvementDiagnosticsStats_.sumCandidateSoc +=
+      static_cast<double>(proposedSocForIter);
+  improvementDiagnosticsStats_.sumPreviousConflictSignal +=
+      static_cast<double>(previousConflictSignalForIter);
+  improvementDiagnosticsStats_.sumCandidateConflictSignal +=
+      static_cast<double>(candidateConflictSignal);
+  if (candidateConflictSignal < previousConflictSignalForIter) {
+    improvementDiagnosticsStats_.conflictSignalBetter++;
+  } else if (candidateConflictSignal > previousConflictSignalForIter) {
+    improvementDiagnosticsStats_.conflictSignalWorse++;
+  } else {
+    improvementDiagnosticsStats_.conflictSignalEqual++;
+  }
+  if (candidateValid) {
+    debugRow.candidateValid = true;
+    improvementDiagnosticsStats_.candidateValid++;
+    if (feasibleSolutionUpdated) {
+      improvementDiagnosticsStats_.feasibleBestUpdates++;
+    } else {
+      improvementDiagnosticsStats_.feasibleNoBestUpdate++;
+    }
+  } else {
+    debugRow.candidateValid = false;
+    improvementDiagnosticsStats_.candidateInvalid++;
+  }
   double candidatePressure = 0.0;
   double candidateWait = 0.0;
   bool accepted = false;
@@ -497,6 +826,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
       temperature_ = max(0.0, temperature_ - greatDelugeDecay_);
     }
   };
+  const Time::time_point acceptanceStart = Time::now();
   if (!candidateValid) {
     PLOGD << "Invalid candidate forwarded to acceptance criteria\n";
   }
@@ -529,12 +859,17 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
       accepted = greatDelugeAlgorithm();
     } else {
       PLOGE << "Unknown acceptance criteria: " << acceptanceCriteria << "\n";
+      debugRow.earlyAbortReason = "acceptance_criteria_error";
+      runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
+      timeAcceptanceSec += elapsedSecSince(acceptanceStart);
+      commitIterationTiming();
       return false;
     }
     if (accepted) {
       acceptedAsWorse = previousSolution_.utility < solution_.utility;
     }
   }
+  timeAcceptanceSec += elapsedSecSince(acceptanceStart);
 
   if (alnsHeuristicForIter >= 0 &&
       alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
@@ -569,6 +904,85 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     }
   }
 
+  if (accepted) {
+    debugRow.accepted = true;
+    debugRow.acceptedAsWorseUtility = acceptedAsWorse;
+    improvementDiagnosticsStats_.accepted++;
+    if (acceptedAsWorse) {
+      improvementDiagnosticsStats_.acceptedAsWorseUtility++;
+    } else {
+      improvementDiagnosticsStats_.acceptedAsBetterOrEqualUtility++;
+    }
+    if (proposedSocForIter < previousSocForIter) {
+      improvementDiagnosticsStats_.acceptedSocBetterVsPrevious++;
+    } else if (proposedSocForIter > previousSocForIter) {
+      improvementDiagnosticsStats_.acceptedSocWorseVsPrevious++;
+    } else {
+      improvementDiagnosticsStats_.acceptedSocEqualVsPrevious++;
+    }
+    if (incumbentSocBeforeIter != std::numeric_limits<int>::max()) {
+      if (proposedSocForIter < incumbentSocBeforeIter) {
+        improvementDiagnosticsStats_.acceptedSocBetterVsIncumbent++;
+      } else if (proposedSocForIter > incumbentSocBeforeIter) {
+        improvementDiagnosticsStats_.acceptedSocWorseVsIncumbent++;
+      } else {
+        improvementDiagnosticsStats_.acceptedSocEqualVsIncumbent++;
+      }
+    }
+    if (candidateValid && !feasibleSolutionUpdated) {
+      improvementDiagnosticsStats_.acceptedFeasibleNoBestUpdate++;
+    }
+    if (!candidateValid) {
+      improvementDiagnosticsStats_.acceptedInvalid++;
+    }
+    if (candidateConflictSignal < previousConflictSignalForIter) {
+      improvementDiagnosticsStats_.acceptedConflictSignalBetter++;
+    } else if (candidateConflictSignal > previousConflictSignalForIter) {
+      improvementDiagnosticsStats_.acceptedConflictSignalWorse++;
+    } else {
+      improvementDiagnosticsStats_.acceptedConflictSignalEqual++;
+    }
+
+    const uint64_t fingerprint = computeSolutionFingerprint(solution_);
+    debugRow.fingerprint = fingerprint;
+    const auto [_, inserted] =
+        acceptedSolutionFingerprints_.insert(fingerprint);
+    debugRow.fingerprintSeenBefore = !inserted;
+    if (inserted) {
+      improvementDiagnosticsStats_.acceptedFingerprintUnique++;
+    } else {
+      improvementDiagnosticsStats_.acceptedFingerprintRepeat++;
+    }
+
+    improvementDiagnosticsStats_.acceptedRemovedTasksTotal +=
+        debugRow.removedTasks;
+    if (debugRow.removedTasksChangedAgent >= 0) {
+      improvementDiagnosticsStats_.acceptedRemovedTasksChangedAgentTotal +=
+          debugRow.removedTasksChangedAgent;
+      improvementDiagnosticsStats_.acceptedRemovedTasksChangedOrderTotal +=
+          debugRow.removedTasksChangedOrder;
+      improvementDiagnosticsStats_.acceptedRemovedTasksUnchangedTotal +=
+          debugRow.removedTasksUnchanged;
+      const int acceptedChangedRemovedTasks =
+          debugRow.removedTasksChangedAgent +
+          debugRow.removedTasksChangedOrder;
+      improvementDiagnosticsStats_.acceptedChangedTasksPerNeighborhoodMax =
+          max(improvementDiagnosticsStats_.acceptedChangedTasksPerNeighborhoodMax,
+              (int64_t)acceptedChangedRemovedTasks);
+    }
+    improvementDiagnosticsStats_.acceptedRemovedTasksMax =
+        max(improvementDiagnosticsStats_.acceptedRemovedTasksMax,
+            (int64_t)debugRow.removedTasks);
+  } else {
+    debugRow.accepted = false;
+    debugRow.acceptedAsWorseUtility = false;
+    improvementDiagnosticsStats_.rejected++;
+    if (guardRejected) {
+      debugRow.guardRejected = true;
+      improvementDiagnosticsStats_.guardRejected++;
+    }
+  }
+
   if (!accepted) {
     quality = IterationQuality::none;
     potentialNeighborhood = oldNeighborhood;
@@ -595,11 +1009,17 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
 
   maybeUpdateMarketState(accepted);
 
+  if (debugRow.earlyAbortReason.empty()) {
+    debugRow.earlyAbortReason = "none";
+  }
+  const Time::time_point bookkeepingStart = Time::now();
   runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
   double costToLog = (feasibleSolutionUpdated) ? incumbentSolution_.sumOfCosts
                                                : solution_.sumOfCosts;
   appendIterationStatBounded(IterationStats(
       runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
       costToLog, feasibleSolutionUpdated, quality));
+  timeBookkeepingSec += elapsedSecSince(bookkeepingStart);
+  commitIterationTiming();
   return true;
 }

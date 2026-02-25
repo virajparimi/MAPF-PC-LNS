@@ -79,6 +79,50 @@ int main(int argc, char** argv) {
       "Portfolio warm-start budget fraction in [0,1] "
       "(used when initialSolution='portfolio')");
   desc.add_options()(
+      "adaptiveInitialPortfolioBudget",
+      po::value<bool>()->default_value(false),
+      "Enable adaptive scaling of portfolio warm-start budget using "
+      "agents/tasks/precedence counts (used when initialSolution='portfolio')");
+  desc.add_options()(
+      "initialSeedFromPbsLog",
+      po::value<string>()->default_value(""),
+      "Path to MAPF-PC/PBS log with TASK ASSIGNMENTS and TASK PATHS sections; "
+      "if provided, seed initialization directly from this log");
+  desc.add_options()(
+      "postRefineWithMapfpc",
+      po::value<bool>()->default_value(false),
+      "After LNS, run MAPF-PC on a fixed assignment and optionally accept if "
+      "better");
+  desc.add_options()(
+      "postRefineAssignmentSource",
+      po::value<string>()->default_value("solution"),
+      "Assignment source for post-refinement: 'solution' or 'log'");
+  desc.add_options()(
+      "postRefineAssignmentLog",
+      po::value<string>()->default_value(""),
+      "Path to MAPF-PC/PBS log used when postRefineAssignmentSource='log'");
+  desc.add_options()(
+      "postRefineSolver",
+      po::value<string>()->default_value("pbs"),
+      "MAPF-PC solver for post-refinement: 'pbs' or 'cbs'");
+  desc.add_options()(
+      "postRefineTimeoutSec",
+      po::value<int>()->default_value(120),
+      "MAPF-PC cutoff in seconds for post-refinement");
+  desc.add_options()(
+      "postRefineAcceptOnlyIfBetter",
+      po::value<bool>()->default_value(true),
+      "If true, adopt post-refined solution only when SoC strictly improves");
+  desc.add_options()(
+      "debugImprovementDiagnostics",
+      po::value<bool>()->default_value(false),
+      "Emit additional diagnostics on acceptance/improvement behavior and "
+      "iteration time split");
+  desc.add_options()(
+      "debugIterationTsvPath",
+      po::value<string>()->default_value(""),
+      "Optional output TSV path for per-iteration debug diagnostics");
+  desc.add_options()(
       "goalOccupationMode",
       po::value<string>()->default_value("reposition_true"),
       "Final-goal reservation policy: 'stay' or 'reposition_true'");
@@ -120,6 +164,11 @@ int main(int argc, char** argv) {
       "lowLevelSegmentTimeout",
       po::value<double>()->default_value(600.0),
       "Per-segment timeout (seconds) for low-level planner searches");
+  desc.add_options()(
+      "lowLevelStructuralPrePrune",
+      po::value<bool>()->default_value(false),
+      "If true, skip low-level search for candidates with structural "
+      "infeasibility certificates (goal-permanent/start-trapped/static-disconnected)");
 
   struct MarketIntOptionSpec {
     const char* name;
@@ -315,13 +364,32 @@ int main(int argc, char** argv) {
   plog::get()->setMaxSeverity(static_cast<plog::Severity>(severity));
 
   string initialSolutionStrategy = vm["initialSolution"].as<string>();
+  const string initialSeedFromPbsLog = vm["initialSeedFromPbsLog"].as<string>();
+  const bool postRefineWithMapfpc =
+      vm["postRefineWithMapfpc"].as<bool>();
+  const string postRefineAssignmentSource =
+      vm["postRefineAssignmentSource"].as<string>();
+  const string postRefineAssignmentLog =
+      vm["postRefineAssignmentLog"].as<string>();
+  const string postRefineSolver = vm["postRefineSolver"].as<string>();
+  const int postRefineTimeoutSec = vm["postRefineTimeoutSec"].as<int>();
+  const bool postRefineAcceptOnlyIfBetter =
+      vm["postRefineAcceptOnlyIfBetter"].as<bool>();
+  const bool debugImprovementDiagnostics =
+      vm["debugImprovementDiagnostics"].as<bool>();
+  const string debugIterationTsvPath =
+      vm["debugIterationTsvPath"].as<string>();
+  if (!initialSeedFromPbsLog.empty()) {
+    initialSolutionStrategy = "seeded_pbs_log";
+  }
   if (initialSolutionStrategy != "greedy" &&
       initialSolutionStrategy != "prioritized" &&
       initialSolutionStrategy != "portfolio" &&
+      initialSolutionStrategy != "seeded_pbs_log" &&
       initialSolutionStrategy.find("sota") == string::npos) {
     PLOGE << "Incorrect initial solution strategy provided. Please choose from "
              "'greedy', 'prioritized', 'portfolio', "
-             "'sota_cbs' or 'sota_pbs' options"
+             "'sota_cbs', 'sota_pbs', or provide --initialSeedFromPbsLog"
           << "\n";
     return 1;
   }
@@ -331,6 +399,27 @@ int main(int argc, char** argv) {
       initialPortfolioTimeFraction < 0.0 ||
       initialPortfolioTimeFraction > 1.0) {
     PLOGE << "initialPortfolioTimeFraction must be finite and in [0, 1]\n";
+    return 1;
+  }
+  const bool adaptiveInitialPortfolioBudget =
+      vm["adaptiveInitialPortfolioBudget"].as<bool>();
+  if (postRefineAssignmentSource != "solution" &&
+      postRefineAssignmentSource != "log") {
+    PLOGE << "postRefineAssignmentSource must be 'solution' or 'log'\n";
+    return 1;
+  }
+  if (postRefineWithMapfpc && postRefineAssignmentSource == "log" &&
+      postRefineAssignmentLog.empty()) {
+    PLOGE << "postRefineAssignmentLog is required when "
+             "postRefineAssignmentSource='log'\n";
+    return 1;
+  }
+  if (postRefineSolver != "pbs" && postRefineSolver != "cbs") {
+    PLOGE << "postRefineSolver must be 'pbs' or 'cbs'\n";
+    return 1;
+  }
+  if (postRefineTimeoutSec <= 0) {
+    PLOGE << "postRefineTimeoutSec must be positive\n";
     return 1;
   }
   string goalOccupationMode = vm["goalOccupationMode"].as<string>();
@@ -398,6 +487,8 @@ int main(int argc, char** argv) {
   const bool plannerParityCheck = vm["plannerParityCheck"].as<bool>();
   const double lowLevelSegmentTimeout =
       vm["lowLevelSegmentTimeout"].as<double>();
+  const bool lowLevelStructuralPrePrune =
+      vm["lowLevelStructuralPrePrune"].as<bool>();
   if (lowLevelSegmentTimeout <= 0.0) {
     PLOGE << "lowLevelSegmentTimeout must be positive\n";
     return 1;
@@ -631,6 +722,18 @@ int main(int argc, char** argv) {
   parameters.core.initialSolutionStrategy = initialSolutionStrategy;
   parameters.core.initialPortfolioTimeFraction =
       initialPortfolioTimeFraction;
+  parameters.core.adaptiveInitialPortfolioBudget =
+      adaptiveInitialPortfolioBudget;
+  parameters.core.initialSeedFromPbsLog = initialSeedFromPbsLog;
+  parameters.core.postRefineWithMapfpc = postRefineWithMapfpc;
+  parameters.core.postRefineAssignmentSource = postRefineAssignmentSource;
+  parameters.core.postRefineAssignmentLog = postRefineAssignmentLog;
+  parameters.core.postRefineSolver = postRefineSolver;
+  parameters.core.postRefineTimeoutSec = postRefineTimeoutSec;
+  parameters.core.postRefineAcceptOnlyIfBetter =
+      postRefineAcceptOnlyIfBetter;
+  parameters.core.debugImprovementDiagnostics = debugImprovementDiagnostics;
+  parameters.core.debugIterationTsvPath = debugIterationTsvPath;
   parameters.core.goalOccupationMode = goalOccupationMode;
   parameters.core.destroyHeuristic = destroyHeuristic;
   parameters.core.acceptanceCriteria = acceptanceCriteria;
@@ -650,6 +753,7 @@ int main(int argc, char** argv) {
   parameters.lowLevel.parityCheck = plannerParityCheck;
   parameters.lowLevel.planner = lowLevelPlanner;
   parameters.lowLevel.segmentTimeout = lowLevelSegmentTimeout;
+  parameters.lowLevel.structuralPrePrune = lowLevelStructuralPrePrune;
 
   parameters.market = marketCli;
   auto lnsInstance =

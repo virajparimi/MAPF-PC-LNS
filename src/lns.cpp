@@ -10,7 +10,85 @@
 #include <utility>
 
 #include "common.hpp"
+#include "lns_internal_helpers.hpp"
 #include "utils.hpp"
+
+namespace {
+struct LowLevelStructuralDiagnostics {
+  bool validStage = false;
+  bool goalPermanentBeforeArrivalLb = false;
+  bool startTrappedAtTPlus1 = false;
+  bool staticDisconnectedPermanent = false;
+  int startLocation = -1;
+  int goalLocation = -1;
+  int hDist = MAX_TIMESTEP;
+  int earliestArrivalLb = MAX_TIMESTEP;
+  int goalPermanentFrom = MAX_TIMESTEP;
+  int feasibleImmediateMoves = -1;
+  bool canWaitAtStart = false;
+  int stableTime = -1;
+
+  int certificateCount() const {
+    return (goalPermanentBeforeArrivalLb ? 1 : 0) +
+           (startTrappedAtTPlus1 ? 1 : 0) +
+           (staticDisconnectedPermanent ? 1 : 0);
+  }
+};
+
+LowLevelStructuralDiagnostics classifyLowLevelStructuralDiagnostics(
+    const SingleAgentSolver& solver, const ConstraintTable& constraintTable,
+    int startTime, int stage) {
+  LowLevelStructuralDiagnostics diag;
+  if (stage < 0 || stage >= (int)solver.goalLocations.size()) {
+    return diag;
+  }
+  diag.validStage = true;
+  diag.goalLocation = solver.goalLocations[stage];
+  diag.startLocation =
+      (stage == 0) ? solver.startLocation : solver.goalLocations[stage - 1];
+  if (diag.startLocation < 0 || diag.startLocation >= solver.instance.mapSize ||
+      diag.goalLocation < 0 || diag.goalLocation >= solver.instance.mapSize) {
+    diag.validStage = false;
+    return diag;
+  }
+
+  diag.hDist = solver.getStageGoalDistance(stage, diag.startLocation);
+  diag.earliestArrivalLb = (diag.hDist >= MAX_TIMESTEP / 2)
+                               ? MAX_TIMESTEP
+                               : startTime + diag.hDist;
+  const auto* goalIntervals =
+      constraintTable.getConstraintIntervals(diag.goalLocation);
+  diag.goalPermanentFrom = permanentOccupancyStart(goalIntervals);
+  if (diag.goalPermanentFrom != MAX_TIMESTEP &&
+      diag.goalPermanentFrom <= diag.earliestArrivalLb) {
+    diag.goalPermanentBeforeArrivalLb = true;
+  }
+
+  diag.feasibleImmediateMoves = 0;
+  for (int nxt : solver.instance.getNeighbors(diag.startLocation)) {
+    const bool blockedVertex = constraintTable.constrained(nxt, startTime + 1);
+    const bool blockedEdge =
+        constraintTable.constrained(diag.startLocation, nxt, startTime + 1);
+    if (!blockedVertex && !blockedEdge) {
+      diag.feasibleImmediateMoves++;
+    }
+  }
+  diag.canWaitAtStart =
+      !constraintTable.constrained(diag.startLocation, startTime + 1);
+  if (!diag.canWaitAtStart && diag.feasibleImmediateMoves == 0) {
+    diag.startTrappedAtTPlus1 = true;
+  }
+
+  diag.stableTime = max(startTime, constraintTable.temporalExtent + 1);
+  const bool staticReachable = reachableWithPermanentBlocksByTime(
+      solver.instance, constraintTable, diag.startLocation, diag.goalLocation,
+      diag.stableTime);
+  if (!staticReachable) {
+    diag.staticDisconnectedPermanent = true;
+  }
+  return diag;
+}
+}  // namespace
 
 void LNS::buildFullPrecedenceConstraints(
     vector<pair<int, int>>& precedenceConstraints,
@@ -95,9 +173,61 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
   lastLowLevelEffectiveTimeoutSec_ = effectiveTimeout;
   solver.setSegmentTimeout(effectiveTimeout);
 
+  lowLevelCalls_++;
+  if (lowLevelStructuralPrePrune_) {
+    const auto diag = classifyLowLevelStructuralDiagnostics(
+        solver, constraintTable, startTime, stage);
+    if (diag.validStage && diag.certificateCount() > 0) {
+      lowLevelStructuralPrePruned_++;
+      if (diag.certificateCount() > 1) {
+        lowLevelStructuralPrePrunedMultiCertificate_++;
+      }
+      if (diag.goalPermanentBeforeArrivalLb) {
+        lowLevelStructuralPrePrunedGoalPermanentBeforeArrivalLb_++;
+      }
+      if (diag.startTrappedAtTPlus1) {
+        lowLevelStructuralPrePrunedStartTrappedAtTPlus1_++;
+      }
+      if (diag.staticDisconnectedPermanent) {
+        lowLevelStructuralPrePrunedStaticDisconnectedPermanent_++;
+      }
+
+      solver.setLastSearchOutcome(
+          SingleAgentSolver::SearchOutcome::search_exhausted);
+      lastLowLevelOutcome_ = solver.getLastSearchOutcome();
+      lowLevelSearchExhausted_++;
+      if (debugImprovementDiagnostics_ &&
+          lowLevelTimeoutDiagnosticsLogsEmitted_ < 200) {
+        PLOGW << "LL-structural-preprune: stage=" << stage
+              << ", start_time=" << startTime << ", lower_bound=" << lowerBound
+              << ", start_loc=" << diag.startLocation
+              << ", goal_loc=" << diag.goalLocation
+              << ", hdist_to_goal=" << diag.hDist
+              << ", earliest_arrival_lb=" << diag.earliestArrivalLb
+              << ", goal_permanent_from="
+              << (diag.goalPermanentFrom == MAX_TIMESTEP ? -1
+                                                         : diag.goalPermanentFrom)
+              << ", feasible_immediate_moves=" << diag.feasibleImmediateMoves
+              << ", can_wait_at_start="
+              << (diag.canWaitAtStart ? "true" : "false")
+              << ", stable_time=" << diag.stableTime
+              << ", cert_goal_permanent="
+              << (diag.goalPermanentBeforeArrivalLb ? "true" : "false")
+              << ", cert_start_trapped="
+              << (diag.startTrappedAtTPlus1 ? "true" : "false")
+              << ", cert_static_disconnected="
+              << (diag.staticDisconnectedPermanent ? "true" : "false")
+              << ", configured_timeout_sec=" << configuredTimeout
+              << ", effective_timeout_sec=" << effectiveTimeout << "\n";
+        lowLevelTimeoutDiagnosticsLogsEmitted_++;
+      }
+      solver.setSegmentTimeout(configuredTimeout);
+      return AgentTaskPath();
+    }
+  }
+
   const uint64_t expandedBefore = solver.numExpanded;
   const uint64_t generatedBefore = solver.numGenerated;
-  lowLevelCalls_++;
   AgentTaskPath path =
       solver.findPathSegment(constraintTable, startTime, stage, lowerBound);
   lowLevelExpanded_ += (solver.numExpanded - expandedBefore);
@@ -109,6 +239,9 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
       break;
     case SingleAgentSolver::SearchOutcome::timeout:
       lowLevelTimeout_++;
+      recordLowLevelTimeoutDiagnostics(solver, constraintTable, startTime, stage,
+                                       lowerBound, configuredTimeout,
+                                       effectiveTimeout);
       break;
     case SingleAgentSolver::SearchOutcome::search_exhausted:
       lowLevelSearchExhausted_++;
@@ -126,6 +259,62 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
   }
   solver.setSegmentTimeout(configuredTimeout);
   return path;
+}
+
+void LNS::recordLowLevelTimeoutDiagnostics(
+    const SingleAgentSolver& solver, const ConstraintTable& constraintTable,
+    int startTime, int stage, int lowerBound, double configuredTimeout,
+    double effectiveTimeout) {
+  const bool reducedByGlobalBudget = effectiveTimeout + 1e-9 < configuredTimeout;
+  if (reducedByGlobalBudget) {
+    lowLevelTimeoutReducedByGlobalBudget_++;
+  }
+
+  const auto diag = classifyLowLevelStructuralDiagnostics(
+      solver, constraintTable, startTime, stage);
+  if (!diag.validStage) {
+    lowLevelTimeoutOther_++;
+    return;
+  }
+
+  if (diag.certificateCount() > 1) {
+    lowLevelTimeoutMultiCertificate_++;
+  }
+
+  const char* reason = "other";
+  if (diag.goalPermanentBeforeArrivalLb) {
+    lowLevelTimeoutGoalPermanentBeforeArrivalLb_++;
+    reason = "goal_permanent_before_arrival_lb";
+  } else if (diag.startTrappedAtTPlus1) {
+    lowLevelTimeoutStartTrappedAtTPlus1_++;
+    reason = "start_trapped_at_t+1";
+  } else if (diag.staticDisconnectedPermanent) {
+    lowLevelTimeoutStaticDisconnectedPermanent_++;
+    reason = "static_disconnected_under_permanent_blocks";
+  } else {
+    lowLevelTimeoutOther_++;
+  }
+
+  if (debugImprovementDiagnostics_ &&
+      lowLevelTimeoutDiagnosticsLogsEmitted_ < 200) {
+    PLOGW << "LL-timeout diagnostics: reason=" << reason
+          << ", stage=" << stage << ", start_time=" << startTime
+          << ", lower_bound=" << lowerBound << ", start_loc="
+          << diag.startLocation << ", goal_loc=" << diag.goalLocation
+          << ", hdist_to_goal=" << diag.hDist
+          << ", earliest_arrival_lb=" << diag.earliestArrivalLb
+          << ", goal_permanent_from="
+          << (diag.goalPermanentFrom == MAX_TIMESTEP ? -1
+                                                     : diag.goalPermanentFrom)
+          << ", feasible_immediate_moves=" << diag.feasibleImmediateMoves
+          << ", can_wait_at_start=" << (diag.canWaitAtStart ? "true" : "false")
+          << ", stable_time=" << diag.stableTime
+          << ", reduced_by_global_budget="
+          << (reducedByGlobalBudget ? "true" : "false")
+          << ", configured_timeout_sec=" << configuredTimeout
+          << ", effective_timeout_sec=" << effectiveTimeout << "\n";
+    lowLevelTimeoutDiagnosticsLogsEmitted_++;
+  }
 }
 
 double LNS::elapsedRuntimeSec() const {
@@ -368,12 +557,40 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   }
   initialPortfolioTimeFraction_ =
       min(1.0, max(0.0, initialPortfolioTimeFraction_));
+  adaptiveInitialPortfolioBudget_ =
+      parameters.core.adaptiveInitialPortfolioBudget;
+  initialSeedFromPbsLog_ = parameters.core.initialSeedFromPbsLog;
+  postRefineWithMapfpc_ = parameters.core.postRefineWithMapfpc;
+  postRefineAssignmentSource_ = parameters.core.postRefineAssignmentSource;
+  if (postRefineAssignmentSource_ != "solution" &&
+      postRefineAssignmentSource_ != "log") {
+    PLOGW << "Unknown postRefineAssignmentSource '"
+          << postRefineAssignmentSource_
+          << "'; defaulting to 'solution'\n";
+    postRefineAssignmentSource_ = "solution";
+  }
+  postRefineAssignmentLog_ = parameters.core.postRefineAssignmentLog;
+  postRefineSolver_ = parameters.core.postRefineSolver;
+  if (postRefineSolver_ != "pbs" && postRefineSolver_ != "cbs") {
+    PLOGW << "Unknown postRefineSolver '" << postRefineSolver_
+          << "'; defaulting to 'pbs'\n";
+    postRefineSolver_ = "pbs";
+  }
+  postRefineTimeoutSec_ = std::max(1, parameters.core.postRefineTimeoutSec);
+  postRefineAcceptOnlyIfBetter_ =
+      parameters.core.postRefineAcceptOnlyIfBetter;
+  debugImprovementDiagnostics_ =
+      parameters.core.debugImprovementDiagnostics;
+  debugIterationTsvPath_ = parameters.core.debugIterationTsvPath;
   initialSolutionRequested_ = initialSolutionStrategy;
   initialSolutionEffective_ = initialSolutionStrategy;
   initialSolutionFallbackUsed_ = false;
   initialSolutionFallbackReason_ = "none";
   goalOccupationMode_ = parameters.core.goalOccupationMode;
   terminalRepositionStats_.reset();
+  improvementDiagnosticsStats_.reset();
+  acceptedSolutionFingerprints_.clear();
+  iterationDebugRecords_.clear();
   parkingCandidatesCache_.clear();
   if (goalOccupationMode_ != "stay" &&
       goalOccupationMode_ != "reposition_true") {
@@ -411,6 +628,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
     lowLevelPlannerType_ = LowLevelPlannerType::mlastar;
   }
   lowLevelSegmentTimeout_ = max(0.0, parameters.lowLevel.segmentTimeout);
+  lowLevelStructuralPrePrune_ = parameters.lowLevel.structuralPrePrune;
   plannerParityCheck_ = parameters.lowLevel.parityCheck;
   market_.heuristics = parameters.market.heuristics;
   market_.bucketDt = max(1, parameters.market.bucketDt);

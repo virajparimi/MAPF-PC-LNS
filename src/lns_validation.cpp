@@ -166,17 +166,41 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks,
     *stats = ValidationStats{};
   }
   const int taskCount = instance_.getTasksNum();
-  const vector<int> taskToPosition =
-      mapf_pc_lns::internal::buildTaskPositionIndexByMappedAgent(solution_, taskCount);
+  vector<int> taskOwner(taskCount, UNASSIGNED);
+  vector<int> taskToPosition(taskCount, UNASSIGNED);
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& assignments = solution_.agents[agent].taskAssignments;
+    for (int pos = 0; pos < (int)assignments.size(); pos++) {
+      const int task = assignments[pos];
+      if (task < 0 || task >= taskCount) {
+        PLOGE << "validateSolution: out-of-range task id " << task
+              << " in agent " << agent << " assignment queue\n";
+        if (stats != nullptr) {
+          stats->structuralViolations++;
+        }
+        return false;
+      }
+      if (taskOwner[task] != UNASSIGNED && taskOwner[task] != agent) {
+        PLOGE << "validateSolution: duplicate task " << task
+              << " assigned to multiple agents (" << taskOwner[task]
+              << " and " << agent << ")\n";
+        if (stats != nullptr) {
+          stats->structuralViolations++;
+        }
+        return false;
+      }
+      if (taskOwner[task] == UNASSIGNED) {
+        taskOwner[task] = agent;
+        taskToPosition[task] = pos;
+      }
+    }
+  }
 
   vector<pair<int, int>> precedenceConstraints =
       buildFullPrecedenceConstraints();
 
   for (int task = 0; task < taskCount; task++) {
-    const int taskAgent =
-        (task >= 0 && task < (int)solution_.taskAgentMap.size())
-            ? solution_.taskAgentMap[task]
-            : UNASSIGNED;
+    const int taskAgent = taskOwner[task];
     if (taskAgent == UNASSIGNED) {
       PLOGE << "validateSolution: missing agent assignment for task "
             << task << "\n";
@@ -185,9 +209,7 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks,
       }
       return false;
     }
-    int taskPosition = (task >= 0 && task < (int)taskToPosition.size())
-                           ? taskToPosition[task]
-                           : UNASSIGNED;
+    const int taskPosition = taskToPosition[task];
     if (taskPosition < 0 ||
         taskPosition >= (int)solution_.agents[taskAgent].taskPaths.size()) {
       PLOGE << "validateSolution: invalid local index " << taskPosition
@@ -209,11 +231,31 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks,
     }
   }
 
+  // Keep taskAgentMap synchronized with assignment-derived ownership so
+  // downstream helpers observe a coherent state within this iteration.
+  if ((int)solution_.taskAgentMap.size() != taskCount) {
+    solution_.taskAgentMap.assign(taskCount, UNASSIGNED);
+  }
+  for (int task = 0; task < taskCount; task++) {
+    solution_.taskAgentMap[task] = taskOwner[task];
+  }
+
   // Check that the precedence constraints are not violated
   for (const auto& precedenceConstraint : precedenceConstraints) {
+    if (precedenceConstraint.first < 0 || precedenceConstraint.second < 0 ||
+        precedenceConstraint.first >= taskCount ||
+        precedenceConstraint.second >= taskCount) {
+      PLOGE << "validateSolution: invalid precedence edge ("
+            << precedenceConstraint.first << ", "
+            << precedenceConstraint.second << ")\n";
+      if (stats != nullptr) {
+        stats->structuralViolations++;
+      }
+      return false;
+    }
 
-    int agentA = solution_.getAgentWithTask(precedenceConstraint.first),
-        agentB = solution_.getAgentWithTask(precedenceConstraint.second);
+    int agentA = taskOwner[precedenceConstraint.first],
+        agentB = taskOwner[precedenceConstraint.second];
     if (agentA == UNASSIGNED || agentB == UNASSIGNED) {
       PLOGE << "validateSolution: missing agent for precedence pair ("
             << precedenceConstraint.first << ", "
@@ -223,14 +265,8 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks,
       }
       return false;
     }
-    int taskPositionA = (precedenceConstraint.first >= 0 &&
-                         precedenceConstraint.first < (int)taskToPosition.size())
-                            ? taskToPosition[precedenceConstraint.first]
-                            : UNASSIGNED,
-        taskPositionB = (precedenceConstraint.second >= 0 &&
-                         precedenceConstraint.second < (int)taskToPosition.size())
-                            ? taskToPosition[precedenceConstraint.second]
-                            : UNASSIGNED;
+    int taskPositionA = taskToPosition[precedenceConstraint.first],
+        taskPositionB = taskToPosition[precedenceConstraint.second];
     if (taskPositionA < 0 || taskPositionB < 0 ||
         taskPositionA >= (int)solution_.agents[agentA].path.timeStamps.size() ||
         taskPositionB >= (int)solution_.agents[agentB].path.timeStamps.size()) {

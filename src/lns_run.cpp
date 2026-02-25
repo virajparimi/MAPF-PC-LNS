@@ -3,6 +3,9 @@
 #include "utils.hpp"
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 
 void LNS::appendIterationStatBounded(const IterationStats& stat) {
@@ -18,15 +21,202 @@ void LNS::appendIterationStatBounded(const IterationStats& stat) {
   iterationStats.push_back(stat);
 }
 
+uint64_t LNS::computeSolutionFingerprint(const Solution& solution) const {
+  auto mix64 = [](uint64_t x) -> uint64_t {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+  };
+  uint64_t hashValue = 0x9e3779b97f4a7c15ULL;
+  auto combine = [&](uint64_t value) {
+    hashValue ^= mix64(value + 0x9e3779b97f4a7c15ULL + (hashValue << 6) +
+                       (hashValue >> 2));
+  };
+
+  combine((uint64_t)instance_.getAgentNum());
+  combine((uint64_t)instance_.getTasksNum());
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    const auto& assignments = solution.agents[agent].taskAssignments;
+    combine((uint64_t)agent);
+    combine((uint64_t)assignments.size());
+    for (int task : assignments) {
+      combine((uint64_t)(uint32_t)(task + 1));
+    }
+
+    const auto& servicePath = solution.agents[agent].path;
+    combine((uint64_t)servicePath.size());
+    combine((uint64_t)(uint32_t)(servicePath.endTimeOrZero() + 1));
+    if (!servicePath.empty()) {
+      combine((uint64_t)(uint32_t)(servicePath.front().location + 1));
+      combine((uint64_t)(uint32_t)(servicePath.back().location + 1));
+    }
+  }
+  return hashValue;
+}
+
+uint64_t LNS::computeNeighborhoodFingerprint(
+    const ConflictMap& removedTasks) const {
+  auto mix64 = [](uint64_t x) -> uint64_t {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+  };
+  uint64_t hashValue = 0x517cc1b727220a95ULL;
+  auto combine = [&](uint64_t value) {
+    hashValue ^= mix64(value + 0x9e3779b97f4a7c15ULL + (hashValue << 6) +
+                       (hashValue >> 2));
+  };
+
+  combine((uint64_t)removedTasks.size());
+  for (const auto& [task, conflict] : removedTasks) {
+    combine((uint64_t)(uint32_t)(task + 1));
+    combine((uint64_t)(uint32_t)(conflict.agent + 1));
+    combine((uint64_t)(uint32_t)(conflict.taskPosition + 1));
+  }
+  return hashValue;
+}
+
+string LNS::iterationQualityName(IterationQuality quality) const {
+  switch (quality) {
+    case IterationQuality::bestSolutionYet:
+      return "bestSolutionYet";
+    case IterationQuality::improvedSolution:
+      return "improvedSolution";
+    case IterationQuality::downgradedButAccepted:
+      return "downgradedButAccepted";
+    case IterationQuality::couldNotFind:
+      return "couldNotFind";
+    case IterationQuality::none:
+    default:
+      return "none";
+  }
+}
+
+bool LNS::writeIterationDebugTsv(const string& outputPath) const {
+  std::filesystem::path path(outputPath);
+  if (path.empty()) {
+    return true;
+  }
+  const auto parent = path.parent_path();
+  std::error_code ec;
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+      PLOGE << "writeIterationDebugTsv: failed to create directory '"
+            << parent.string() << "': " << ec.message() << "\n";
+      return false;
+    }
+  }
+
+  std::ofstream out(outputPath);
+  if (!out.is_open()) {
+    PLOGE << "writeIterationDebugTsv: unable to open '" << outputPath
+          << "' for writing\n";
+    return false;
+  }
+  out << "iteration\truntime_s\tprevious_soc\tcandidate_soc\tincumbent_soc_before\t"
+         "candidate_valid\taccepted\tguard_rejected\taccepted_as_worse_utility\t"
+         "feasible_best_update\tquality\tearly_abort_reason\tprevious_conflict\t"
+         "candidate_conflict\tremoved_tasks\tremoved_task_ids_csv\tremoved_tasks_changed_agent\t"
+         "removed_tasks_changed_order\tremoved_tasks_unchanged\t"
+         "neighborhood_fingerprint_seen_before\tneighborhood_fingerprint_hex\t"
+         "neighborhood_jaccard_prev\tneighborhood_repeat_streak\t"
+         "fingerprint_seen_before\tfingerprint_hex\t"
+         "time_destroy_prepare_s\ttime_repair_commit_s\ttime_join_s\t"
+         "time_terminal_replan_s\ttime_recompute_soc_s\ttime_validation_s\t"
+         "time_acceptance_s\ttime_bookkeeping_s\n";
+
+  std::ios::fmtflags oldFlags = out.flags();
+  std::streamsize oldPrecision = out.precision();
+  out << std::fixed << std::setprecision(6);
+  for (const auto& row : iterationDebugRecords_) {
+    out << row.iteration << '\t'
+        << row.runtimeSec << '\t'
+        << row.previousSoc << '\t'
+        << row.candidateSoc << '\t'
+        << row.incumbentSocBefore << '\t'
+        << (row.candidateValid ? 1 : 0) << '\t'
+        << (row.accepted ? 1 : 0) << '\t'
+        << (row.guardRejected ? 1 : 0) << '\t'
+        << (row.acceptedAsWorseUtility ? 1 : 0) << '\t'
+        << (row.feasibleBestUpdate ? 1 : 0) << '\t'
+        << row.quality << '\t'
+        << row.earlyAbortReason << '\t'
+        << row.previousConflictSignal << '\t'
+        << row.candidateConflictSignal << '\t'
+        << row.removedTasks << '\t'
+        << row.removedTaskIdsCsv << '\t'
+        << row.removedTasksChangedAgent << '\t'
+        << row.removedTasksChangedOrder << '\t'
+        << row.removedTasksUnchanged << '\t'
+        << (row.neighborhoodFingerprintSeenBefore ? 1 : 0) << '\t';
+    out << std::hex << row.neighborhoodFingerprint << std::dec << '\t'
+        << row.neighborhoodJaccardPrev << '\t'
+        << row.neighborhoodRepeatStreak << '\t'
+        << (row.fingerprintSeenBefore ? 1 : 0) << '\t';
+    out << std::hex << row.fingerprint << std::dec << '\t'
+        << row.timeDestroyAndPrepareSec << '\t'
+        << row.timeRepairAndCommitSec << '\t'
+        << row.timeJoinPathsSec << '\t'
+        << row.timeTerminalReplanSec << '\t'
+        << row.timeRecomputeSocSec << '\t'
+        << row.timeValidationSec << '\t'
+        << row.timeAcceptanceSec << '\t'
+        << row.timeBookkeepingSec << '\n';
+  }
+  out.flags(oldFlags);
+  out.precision(oldPrecision);
+  out.close();
+  return out.good();
+}
+
 bool LNS::run() {
   constexpr double kPortfolioMinArmTimeSec = 1.0;
+  constexpr double kAdaptivePortfolioMinFraction = 0.05;
+  constexpr double kAdaptivePortfolioMaxFraction = 0.35;
 
   invalidCandidateRejections = 0;
   marketGuardRejections = 0;
+  improvementDiagnosticsStats_.reset();
+  acceptedSolutionFingerprints_.clear();
+  seenNeighborhoodFingerprints_.clear();
+  previousNeighborhoodTasksSorted_.clear();
+  currentNeighborhoodRepeatStreak_ = 0;
+  iterationDebugRecords_.clear();
+  auto flushDebugTsv = [&]() {
+    if (debugIterationTsvPath_.empty()) {
+      return;
+    }
+    if (!writeIterationDebugTsv(debugIterationTsvPath_)) {
+      PLOGE << "Failed to write iteration debug TSV to '"
+            << debugIterationTsvPath_ << "'\n";
+    }
+  };
 
   auto runInitialSolutionStrategy =
       [&](const string& strategy,
           std::optional<double> armBudgetSec = std::nullopt) -> bool {
+    if (strategy == "seeded_pbs_log") {
+      if (initialSeedFromPbsLog_.empty()) {
+        PLOGE << "seeded_pbs_log requested but --initialSeedFromPbsLog was not provided\n";
+        return false;
+      }
+      const bool loaded = buildSeededSolutionFromMAPFPCLog(initialSeedFromPbsLog_);
+      if (loaded) {
+        const std::filesystem::path logPath(initialSeedFromPbsLog_);
+        const std::string logName = logPath.filename().string();
+        initialSolutionEffective_ = logName.empty()
+                                        ? "seeded_pbs_log"
+                                        : ("seeded_pbs_log(" + logName + ")");
+      }
+      return loaded;
+    }
     if (strategy == "greedy") {
       // Run the greedy task assignment and subsequent path finding algorithm.
       return buildGreedySolution();
@@ -73,25 +263,132 @@ bool LNS::run() {
   };
   vector<InitialCheckpoint> initialCheckpoints;
 
-  initialSolutionRequested_ = initialSolutionStrategy;
-  initialSolutionEffective_ = initialSolutionStrategy;
+  string requestedInitialStrategy = initialSolutionStrategy;
+  if (!initialSeedFromPbsLog_.empty()) {
+    requestedInitialStrategy = "seeded_pbs_log";
+  }
+  initialSolutionRequested_ = requestedInitialStrategy;
+  initialSolutionEffective_ = requestedInitialStrategy;
   initialSolutionFallbackUsed_ = false;
   initialSolutionFallbackReason_ = "none";
   bool terminalPreparedDuringPortfolio = false;
 
   bool success = false;
-  if (initialSolutionStrategy == "portfolio") {
-    // Anytime-safe portfolio: fixed arm order, fixed budget from cutoff.
-    const vector<string> portfolioArms = {"prioritized", "sota_pbs",
-                                          "sota_cbs"};
+  if (requestedInitialStrategy == "portfolio") {
+    // Adaptive portfolio arm selection by instance hardness.
+    const int agentCount = std::max(1, instance_.getAgentNum());
+    const int taskCount = std::max(1, instance_.getTasksNum());
+    const int precedenceCount = std::max(
+        1, static_cast<int>(instance_.getInputPrecedenceConstraintsRef().size()));
+
+    const double agents = static_cast<double>(agentCount);
+    const double tasks = static_cast<double>(taskCount);
+    const double precedence = static_cast<double>(precedenceCount);
+    const double normalizedAgents = agents / 30.0;
+    const double normalizedTasks = tasks / 200.0;
+    const double normalizedPrecedence = precedence / 120.0;
+    const double difficultyScore = 0.45 * std::log1p(normalizedAgents) +
+                                   0.35 * std::log1p(normalizedTasks) +
+                                   0.20 * std::log1p(normalizedPrecedence);
+    const double referenceDifficulty = std::log1p(1.0);  // (30, 200, 120)
+    double difficultyScale =
+        (referenceDifficulty > 0.0) ? (difficultyScore / referenceDifficulty)
+                                    : 1.0;
+    if (!std::isfinite(difficultyScale) || difficultyScale <= 0.0) {
+      difficultyScale = 1.0;
+    }
+
+    auto classifyByPc = [&](int pc) -> string {
+      if (pc >= 450) return "hard";
+      if (pc >= 120 && pc <= 280) return "medium";
+      if (pc >= 80 && pc <= 100) return "easy";
+      return "unknown";
+    };
+    auto classifyByAgents = [&](int agentsCount) -> string {
+      if (agentsCount >= 200) return "hard";
+      if (agentsCount >= 50 && agentsCount <= 100) return "medium";
+      if (agentsCount >= 10 && agentsCount <= 30) return "easy";
+      return "unknown";
+    };
+    auto classifyByTasks = [&](int tasksCount) -> string {
+      if (tasksCount >= 800) return "hard";
+      if (tasksCount >= 200 && tasksCount < 800) return "medium";
+      if (tasksCount <= 100) return "easy";
+      return "unknown";
+    };
+
+    const string pcTier = classifyByPc(precedenceCount);
+    const string agentsTier = classifyByAgents(agentCount);
+    const string tasksTier = classifyByTasks(taskCount);
+
+    // Match dataset tiering preference order: PC first, then agents, then tasks.
+    string portfolioHardness = "easy";
+    if (pcTier != "unknown") {
+      portfolioHardness = pcTier;
+    } else if (agentsTier != "unknown") {
+      portfolioHardness = agentsTier;
+    } else if (tasksTier != "unknown") {
+      portfolioHardness = tasksTier;
+    }
+
+    vector<string> portfolioArms = {"prioritized", "sota_pbs", "sota_cbs"};
+    if (portfolioHardness == "hard") {
+      portfolioHardness = "hard";
+      portfolioArms = {"sota_pbs"};
+    } else if (portfolioHardness == "medium") {
+      portfolioArms = {"prioritized", "sota_pbs"};
+    }
+    string portfolioArmsCsv;
+    for (size_t armIdx = 0; armIdx < portfolioArms.size(); armIdx++) {
+      if (armIdx > 0) {
+        portfolioArmsCsv += ",";
+      }
+      portfolioArmsCsv += portfolioArms[armIdx];
+    }
+    PLOGI << "portfolio arm selection: hardness=" << portfolioHardness
+          << ", difficulty_scale=" << difficultyScale
+          << ", pc_tier=" << pcTier << ", agents_tier=" << agentsTier
+          << ", tasks_tier=" << tasksTier
+          << ", arms=" << portfolioArmsCsv
+          << " (agents=" << agentCount << ", tasks=" << taskCount
+          << ", precedence_edges=" << precedenceCount << ")\n";
+
+    const bool singleArmPortfolio = (portfolioArms.size() == 1);
+    double portfolioBudgetFraction = initialPortfolioTimeFraction_;
+    if (adaptiveInitialPortfolioBudget_) {
+      if (initialPortfolioTimeFraction_ <= 0.0) {
+        portfolioBudgetFraction = 0.0;
+      } else {
+        if (std::isfinite(difficultyScale)) {
+          portfolioBudgetFraction = std::clamp(
+              initialPortfolioTimeFraction_ * difficultyScale,
+              kAdaptivePortfolioMinFraction,
+              kAdaptivePortfolioMaxFraction);
+        } else {
+          portfolioBudgetFraction = initialPortfolioTimeFraction_;
+        }
+      }
+      PLOGI << "adaptiveInitialPortfolioBudget enabled: base_fraction="
+            << initialPortfolioTimeFraction_ << ", effective_fraction="
+            << portfolioBudgetFraction << " (agents=" << agentCount
+            << ", tasks=" << taskCount << ", precedence_edges="
+            << precedenceCount << ")\n";
+    }
     const double remainingBudget = remainingRuntimeBudgetSec();
-    double portfolioBudgetSec =
-        std::min(remainingBudget,
-                 max(0.0, timeLimit_ * initialPortfolioTimeFraction_));
-    if (portfolioBudgetSec <= 0.0 && remainingBudget > 0.0) {
-      // Ensure at least one short arm when portfolio is explicitly requested.
-      portfolioBudgetSec =
-          std::min(remainingBudget, kPortfolioMinArmTimeSec);
+    double portfolioBudgetSec = 0.0;
+    if (singleArmPortfolio) {
+      // With a single portfolio arm there is no exploration/exploitation split.
+      // Ignore the portfolio fraction and let initializer use full remaining
+      // runtime budget.
+      portfolioBudgetSec = remainingBudget;
+    } else {
+      portfolioBudgetSec = std::min(remainingBudget,
+                                    max(0.0, timeLimit_ * portfolioBudgetFraction));
+      if (portfolioBudgetSec <= 0.0 && remainingBudget > 0.0) {
+        // Ensure at least one short arm when portfolio is explicitly requested.
+        portfolioBudgetSec =
+            std::min(remainingBudget, kPortfolioMinArmTimeSec);
+      }
     }
 
     struct PortfolioCandidate {
@@ -111,15 +408,20 @@ bool LNS::run() {
     int bestServicePortfolioSoc = std::numeric_limits<int>::max();
 
     for (int i = 0; i < (int)portfolioArms.size(); i++) {
-      if (runtimeBudgetExhausted() || portfolioBudgetSec <= 0.0) {
+      if (runtimeBudgetExhausted() ||
+          (!singleArmPortfolio && portfolioBudgetSec <= 0.0)) {
         break;
       }
-      const int armsLeft = (int)portfolioArms.size() - i;
-      const double fairShare = portfolioBudgetSec / max(1, armsLeft);
-      double armBudgetSec =
-          std::max(kPortfolioMinArmTimeSec, fairShare);
-      armBudgetSec = std::min(armBudgetSec, portfolioBudgetSec);
-      armBudgetSec = std::min(armBudgetSec, remainingRuntimeBudgetSec());
+      double armBudgetSec = 0.0;
+      if (singleArmPortfolio) {
+        armBudgetSec = remainingRuntimeBudgetSec();
+      } else {
+        const int armsLeft = (int)portfolioArms.size() - i;
+        const double fairShare = portfolioBudgetSec / max(1, armsLeft);
+        armBudgetSec = std::max(kPortfolioMinArmTimeSec, fairShare);
+        armBudgetSec = std::min(armBudgetSec, portfolioBudgetSec);
+        armBudgetSec = std::min(armBudgetSec, remainingRuntimeBudgetSec());
+      }
       if (armBudgetSec <= 0.0) {
         break;
       }
@@ -152,7 +454,9 @@ bool LNS::run() {
       }
       const double armEndSec = elapsedRuntimeSec();
       const double consumedBudget = max(0.0, armEndSec - armStartSec);
-      portfolioBudgetSec = max(0.0, portfolioBudgetSec - consumedBudget);
+      if (!singleArmPortfolio) {
+        portfolioBudgetSec = max(0.0, portfolioBudgetSec - consumedBudget);
+      }
 
       InitialCheckpoint checkpoint;
       checkpoint.runtimeSec = armEndSec;
@@ -213,7 +517,7 @@ bool LNS::run() {
       success = false;
     }
   } else {
-    success = runInitialSolutionStrategy(initialSolutionStrategy);
+    success = runInitialSolutionStrategy(requestedInitialStrategy);
   }
 
   // If the requested initial solution strategy fails, terminate directly.
@@ -221,6 +525,7 @@ bool LNS::run() {
     if (initialSolutionFallbackReason_ == "none") {
       initialSolutionFallbackReason_ = "initializer_failed";
     }
+    flushDebugTsv();
     return success;
   }
 
@@ -237,6 +542,7 @@ bool LNS::run() {
     if (!planTerminalReposition(allAgents, true)) {
       PLOGE << "run: true terminal reposition planning failed during "
                "initialization\n";
+      flushDebugTsv();
       return false;
     }
   }
@@ -326,21 +632,28 @@ bool LNS::run() {
 
   previousSolution_ = solution_;
 
-  const int64_t iterationLimit =
-      (numOfIterations_ > 0)
-          ? static_cast<int64_t>(numOfIterations_) * 2
-          : std::numeric_limits<int64_t>::max();
+  int64_t executedLnsIterations = 0;
 
   // LNS loop
   while (runtime < timeLimit_ &&
-         static_cast<int64_t>(iterationStats.size()) < iterationLimit) {
+         (numOfIterations_ <= 0 ||
+          executedLnsIterations < static_cast<int64_t>(numOfIterations_))) {
     if (!runOneIteration(potentialNeighborhood, oldNeighborhood, metrics,
                          currentSolutionValid, currentValidationStats,
                          feasibleSolutionUpdated)) {
+      flushDebugTsv();
       return false;
     }
+    executedLnsIterations++;
+  }
+
+  if (postRefineWithMapfpc_) {
+    const bool accepted = runPostMAPFPCRefinement();
+    PLOGI << "post_refine_mapfpc: accepted="
+          << (accepted ? "true" : "false") << "\n";
   }
 
   // printPaths();
+  flushDebugTsv();
   return !incumbentSolution_.agentPaths.empty();
 }

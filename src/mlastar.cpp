@@ -15,6 +15,9 @@ void MultiLabelSpaceTimeAStar::releaseNodes() {
   }
   openByF_.clear();
   allNodesTable_.clear();
+  // Release retained bucket capacity from boost::unordered_set to avoid
+  // carrying high-water memory across successive searches.
+  allNodesTable_.rehash(1);
   allNodesStorage_.clear();
 }
 
