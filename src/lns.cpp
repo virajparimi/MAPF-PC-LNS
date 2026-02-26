@@ -329,22 +329,32 @@ bool LNS::runtimeBudgetExhausted() const { return elapsedRuntimeSec() >= timeLim
 
 void LNS::reservePathWithGoalPolicy(ConstraintTable& constraintTable,
                                     const AgentTaskPath& path,
-                                    bool isFinalTask) const {
+                                    bool isFinalTask,
+                                    bool softOnly) const {
   if (path.empty()) {
     return;
   }
   if (!isFinalTask || goalOccupationMode_ == "stay") {
-    constraintTable.addPath(path, isFinalTask);
+    if (softOnly) {
+      constraintTable.addSoftPath(path, isFinalTask);
+    } else {
+      constraintTable.addPath(path, isFinalTask);
+    }
     return;
   }
 
   // In reposition_true, service path occupancy ends at task completion and
   // explicit terminalPath handles post-completion occupancy.
-  constraintTable.addPath(path, false);
+  if (softOnly) {
+    constraintTable.addSoftPath(path, false);
+  } else {
+    constraintTable.addPath(path, false);
+  }
 }
 
 void LNS::reserveTerminalPathIfActive(ConstraintTable& constraintTable,
-                                      int agent) const {
+                                      int agent,
+                                      bool softOnly) const {
   if (goalOccupationMode_ != "reposition_true") {
     return;
   }
@@ -357,7 +367,11 @@ void LNS::reserveTerminalPathIfActive(ConstraintTable& constraintTable,
   }
   // Terminal reposition path is part of the active occupancy model; keep the
   // final terminal location reserved to MAX_TIMESTEP for CT/validator parity.
-  constraintTable.addPath(terminalPath, true);
+  if (softOnly) {
+    constraintTable.addSoftPath(terminalPath, true);
+  } else {
+    constraintTable.addPath(terminalPath, true);
+  }
 }
 
 bool LNS::didAgentServicePathChange(int agent) const {
@@ -600,6 +614,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   }
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
+  acceptOnlyValidCandidates_ = parameters.core.acceptOnlyValidCandidates;
   repairHeuristic = parameters.core.repairHeuristic;
   if (repairHeuristic != "regret" &&
       repairHeuristic != "market_shortlist_regret") {

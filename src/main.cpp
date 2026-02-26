@@ -133,6 +133,10 @@ int main(int argc, char** argv) {
                      po::value<string>()->default_value("TA"),
                      "Acceptance criteria for new solutions");
   desc.add_options()(
+      "acceptOnlyValidCandidates",
+      po::value<bool>()->default_value(false),
+      "If true, reject invalid candidates before applying acceptance criteria");
+  desc.add_options()(
       "repairHeuristic",
       po::value<string>()->default_value("regret"),
       "Repair heuristic to use: 'regret' or 'market_shortlist_regret'");
@@ -451,6 +455,8 @@ int main(int argc, char** argv) {
              "Bachelor's Acceptance and GDA(Great Deluge Algorithm)\n";
     return 1;
   }
+  const bool acceptOnlyValidCandidates =
+      vm["acceptOnlyValidCandidates"].as<bool>();
   const string repairHeuristic = vm["repairHeuristic"].as<string>();
   if (repairHeuristic != "regret" &&
       repairHeuristic != "market_shortlist_regret") {
@@ -737,6 +743,7 @@ int main(int argc, char** argv) {
   parameters.core.goalOccupationMode = goalOccupationMode;
   parameters.core.destroyHeuristic = destroyHeuristic;
   parameters.core.acceptanceCriteria = acceptanceCriteria;
+  parameters.core.acceptOnlyValidCandidates = acceptOnlyValidCandidates;
   parameters.core.repairHeuristic = repairHeuristic;
   parameters.core.regretType = regretType;
   parameters.core.incrementalRegret = incrementalRegret;

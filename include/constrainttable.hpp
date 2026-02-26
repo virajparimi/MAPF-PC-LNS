@@ -10,12 +10,21 @@ class ConstraintTable {
     // Stored as sorted, merged [start, end) intervals.
     vector<pair<int, int>> intervals;
   };
+  struct SoftTimelineBucket {
+    // Stored as per-timestep collision counts.
+    vector<int> counts;
+  };
 
   unordered_map<uint64_t, IntervalBucket>
       constraintTable_;  // (key, value) - (location/edge key, occupied time intervals)
+  unordered_map<uint64_t, SoftTimelineBucket> softConflictTable_;
+  unordered_map<int, vector<int>> softGoalOccupancyStarts_;
 
   void normalizeIntervals(IntervalBucket& bucket);
   void insertMergedInterval(IntervalBucket& bucket, int tMin, int tMax);
+  void incrementSoftConflictCount(uint64_t key, int timestep);
+  int lookupSoftConflictCount(uint64_t key, int timestep) const;
+  void insertSoftGoalStart(int location, int startTime);
   inline uint64_t getEdgeIndex(size_t from, size_t to) const {
     // Key-space invariant:
     // vertex keys are [0, mapSize), edge keys are [mapSize, ...].
@@ -79,6 +88,37 @@ class ConstraintTable {
   }
 
   void addPath(const Path& path, bool waitAtGoal);
+  void addSoftPath(const Path& path, bool waitAtGoal);
+  int getSoftNumOfConflictsForStep(size_t currentLocation, size_t nextLocation,
+                                   int nextTimestep) const;
+  int getEarliestSoftConflictFreeTimestep(size_t currentLocation,
+                                          size_t nextLocation, int tMin,
+                                          int tMax) const;
+  int getFutureSoftConflicts(size_t location, int timestep) const;
+
+  inline int getSoftNumOfConflictsForStep(int currentLocation, int nextLocation,
+                                          int nextTimestep) const {
+    if (currentLocation < 0 || nextLocation < 0 || nextTimestep < 0) {
+      return 0;
+    }
+    return getSoftNumOfConflictsForStep((size_t)currentLocation,
+                                        (size_t)nextLocation, nextTimestep);
+  }
+  inline int getFutureSoftConflicts(int location, int timestep) const {
+    if (location < 0 || timestep < 0) {
+      return 0;
+    }
+    return getFutureSoftConflicts((size_t)location, timestep);
+  }
+  inline int getEarliestSoftConflictFreeTimestep(int currentLocation,
+                                                 int nextLocation, int tMin,
+                                                 int tMax) const {
+    if (currentLocation < 0 || nextLocation < 0 || tMin > tMax) {
+      return -1;
+    }
+    return getEarliestSoftConflictFreeTimestep(
+        (size_t)currentLocation, (size_t)nextLocation, tMin, tMax);
+  }
   const vector<pair<int, int>>* getConstraintIntervals(size_t key) const {
     const auto it = constraintTable_.find((uint64_t)key);
     if (it == constraintTable_.end()) {

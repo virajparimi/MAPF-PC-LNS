@@ -23,6 +23,12 @@ std::variant<bool, Utility> LNS::insertTask(
   double pathSizeChange = 0;
   int startTime = 0, previousTask = UNDEFINED, nextTask = UNDEFINED;
   int insertedTaskPosition = UNASSIGNED;
+  vector<pair<int, int>> adjustedPrecedenceConstraints;
+  vector<pair<int, int>>* activePrecedenceConstraints = precedenceConstraints;
+  if (precedenceConstraints != nullptr) {
+    adjustedPrecedenceConstraints = *precedenceConstraints;
+    activePrecedenceConstraints = &adjustedPrecedenceConstraints;
+  }
   std::optional<InsertTaskRollbackLog> rollbackLog;
   if (rollbackAfter) {
     rollbackLog.emplace();
@@ -83,6 +89,35 @@ std::variant<bool, Utility> LNS::insertTask(
   };
   auto taskPathsFor = [&](int agent) -> const vector<AgentTaskPath>& {
     return workspace.taskPaths(agent);
+  };
+  auto addPrecedenceEdgeIfMissing = [&](int pred, int succ) {
+    if (activePrecedenceConstraints == nullptr ||
+        pred == UNDEFINED || succ == UNDEFINED) {
+      return;
+    }
+    if (pred < 0 || succ < 0 || pred >= instance_.getTasksNum() ||
+        succ >= instance_.getTasksNum()) {
+      return;
+    }
+    for (const auto& edge : *activePrecedenceConstraints) {
+      if (edge.first == pred && edge.second == succ) {
+        return;
+      }
+    }
+    activePrecedenceConstraints->emplace_back(pred, succ);
+  };
+  auto removePrecedenceEdge = [&](int pred, int succ) {
+    if (activePrecedenceConstraints == nullptr ||
+        pred == UNDEFINED || succ == UNDEFINED) {
+      return;
+    }
+    activePrecedenceConstraints->erase(
+        std::remove_if(activePrecedenceConstraints->begin(),
+                       activePrecedenceConstraints->end(),
+                       [&](const pair<int, int>& edge) {
+                         return edge.first == pred && edge.second == succ;
+                       }),
+        activePrecedenceConstraints->end());
   };
 
   const int taskCount = instance_.getTasksNum();
@@ -305,6 +340,13 @@ std::variant<bool, Utility> LNS::insertTask(
     recordInsertTaskPath(regretPacket.agent, 0, AgentTaskPath());
   }
 
+  // Keep eval-time precedence graph consistent with commit-time rewiring.
+  if (previousTask != UNDEFINED && nextTask != UNDEFINED) {
+    removePrecedenceEdge(previousTask, nextTask);
+  }
+  addPrecedenceEdgeIfMissing(previousTask, regretPacket.task);
+  addPrecedenceEdgeIfMissing(regretPacket.task, nextTask);
+
   if (nextTask >= 0) {
     // The task paths reference does not have ancestor information about next task, so we need to add those in
 
@@ -358,7 +400,8 @@ std::variant<bool, Utility> LNS::insertTask(
       ancestorsOfNextTask[nextTask] = 0;
     }
     // Only these agents can become inconsistent in this insertion scenario:
-    // the candidate agent and agents where we inject pending ancestor tasks.
+    // the candidate agent plus agents that own ancestors of nextTask (including
+    // pending-ancestor fallback owners).
     vector<char> affectedAgents(instance_.getAgentNum(), 0);
     if (regretPacket.agent >= 0 && regretPacket.agent < instance_.getAgentNum()) {
       affectedAgents[regretPacket.agent] = 1;
@@ -370,6 +413,15 @@ std::variant<bool, Utility> LNS::insertTask(
          nextTaskAncestor++) {
       if (!ancestorsOfNextTask[nextTaskAncestor]) {
         continue;
+      }
+      const int ownerFromWorkspace =
+          (nextTaskAncestor >= 0 &&
+           nextTaskAncestor < (int)assignmentLookup.owner.size())
+              ? assignmentLookup.owner[nextTaskAncestor]
+              : UNASSIGNED;
+      if (ownerFromWorkspace >= 0 &&
+          ownerFromWorkspace < instance_.getAgentNum()) {
+        affectedAgents[ownerFromWorkspace] = 1;
       }
       if (isPendingCommitState(lnsNeighborhood_, nextTaskAncestor) &&
           nextTaskAncestor != regretPacket.task) {
@@ -501,7 +553,7 @@ std::variant<bool, Utility> LNS::insertTask(
               assignmentsFor(agent)[localTask], agent, localTask, -1};
           if (!buildConstraintTable(constraintTable, taskPacket,
                                     goalLocations[localTask], workspace,
-                                    precedenceConstraints, false,
+                                    activePrecedenceConstraints, false,
                                     assignmentOwnerLookup,
                                     assignmentPosLookup)) {
             PLOGE << "insertTask: failed to build constraint table for agent "
@@ -566,7 +618,7 @@ std::variant<bool, Utility> LNS::insertTask(
 
     if (!buildConstraintTable(constraintTable, regretPacket,
                               goalLocations[taskPosition], workspace,
-                              precedenceConstraints, false,
+                              activePrecedenceConstraints, false,
                               assignmentOwnerLookup,
                               assignmentPosLookup)) {
       PLOGE << "insertTask: failed to build constraint table for task "
@@ -600,7 +652,7 @@ std::variant<bool, Utility> LNS::insertTask(
         nextTask, regretPacket.agent, nextTaskPosition, {}};
     if (!buildConstraintTable(constraintTable, nextTaskPacket,
                               goalLocations[nextTaskPosition], workspace,
-                              precedenceConstraints, true,
+                              activePrecedenceConstraints, true,
                               assignmentOwnerLookup,
                               assignmentPosLookup)) {
       PLOGE << "insertTask: failed to build constraint table for next task "
@@ -608,8 +660,40 @@ std::variant<bool, Utility> LNS::insertTask(
             << nextTaskPosition << ")\n";
       return false;
     }
+    const bool traceTriple = debugImprovementDiagnostics_ &&
+                             shouldTraceConstraintDebugTriple(
+                                 regretPacket.task, regretPacket.agent, nextTask);
+    if (traceTriple) {
+      const auto digest =
+          computeConstraintTableDigest(constraintTable, instance_);
+      PLOGW << "CTTRACE eval-next-before-ll task=" << regretPacket.task
+            << " agent=" << regretPacket.agent
+            << " task_pos=" << taskPosition
+            << " next_task=" << nextTask
+            << " next_pos=" << nextTaskPosition
+            << " start_time=" << startTime
+            << " goal_loc=" << goalLocations[nextTaskPosition]
+            << " len_min=" << constraintTable.lengthMin
+            << " len_max=" << constraintTable.lengthMax
+            << " latest_ts=" << constraintTable.latestTimestep
+            << " temporal_extent=" << constraintTable.temporalExtent
+            << " ct_hash=" << digest.hash
+            << " ct_vertex_buckets=" << digest.vertexBuckets
+            << " ct_edge_buckets=" << digest.edgeBuckets
+            << " ct_intervals=" << digest.intervalCount
+            << " queue="
+            << summarizeTaskQueue(assignmentsFor(regretPacket.agent));
+    }
     AgentTaskPath nextPath = runLowLevelSearch(
         *localPlanner, constraintTable, startTime, nextTaskPosition, 0);
+    if (traceTriple) {
+      PLOGW << "CTTRACE eval-next-after-ll task=" << regretPacket.task
+            << " agent=" << regretPacket.agent
+            << " next_task=" << nextTask
+            << " next_pos=" << nextTaskPosition
+            << " result=" << (nextPath.empty() ? "empty" : "ok")
+            << " path_size=" << nextPath.size();
+    }
     if (nextPath.empty()) {
       return false;
     }
@@ -637,7 +721,7 @@ std::variant<bool, Utility> LNS::insertTask(
 
     if (!buildConstraintTable(constraintTable, regretPacket,
                               goalLocations[regretPacket.taskPosition],
-                              workspace, precedenceConstraints, false,
+                              workspace, activePrecedenceConstraints, false,
                               assignmentOwnerLookup,
                               assignmentPosLookup)) {
       PLOGE << "insertTask: failed to build constraint table for task "

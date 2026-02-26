@@ -8,6 +8,100 @@
 #include <deque>
 #include <limits>
 #include <numeric>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace {
+vector<int> orderTasksTopologically(const vector<int>& tasks,
+                                    const vector<pair<int, int>>& edges) {
+  vector<int> uniqueTasks;
+  uniqueTasks.reserve(tasks.size());
+  unordered_set<int> seen;
+  seen.reserve(tasks.size() * 2 + 1);
+  for (int task : tasks) {
+    if (task < 0) {
+      continue;
+    }
+    if (seen.insert(task).second) {
+      uniqueTasks.push_back(task);
+    }
+  }
+  if (uniqueTasks.size() <= 1) {
+    return uniqueTasks;
+  }
+
+  unordered_map<int, int> indexOf;
+  indexOf.reserve(uniqueTasks.size() * 2 + 1);
+  for (int i = 0; i < (int)uniqueTasks.size(); i++) {
+    indexOf[uniqueTasks[i]] = i;
+  }
+
+  vector<vector<int>> succ(uniqueTasks.size());
+  vector<int> indegree(uniqueTasks.size(), 0);
+  unordered_set<uint64_t> dedupEdges;
+  dedupEdges.reserve(edges.size() * 2 + 1);
+  for (const auto& edge : edges) {
+    const auto predIt = indexOf.find(edge.first);
+    const auto succIt = indexOf.find(edge.second);
+    if (predIt == indexOf.end() || succIt == indexOf.end()) {
+      continue;
+    }
+    const int predIdx = predIt->second;
+    const int succIdx = succIt->second;
+    if (predIdx == succIdx) {
+      continue;
+    }
+    const uint64_t packed =
+        (static_cast<uint64_t>(predIdx) << 32) |
+        static_cast<uint32_t>(succIdx);
+    if (!dedupEdges.insert(packed).second) {
+      continue;
+    }
+    succ[predIdx].push_back(succIdx);
+    indegree[succIdx]++;
+  }
+
+  using RankedNode = std::pair<int, int>;  // (input-rank, node-index)
+  std::priority_queue<RankedNode, vector<RankedNode>,
+                      std::greater<RankedNode>>
+      frontier;
+  for (int i = 0; i < (int)uniqueTasks.size(); i++) {
+    if (indegree[i] == 0) {
+      frontier.emplace(i, i);
+    }
+  }
+
+  vector<int> ordered;
+  ordered.reserve(uniqueTasks.size());
+  vector<char> emitted(uniqueTasks.size(), 0);
+  while (!frontier.empty()) {
+    const auto [_, nodeIdx] = frontier.top();
+    frontier.pop();
+    if (emitted[nodeIdx]) {
+      continue;
+    }
+    emitted[nodeIdx] = 1;
+    ordered.push_back(uniqueTasks[nodeIdx]);
+    for (int nextIdx : succ[nodeIdx]) {
+      indegree[nextIdx]--;
+      if (indegree[nextIdx] == 0) {
+        frontier.emplace(nextIdx, nextIdx);
+      }
+    }
+  }
+
+  if ((int)ordered.size() < (int)uniqueTasks.size()) {
+    // Fallback in case of cycles/dirty state: preserve deterministic coverage.
+    for (int i = 0; i < (int)uniqueTasks.size(); i++) {
+      if (!emitted[i]) {
+        ordered.push_back(uniqueTasks[i]);
+      }
+    }
+  }
+  return ordered;
+}
+}  // namespace
 
 bool LNS::computeRegret() {
   if (runtimeBudgetExhausted()) {
@@ -18,12 +112,14 @@ bool LNS::computeRegret() {
   lnsNeighborhood_.regretMaxHeap.clear();
   buildFullPrecedenceConstraints(fullPrecedenceConstraintsScratch_);
   const auto& fullPrecedenceConstraints = fullPrecedenceConstraintsScratch_;
-  for (const auto& [_, conflictTask] : lnsNeighborhood_.removedTasks) {
+  const vector<int> orderedTasks =
+      orderTasksTopologically(collectRemainingRemovedTasks(),
+                              fullPrecedenceConstraints);
+  for (int task : orderedTasks) {
     if (runtimeBudgetExhausted()) {
       return false;
     }
-    bool enoughSpace =
-        computeRegretForTask(conflictTask.task, fullPrecedenceConstraints);
+    bool enoughSpace = computeRegretForTask(task, fullPrecedenceConstraints);
     if (!enoughSpace) {
       return false;
     }
@@ -112,7 +208,9 @@ bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
   incrementalRegretStatsTotal_.recomputeCalls++;
   buildFullPrecedenceConstraints(fullPrecedenceConstraintsScratch_);
   const auto& fullPrecedenceConstraints = fullPrecedenceConstraintsScratch_;
-  for (int task : tasks) {
+  const vector<int> orderedTasks =
+      orderTasksTopologically(tasks, fullPrecedenceConstraints);
+  for (int task : orderedTasks) {
     if (runtimeBudgetExhausted()) {
       return false;
     }

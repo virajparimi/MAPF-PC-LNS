@@ -32,9 +32,15 @@ struct SIPPSNode {
   SIPPSNode* parent = nullptr;
   int location = -1;
   int intervalId = -1;
+  int highGeneration = 0;
+  int highExpansion = 0;
   int timestep = 0;  // Absolute time of arrival.
   int gVal = 0;      // Cost from start in timesteps.
   int hVal = 0;
+  int numConflicts = 0;
+  bool collisionV = false;
+  bool waitAtGoal = false;
+  bool isGoalTerminal = false;
   int secondaryKey = 0;
   uint64_t tieBreaker = 0;
 

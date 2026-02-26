@@ -815,6 +815,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   double candidateWait = 0.0;
   bool accepted = false;
   bool guardRejected = false;
+  bool invalidGuardRejected = false;
   bool acceptedAsWorse = false;
   auto advanceTemperatureOnGuardReject = [&]() {
     if (acceptanceCriteria == "SA" || acceptanceCriteria == "TA") {
@@ -827,46 +828,54 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     }
   };
   const Time::time_point acceptanceStart = Time::now();
-  if (!candidateValid) {
+  if (!candidateValid && !acceptOnlyValidCandidates_) {
     PLOGD << "Invalid candidate forwarded to acceptance criteria\n";
   }
-  candidatePressure =
-      market_.heuristics ? computeSolutionMarketPressure() : 0.0;
-  candidateWait = market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
-  if (market_.heuristics && !market_.updateOnAcceptedOnly &&
-      market_.updateFromCandidate) {
-    maybeUpdateMarketState(false, true);
-  }
-  if (market_.heuristics && market_.acceptanceGuards &&
-      !passMarketAcceptanceGuards(previousPressureForIter, candidatePressure,
-                                  previousWaitForIter, candidateWait,
-                                  previousSolution_.utility <
-                                      solution_.utility)) {
-    marketGuardRejections++;
+  if (acceptOnlyValidCandidates_ && !candidateValid) {
     restoreSolutionFromPrevious();
     accepted = false;
-    guardRejected = true;
+    invalidGuardRejected = true;
     advanceTemperatureOnGuardReject();
-    PLOGD << "Rejecting this solution due to market acceptance guards\n";
+    PLOGD << "Rejecting this solution due to strict-valid acceptance guard\n";
   } else {
-    if (acceptanceCriteria == "SA") {
-      accepted = simulatedAnnealing();
-    } else if (acceptanceCriteria == "TA") {
-      accepted = thresholdAcceptance();
-    } else if (acceptanceCriteria == "OBA") {
-      accepted = oldBachelorsAcceptance();
-    } else if (acceptanceCriteria == "GDA") {
-      accepted = greatDelugeAlgorithm();
-    } else {
-      PLOGE << "Unknown acceptance criteria: " << acceptanceCriteria << "\n";
-      debugRow.earlyAbortReason = "acceptance_criteria_error";
-      runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
-      timeAcceptanceSec += elapsedSecSince(acceptanceStart);
-      commitIterationTiming();
-      return false;
+    candidatePressure =
+        market_.heuristics ? computeSolutionMarketPressure() : 0.0;
+    candidateWait = market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
+    if (market_.heuristics && !market_.updateOnAcceptedOnly &&
+        market_.updateFromCandidate) {
+      maybeUpdateMarketState(false, true);
     }
-    if (accepted) {
-      acceptedAsWorse = previousSolution_.utility < solution_.utility;
+    if (market_.heuristics && market_.acceptanceGuards &&
+        !passMarketAcceptanceGuards(previousPressureForIter, candidatePressure,
+                                    previousWaitForIter, candidateWait,
+                                    previousSolution_.utility <
+                                        solution_.utility)) {
+      marketGuardRejections++;
+      restoreSolutionFromPrevious();
+      accepted = false;
+      guardRejected = true;
+      advanceTemperatureOnGuardReject();
+      PLOGD << "Rejecting this solution due to market acceptance guards\n";
+    } else {
+      if (acceptanceCriteria == "SA") {
+        accepted = simulatedAnnealing();
+      } else if (acceptanceCriteria == "TA") {
+        accepted = thresholdAcceptance();
+      } else if (acceptanceCriteria == "OBA") {
+        accepted = oldBachelorsAcceptance();
+      } else if (acceptanceCriteria == "GDA") {
+        accepted = greatDelugeAlgorithm();
+      } else {
+        PLOGE << "Unknown acceptance criteria: " << acceptanceCriteria << "\n";
+        debugRow.earlyAbortReason = "acceptance_criteria_error";
+        runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
+        timeAcceptanceSec += elapsedSecSince(acceptanceStart);
+        commitIterationTiming();
+        return false;
+      }
+      if (accepted) {
+        acceptedAsWorse = previousSolution_.utility < solution_.utility;
+      }
     }
   }
   timeAcceptanceSec += elapsedSecSince(acceptanceStart);
@@ -977,6 +986,9 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     debugRow.accepted = false;
     debugRow.acceptedAsWorseUtility = false;
     improvementDiagnosticsStats_.rejected++;
+    if (invalidGuardRejected) {
+      debugRow.earlyAbortReason = "invalid_candidate_guard_reject";
+    }
     if (guardRejected) {
       debugRow.guardRejected = true;
       improvementDiagnosticsStats_.guardRejected++;

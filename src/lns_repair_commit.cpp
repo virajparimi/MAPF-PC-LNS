@@ -454,9 +454,43 @@ bool LNS::insertBestRegretTask(TaskRegretPacket bestRegretPacket) {
     if (runtimeBudgetExhausted()) {
       return false;
     }
+    const bool traceTriple = debugImprovementDiagnostics_ &&
+                             shouldTraceConstraintDebugTriple(
+                                 bestRegretPacket.task, bestRegretPacket.agent,
+                                 nextTask);
+    if (traceTriple) {
+      const auto digest =
+          computeConstraintTableDigest(constraintTable, instance_);
+      PLOGW << "CTTRACE commit-next-before-ll task=" << bestRegretPacket.task
+            << " agent=" << bestRegretPacket.agent
+            << " task_pos=" << taskPosition
+            << " next_task=" << nextTask
+            << " next_pos=" << nextTaskPosition
+            << " start_time=" << startTime
+            << " goal_loc=" << constraintTable.goalLocation
+            << " len_min=" << constraintTable.lengthMin
+            << " len_max=" << constraintTable.lengthMax
+            << " latest_ts=" << constraintTable.latestTimestep
+            << " temporal_extent=" << constraintTable.temporalExtent
+            << " ct_hash=" << digest.hash
+            << " ct_vertex_buckets=" << digest.vertexBuckets
+            << " ct_edge_buckets=" << digest.edgeBuckets
+            << " ct_intervals=" << digest.intervalCount
+            << " queue="
+            << summarizeTaskQueue(
+                   solution_.agents[bestRegretPacket.agent].taskAssignments);
+    }
     AgentTaskPath nextPath = runLowLevelSearch(
         *solution_.agents[bestRegretPacket.agent].pathPlanner, constraintTable,
         startTime, nextTaskPosition, 0);
+    if (traceTriple) {
+      PLOGW << "CTTRACE commit-next-after-ll task=" << bestRegretPacket.task
+            << " agent=" << bestRegretPacket.agent
+            << " next_task=" << nextTask
+            << " next_pos=" << nextTaskPosition
+            << " result=" << (nextPath.empty() ? "empty" : "ok")
+            << " path_size=" << nextPath.size();
+    }
     // We must be able to insert this path for this task as its the best regret path and we did try it before i.e it must have succeeded then
     if (nextPath.empty()) {
       PLOGE << "insertBestRegretTask: empty path for next task "

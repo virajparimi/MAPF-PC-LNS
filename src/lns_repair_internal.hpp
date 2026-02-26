@@ -1,10 +1,14 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <numeric>
+#include <sstream>
 
 struct LNS::RegretWorkspace {
   explicit RegretWorkspace(const Solution& baseSolution)
@@ -64,6 +68,135 @@ struct AssignmentLookup {
   vector<int> owner;
   vector<int> pos;
 };
+
+struct ConstraintTableDigest {
+  uint64_t hash = 1469598103934665603ULL;
+  int vertexBuckets = 0;
+  int edgeBuckets = 0;
+  int intervalCount = 0;
+};
+
+[[maybe_unused]] inline void mixConstraintDigest(uint64_t& h, uint64_t value) {
+  // FNV-1a style mixing for compact debug signatures.
+  h ^= value;
+  h *= 1099511628211ULL;
+}
+
+[[maybe_unused]] ConstraintTableDigest computeConstraintTableDigest(
+    const ConstraintTable& constraintTable, const Instance& instance) {
+  ConstraintTableDigest digest;
+  mixConstraintDigest(digest.hash,
+                      (uint64_t)(constraintTable.goalLocation + 3));
+  mixConstraintDigest(digest.hash, (uint64_t)(constraintTable.lengthMin + 5));
+  mixConstraintDigest(digest.hash, (uint64_t)(constraintTable.lengthMax + 7));
+  mixConstraintDigest(digest.hash,
+                      (uint64_t)(constraintTable.latestTimestep + 11));
+  mixConstraintDigest(digest.hash,
+                      (uint64_t)(constraintTable.temporalExtent + 13));
+
+  for (int loc = 0; loc < instance.mapSize; loc++) {
+    const auto* vertexIntervals = constraintTable.getConstraintIntervals(loc);
+    if (vertexIntervals != nullptr && !vertexIntervals->empty()) {
+      digest.vertexBuckets++;
+      digest.intervalCount += (int)vertexIntervals->size();
+      mixConstraintDigest(digest.hash, (uint64_t)(loc + 17));
+      mixConstraintDigest(digest.hash, (uint64_t)(vertexIntervals->size() + 19));
+      for (const auto& [tMin, tMax] : *vertexIntervals) {
+        mixConstraintDigest(digest.hash, (uint64_t)(tMin + 23));
+        mixConstraintDigest(digest.hash, (uint64_t)(tMax + 29));
+      }
+    }
+
+    const auto& neighbors = instance.getNeighbors(loc);
+    for (int nxt : neighbors) {
+      const auto* edgeIntervals =
+          constraintTable.getEdgeConstraintIntervals(loc, nxt);
+      if (edgeIntervals != nullptr && !edgeIntervals->empty()) {
+        digest.edgeBuckets++;
+        digest.intervalCount += (int)edgeIntervals->size();
+        mixConstraintDigest(digest.hash, (uint64_t)(loc + 31));
+        mixConstraintDigest(digest.hash, (uint64_t)(nxt + 37));
+        mixConstraintDigest(digest.hash, (uint64_t)(edgeIntervals->size() + 41));
+        for (const auto& [tMin, tMax] : *edgeIntervals) {
+          mixConstraintDigest(digest.hash, (uint64_t)(tMin + 43));
+          mixConstraintDigest(digest.hash, (uint64_t)(tMax + 47));
+        }
+      }
+    }
+  }
+  return digest;
+}
+
+[[maybe_unused]] bool shouldTraceConstraintDebugTriple(int task, int agent,
+                                                       int nextTask) {
+  // Enable with:
+  //   LNS_DEBUG_TRIPLE="<task>,<agent>,<nextTask>"
+  // Example:
+  //   LNS_DEBUG_TRIPLE="25,20,124"
+  const char* spec = std::getenv("LNS_DEBUG_TRIPLE");
+  if (spec == nullptr || *spec == '\0') {
+    return false;
+  }
+  int tracedTask = std::numeric_limits<int>::min();
+  int tracedAgent = std::numeric_limits<int>::min();
+  int tracedNext = std::numeric_limits<int>::min();
+  if (std::sscanf(spec, "%d,%d,%d", &tracedTask, &tracedAgent, &tracedNext) !=
+      3) {
+    return false;
+  }
+  return tracedTask == task && tracedAgent == agent && tracedNext == nextTask;
+}
+
+[[maybe_unused]] bool shouldTraceConstraintDebugTask(int task) {
+  // Enable with:
+  //   LNS_DEBUG_CT_TASK="<task>"
+  // Example:
+  //   LNS_DEBUG_CT_TASK="124"
+  const char* spec = std::getenv("LNS_DEBUG_CT_TASK");
+  if (spec == nullptr || *spec == '\0') {
+    return false;
+  }
+  int tracedTask = std::numeric_limits<int>::min();
+  if (std::sscanf(spec, "%d", &tracedTask) != 1) {
+    return false;
+  }
+  return tracedTask == task;
+}
+
+[[maybe_unused]] string summarizeTaskQueue(const vector<int>& assignments,
+                                           int maxItems = 20) {
+  std::ostringstream oss;
+  const int count = (int)assignments.size();
+  oss << "[";
+  for (int i = 0; i < count && i < maxItems; i++) {
+    if (i > 0) {
+      oss << ",";
+    }
+    oss << assignments[i];
+  }
+  if (count > maxItems) {
+    oss << ",...";
+  }
+  oss << "]";
+  return oss.str();
+}
+
+[[maybe_unused]] string summarizeIntList(const vector<int>& values,
+                                         int maxItems = 40) {
+  std::ostringstream oss;
+  oss << "[";
+  for (int i = 0; i < (int)values.size() && i < maxItems; i++) {
+    if (i > 0) {
+      oss << ",";
+    }
+    oss << values[i];
+  }
+  if ((int)values.size() > maxItems) {
+    oss << ",...";
+  }
+  oss << "]";
+  return oss.str();
+}
 
 struct InsertTaskRollbackOp {
   enum class Kind {

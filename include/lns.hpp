@@ -428,6 +428,7 @@ class LNS {
   double lastLowLevelEffectiveTimeoutSec_ = 0.0;
   double initialTemperature_ = 0.0;
   bool lowLevelStructuralPrePrune_ = false;
+  bool acceptOnlyValidCandidates_ = false;
   double maxTemperature_ = std::numeric_limits<double>::infinity();
   double greatDelugeDecay_ = 0.0;
   double timeLimit_, initialSolutionRuntime_ = 0, temperature_ = 100,
@@ -471,10 +472,12 @@ class LNS {
                        bool& feasibleSolutionUpdated);
   void reservePathWithGoalPolicy(ConstraintTable& constraintTable,
                                  const AgentTaskPath& path,
-                                 bool isFinalTask) const;
+                                 bool isFinalTask,
+                                 bool softOnly = false) const;
   int getServiceOccupancyEndExclusive(int agent) const;
   void reserveTerminalPathIfActive(ConstraintTable& constraintTable,
-                                   int agent) const;
+                                   int agent,
+                                   bool softOnly = false) const;
   bool didAgentServicePathChange(int agent) const;
   vector<int> selectTerminalReplanAgents(
       const vector<int>& candidateAgents) const;

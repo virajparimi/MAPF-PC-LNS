@@ -54,6 +54,9 @@ struct LNSParams {
     // Phase-D knobs for true reposition performance.
     string destroyHeuristic;
     string acceptanceCriteria;
+    // If true, reject any candidate that fails full solution validation
+    // before running acceptance criteria.
+    bool acceptOnlyValidCandidates = false;
     // Repair heuristic:
     // - "regret": classic regret repair
     // - "market_shortlist_regret": market-aware shortlist for candidate

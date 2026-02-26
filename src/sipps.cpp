@@ -194,33 +194,70 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     return finalizeAndReturn(path, "goal_at_start_virtual");
   }
 
+  std::deque<SIPPSNode> allNodes;
   pairing_heap<SIPPSNode*, compare<SIPPSOpenCompare>> openList;
   pairing_heap<SIPPSNode*, compare<SIPPSFocalCompare>> focalList;
   int minFVal = 0;
   int lowerBound = 0;
-  std::deque<SIPPSNode> allNodes;
   constexpr uint32_t kTimeoutCheckStride = 64;
   uint32_t intervalChecksSinceTimeoutProbe = 0;
   const auto timedOut = [&]() -> bool {
     return ((fsec)(Time::now() - timeStart)).count() > segmentTimeoutSec;
   };
 
-  unordered_map<StateKey, int, StateKeyHash, StateKeyEqual> bestArrivalTime;
-  bestArrivalTime.reserve(1024);
+  struct DominanceKey {
+    int location = -1;
+    int highGeneration = 0;
+    bool waitAtGoal = false;
+    bool isGoalTerminal = false;
+  };
+  struct DominanceKeyHash {
+    size_t operator()(const DominanceKey& key) const {
+      const uint64_t packed =
+          ((uint64_t)(uint32_t)key.location) ^
+          (((uint64_t)(uint32_t)key.highGeneration) << 32) ^
+          (key.waitAtGoal ? 0x9E3779B97F4A7C15ULL : 0ULL) ^
+          (key.isGoalTerminal ? 0xC2B2AE3D27D4EB4FULL : 0ULL);
+      return (size_t)LLNode::mix64(packed);
+    }
+  };
+  struct DominanceKeyEq {
+    bool operator()(const DominanceKey& lhs, const DominanceKey& rhs) const {
+      return lhs.location == rhs.location &&
+             lhs.highGeneration == rhs.highGeneration &&
+             lhs.waitAtGoal == rhs.waitAtGoal &&
+             lhs.isGoalTerminal == rhs.isGoalTerminal;
+    }
+  };
+  unordered_map<DominanceKey, list<SIPPSNode*>, DominanceKeyHash, DominanceKeyEq>
+      dominanceTable;
+  dominanceTable.reserve(1024);
 
   auto emplaceNode = [&](SIPPSNode* parent, int location, int intervalId,
-                         int timestep, int gVal) -> SIPPSNode* {
-    int hVal = max(getStageGoalDistance(stage, location),
-                   holdingTime - timestep);
+                         int timestep, int gVal, int numConflicts,
+                         int highGeneration, int highExpansion,
+                         bool collisionV = false, int forcedHVal = -1,
+                         bool waitAtGoal = false,
+                         bool isGoalTerminal = false) -> SIPPSNode* {
+    int hVal = forcedHVal;
+    if (hVal < 0) {
+      hVal = max(getStageGoalDistance(stage, location), holdingTime - timestep);
+    }
     allNodes.emplace_back();
     SIPPSNode* node = &allNodes.back();
     node->parent = parent;
     node->location = location;
     node->intervalId = intervalId;
+    node->highGeneration = highGeneration;
+    node->highExpansion = highExpansion;
     node->timestep = timestep;
     node->gVal = gVal;
     node->hVal = hVal;
-    node->secondaryKey = -gVal;
+    node->numConflicts = numConflicts;
+    node->collisionV = collisionV;
+    node->waitAtGoal = waitAtGoal;
+    node->isGoalTerminal = isGoalTerminal;
+    node->secondaryKey = numConflicts;
     node->tieBreaker = makeNodeTieBreaker(location, intervalId, timestep);
     return node;
   };
@@ -277,10 +314,70 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     return nullptr;
   };
 
+  auto dominanceCheck = [&](SIPPSNode* newNode) -> bool {
+    if (newNode->highExpansion <= newNode->timestep) {
+      return false;
+    }
+
+    const DominanceKey key{newNode->location, newNode->highGeneration,
+                           newNode->waitAtGoal,
+                           newNode->isGoalTerminal};
+    auto& bucket = dominanceTable[key];
+    for (auto it = bucket.begin(); it != bucket.end();) {
+      SIPPSNode* oldNode = *it;
+      if (oldNode == nullptr) {
+        it = bucket.erase(it);
+        continue;
+      }
+
+      if (oldNode->timestep <= newNode->timestep &&
+          oldNode->numConflicts <= newNode->numConflicts) {
+        return false;
+      }
+      if (oldNode->timestep >= newNode->timestep &&
+          oldNode->numConflicts >= newNode->numConflicts) {
+        if (oldNode->inOpenlist) {
+          if (oldNode->inFocal) {
+            focalList.erase(oldNode->focalHandle);
+            oldNode->inFocal = false;
+          }
+          openList.erase(oldNode->openHandle);
+          oldNode->inOpenlist = false;
+        }
+        it = bucket.erase(it);
+        // Keep scanning so newNode is registered and overlap clipping is
+        // applied against all remaining entries in the bucket.
+        continue;
+      }
+
+      if (oldNode->timestep < newNode->highExpansion &&
+          newNode->timestep < oldNode->highExpansion) {
+        if (oldNode->timestep <= newNode->timestep) {
+          assert(oldNode->numConflicts > newNode->numConflicts);
+          oldNode->highExpansion = min(oldNode->highExpansion, newNode->timestep);
+        } else {
+          assert(oldNode->numConflicts <= newNode->numConflicts);
+          newNode->highExpansion = min(newNode->highExpansion, oldNode->timestep);
+          if (newNode->highExpansion <= newNode->timestep) {
+            return false;
+          }
+        }
+      }
+      ++it;
+    }
+    bucket.push_back(newNode);
+    return true;
+  };
+
   const int initialIntervalId = useVirtualStart ? -1 : startInterval;
+  const int initialHighGeneration =
+      useVirtualStart ? (startTime + 1) : startSafeIntervals[startInterval].end;
   SIPPSNode* startNode =
-      emplaceNode(nullptr, start, initialIntervalId, startTime, 0);
-  bestArrivalTime[{start, initialIntervalId}] = startTime;
+      emplaceNode(nullptr, start, initialIntervalId, startTime, 0, 0,
+                  initialHighGeneration, initialHighGeneration);
+  if (!dominanceCheck(startNode)) {
+    return finalizeAndReturn(path, "search_exhausted");
+  }
   minFVal = startNode->getFVal();
   // Mirror MLA* bounded search behavior: the focal bound is initialized from
   // both the current minimum f and the provided lower bound `lb`.
@@ -298,33 +395,52 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
       continue;
     }
 
-    const StateKey currentKey{current->location, current->intervalId};
-    auto bestIt = bestArrivalTime.find(currentKey);
-    if (bestIt == bestArrivalTime.end() || bestIt->second != current->timestep) {
-      continue;
+    if (current->isGoalTerminal) {
+      reconstructPath(current, current->timestep, startTime, goal, path);
+      return finalizeAndReturn(path, "goal_found");
     }
 
     const bool isVirtualStartNode =
         (current->intervalId == -1 && current->location == start &&
          current->timestep == startTime);
+    const std::vector<TimeInterval>* currentSafeIntervals = nullptr;
     TimeInterval currentInterval;
     if (!isVirtualStartNode) {
-      const auto& currentSafeIntervals = getSafeIntervals(current->location);
+      currentSafeIntervals = &getSafeIntervals(current->location);
       if (current->intervalId < 0 ||
-          current->intervalId >= (int)currentSafeIntervals.size()) {
+          current->intervalId >= (int)currentSafeIntervals->size()) {
         continue;
       }
-      currentInterval = currentSafeIntervals[current->intervalId];
+      currentInterval = (*currentSafeIntervals)[current->intervalId];
     }
 
     if (current->location == goal) {
+      int goalArrival = -1;
       if (current->timestep >= holdingTime) {
-        reconstructPath(current, current->timestep, startTime, goal, path);
-        return finalizeAndReturn(path, "goal_found");
+        goalArrival = current->timestep;
+      } else if (!isVirtualStartNode && holdingTime < currentInterval.end) {
+        goalArrival = holdingTime;
       }
-      if (!isVirtualStartNode && holdingTime < currentInterval.end) {
-        reconstructPath(current, holdingTime, startTime, goal, path);
-        return finalizeAndReturn(path, "goal_wait");
+      if (goalArrival >= 0) {
+        const int goalGVal =
+            current->gVal + max(0, goalArrival - current->timestep);
+        const int futureConflicts =
+            constraintTable.getFutureSoftConflicts(goal, goalArrival);
+        const long long goalConflictsLL =
+            (long long)current->numConflicts + (long long)futureConflicts;
+        const int goalConflicts =
+            goalConflictsLL > std::numeric_limits<int>::max()
+                ? std::numeric_limits<int>::max()
+                : (int)goalConflictsLL;
+        SIPPSNode* goalParent =
+            (goalArrival == current->timestep) ? current->parent : current;
+        SIPPSNode* goalNode = emplaceNode(
+            goalParent, goal, current->intervalId, goalArrival, goalGVal,
+            goalConflicts, current->highGeneration, current->highExpansion,
+            false, 0, false, true);
+        if (dominanceCheck(goalNode)) {
+          pushNode(goalNode);
+        }
       }
     }
 
@@ -332,7 +448,8 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
       continue;
     }
 
-    int latestDeparture = constraintTable.lengthMax - 1;
+    int latestDeparture =
+        min(constraintTable.lengthMax - 1, current->highExpansion - 1);
     if (isVirtualStartNode) {
       // If startTime is constrained at the start location, emulate MLA* by
       // allowing only immediate departure (no virtual waiting).
@@ -380,21 +497,139 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
           continue;
         }
 
-        const int transitionDuration = feasibleArrival - current->timestep;
-        const int gVal = current->gVal + transitionDuration;
+        const auto stepConflictsAt = [&](int arrivalTimestep) -> int {
+          return constraintTable.getSoftNumOfConflictsForStep(
+              current->location, successor, arrivalTimestep);
+        };
 
-        const StateKey childKey{successor, succIntervalId};
-        auto childBestIt = bestArrivalTime.find(childKey);
-        if (childBestIt != bestArrivalTime.end() &&
-            childBestIt->second <= feasibleArrival) {
-          continue;
+        const int initialStepConflicts = stepConflictsAt(feasibleArrival);
+        int firstZeroConflictArrival = -1;
+        if (initialStepConflicts > 0) {
+          firstZeroConflictArrival =
+              constraintTable.getEarliestSoftConflictFreeTimestep(
+                  current->location, successor, feasibleArrival, latestArrival);
         }
 
-        bestArrivalTime[childKey] = feasibleArrival;
-        SIPPSNode* next =
-            emplaceNode(current, successor, succIntervalId, feasibleArrival,
-                        gVal);
-        pushNode(next);
+        auto tryCreateChild = [&](int childArrival, int childHighExpansion,
+                                  int stepConflicts, bool collisionV) {
+          if (childHighExpansion <= childArrival) {
+            return;
+          }
+          const int transitionDuration = childArrival - current->timestep;
+          const int gVal = current->gVal + transitionDuration;
+          const long long childConflictsLL =
+              (long long)current->numConflicts + (long long)stepConflicts;
+          const int childConflicts =
+              childConflictsLL > std::numeric_limits<int>::max()
+                  ? std::numeric_limits<int>::max()
+                  : (int)childConflictsLL;
+          const int pathMaxTarget =
+              (childConflicts > 0) ? holdingTime : current->getFVal();
+          const int childHVal = max(getStageGoalDistance(stage, successor),
+                                    pathMaxTarget - childArrival);
+          SIPPSNode* child = emplaceNode(current, successor, succIntervalId,
+                                         childArrival, gVal, childConflicts,
+                                         succInterval.end, childHighExpansion,
+                                         collisionV, childHVal);
+          if (dominanceCheck(child)) {
+            pushNode(child);
+          }
+        };
+
+        if (firstZeroConflictArrival > feasibleArrival) {
+          tryCreateChild(feasibleArrival, firstZeroConflictArrival,
+                         initialStepConflicts, true);
+          if (firstZeroConflictArrival < succInterval.end) {
+            tryCreateChild(firstZeroConflictArrival, succInterval.end, 0, false);
+          }
+        } else {
+          tryCreateChild(feasibleArrival, succInterval.end, initialStepConflicts,
+                         initialStepConflicts > 0);
+        }
+      }
+    }
+
+    if (isVirtualStartNode) {
+      const auto& virtualSafeIntervals = getSafeIntervals(current->location);
+      int nextIntervalId = -1;
+      for (int idx = 0; idx < (int)virtualSafeIntervals.size(); idx++) {
+        if (virtualSafeIntervals[idx].start > current->timestep) {
+          nextIntervalId = idx;
+          break;
+        }
+      }
+      if (nextIntervalId >= 0) {
+        const TimeInterval nextInterval = virtualSafeIntervals[nextIntervalId];
+        const int waitArrival = nextInterval.start;
+        if (waitArrival <= constraintTable.lengthMax) {
+          const int waitTransitionDuration = waitArrival - current->timestep;
+          if (waitTransitionDuration > 0) {
+            const int waitStepConflicts =
+                constraintTable.getSoftNumOfConflictsForStep(
+                    current->location, current->location, waitArrival);
+            const long long waitConflictsLL =
+                (long long)current->numConflicts +
+                (long long)waitStepConflicts;
+            const int waitConflicts =
+                waitConflictsLL > std::numeric_limits<int>::max()
+                    ? std::numeric_limits<int>::max()
+                    : (int)waitConflictsLL;
+            const int pathMaxTarget =
+                (waitConflicts > 0) ? holdingTime : current->getFVal();
+            const int nextHVal = max(getStageGoalDistance(stage, current->location),
+                                     pathMaxTarget - waitArrival);
+            if (waitArrival + nextHVal <= constraintTable.lengthMax) {
+              SIPPSNode* waitNode = emplaceNode(
+                  current, current->location, nextIntervalId, waitArrival,
+                  current->gVal + waitTransitionDuration, waitConflicts,
+                  nextInterval.end, nextInterval.end, waitStepConflicts > 0,
+                  nextHVal, current->location == goal, false);
+              if (dominanceCheck(waitNode)) {
+                pushNode(waitNode);
+              }
+            }
+          }
+        }
+      }
+    } else if (currentSafeIntervals != nullptr &&
+        current->highExpansion == current->highGeneration) {
+      const int waitArrival = current->highExpansion;
+      if (waitArrival <= constraintTable.lengthMax) {
+        const int nextIntervalId =
+            findIntervalContainingTime(*currentSafeIntervals, waitArrival);
+        if (nextIntervalId >= 0 &&
+            nextIntervalId < (int)currentSafeIntervals->size() &&
+            (*currentSafeIntervals)[nextIntervalId].start == waitArrival) {
+          const TimeInterval nextInterval = (*currentSafeIntervals)[nextIntervalId];
+          const int waitTransitionDuration = waitArrival - current->timestep;
+          if (waitTransitionDuration > 0) {
+            const int waitStepConflicts =
+                constraintTable.getSoftNumOfConflictsForStep(
+                    current->location, current->location, waitArrival);
+            const long long waitConflictsLL =
+                (long long)current->numConflicts +
+                (long long)waitStepConflicts;
+            const int waitConflicts =
+                waitConflictsLL > std::numeric_limits<int>::max()
+                    ? std::numeric_limits<int>::max()
+                    : (int)waitConflictsLL;
+            const int pathMaxTarget =
+                (waitConflicts > 0) ? holdingTime : current->getFVal();
+            const int nextHVal =
+                max(getStageGoalDistance(stage, current->location),
+                    pathMaxTarget - waitArrival);
+            if (waitArrival + nextHVal <= constraintTable.lengthMax) {
+              SIPPSNode* waitNode = emplaceNode(
+                  current, current->location, nextIntervalId, waitArrival,
+                  current->gVal + waitTransitionDuration, waitConflicts,
+                  nextInterval.end, nextInterval.end, waitStepConflicts > 0,
+                  nextHVal, current->location == goal, false);
+              if (dominanceCheck(waitNode)) {
+                pushNode(waitNode);
+              }
+            }
+          }
+        }
       }
     }
 
