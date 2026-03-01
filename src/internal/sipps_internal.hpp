@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 #include "sipps.hpp"
@@ -44,7 +45,16 @@ struct SIPPSNode {
   int secondaryKey = 0;
   uint64_t tieBreaker = 0;
 
-  int getFVal() const { return gVal + hVal; }
+  int getFVal() const {
+    const long long fVal = (long long)gVal + (long long)hVal;
+    if (fVal > std::numeric_limits<int>::max()) {
+      return std::numeric_limits<int>::max();
+    }
+    if (fVal < std::numeric_limits<int>::min()) {
+      return std::numeric_limits<int>::min();
+    }
+    return (int)fVal;
+  }
 };
 
 inline bool SIPPSOpenCompare::operator()(const SIPPSNode* lhs,
