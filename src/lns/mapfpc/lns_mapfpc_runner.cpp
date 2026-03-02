@@ -144,12 +144,19 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
     args.push_back("--mutableTasksFile");
     args.push_back(mutableTasksFilePath);
   }
-  // Mini/neighborhood MAPF-PC repair is sensitive to CBS plateaus.
-  // For scoped (mutable-agent) CBS runs, enable disjoint splitting,
-  // target reasoning, and STP propagation by default.
-  if (*solver == "CBS" && !mutableAgentsFilePath.empty()) {
-    args.push_back("--disjoint");
+  // Keep LNS-spawned CBS configuration aligned with MAPF-LNS2 defaults:
+  // rectangle/corridor/target/bypass on, mutex off, no disjoint splitting.
+  if (*solver == "CBS") {
+    args.push_back("--rectangle");
     args.push_back("1");
+    args.push_back("--corridor");
+    args.push_back("1");
+    args.push_back("--bypass");
+    args.push_back("1");
+    args.push_back("--mutex");
+    args.push_back("0");
+    args.push_back("--disjoint");
+    args.push_back("0");
     args.push_back("--target");
     args.push_back("1");
     args.push_back("--stp");

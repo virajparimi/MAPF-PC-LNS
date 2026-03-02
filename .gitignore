@@ -10,3 +10,24 @@ baselines/
 archives/original_paper_logs/
 benchmark_hub/
 benchmark_hub_*/
+
+# Local/editor/runtime artifacts
+.idea/
+.DS_Store
+*.log
+*.out
+*.err
+*.tmp
+*.pid
+*.stackdump
+debug_logs/
+
+# Local analysis dumps (non-source)
+/AUDIT_REPORT.md
+/CODE_REVIEW_REPORT.md
+/MAPF_PC-*.pdf
+/Reviews and Rebuttals.pdf
+/Screenshot*.png
+/ll_rootcause_*.tsv
+/sota_pbs_TA_absolute_random/
+/1

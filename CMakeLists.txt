@@ -227,4 +227,10 @@ set_tests_properties(planner_correctness_sipps PROPERTIES TIMEOUT 120)
 set_tests_properties(nrr_boundary_windows_unit PROPERTIES TIMEOUT 30)
 set_tests_properties(nrr_mock_success PROPERTIES TIMEOUT 60)
 set_tests_properties(nrr_mock_fallback PROPERTIES TIMEOUT 60)
-set_tests_properties(lns_small_tier_fixed_suite PROPERTIES TIMEOUT 1200)
+set_tests_properties(
+  lns_small_tier_fixed_suite
+  PROPERTIES
+    TIMEOUT 1200
+    ENVIRONMENT
+      "LNS_ENABLE_NRR=1;LNS_NRR_MINI_SOLVER=cbs;LNS_LOW_LEVEL_PLANNER=sipps;LNS_NRR_FALLBACK_TO_STANDARD=0;LNS_REPAIR_MAPFPC_SOLVER=cbs"
+)
