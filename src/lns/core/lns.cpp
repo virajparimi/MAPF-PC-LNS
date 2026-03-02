@@ -637,6 +637,12 @@ LNS::LNS(int numOfIterations, const Instance& instance,
           << "'; defaulting to 'cbs'\n";
     nrrMiniSolver_ = "cbs";
   }
+  nrrCatBackend_ = parameters.core.nrrCatBackend;
+  if (nrrCatBackend_ != "legacy" && nrrCatBackend_ != "pathtablewc") {
+    PLOGW << "Unknown nrrCatBackend '" << nrrCatBackend_
+          << "'; defaulting to 'pathtablewc'\n";
+    nrrCatBackend_ = "pathtablewc";
+  }
   nrrStats_.reset();
   repairMapfpcSolver_ = parameters.core.repairMapfpcSolver;
   if (repairMapfpcSolver_ != "pbs" && repairMapfpcSolver_ != "cbs") {

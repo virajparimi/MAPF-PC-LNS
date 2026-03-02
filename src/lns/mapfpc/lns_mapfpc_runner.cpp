@@ -39,7 +39,8 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
                                 const string& mutableAgentsFilePath,
                                 const string& initialPathsFilePath,
                                 const string& mutableTasksFilePath,
-                                const string& lowLevelPlannerOverride) {
+                                const string& lowLevelPlannerOverride,
+                                const string& catBackendOverride) {
   const auto solver = normalizeMapfpcSolverVariant(solverVariant);
   if (!solver.has_value()) {
     PLOGE << "MAPF-PC solver variant not supported: '" << solverVariant
@@ -144,6 +145,10 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
     args.push_back("--mutableTasksFile");
     args.push_back(mutableTasksFilePath);
   }
+  if (!catBackendOverride.empty()) {
+    args.push_back("--catBackend");
+    args.push_back(catBackendOverride);
+  }
   // Keep LNS-spawned CBS configuration aligned with MAPF-LNS2 defaults:
   // rectangle/corridor/target/bypass on, mutex off, no disjoint splitting.
   if (*solver == "CBS") {
@@ -195,6 +200,8 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
           << (lowLevelPlanner == "sipps"
                   ? (", ll_w=" + std::to_string(lowLevelSippsSuboptimality_))
                   : "")
+          << (catBackendOverride.empty() ? ""
+                                         : (", catBackend=" + catBackendOverride))
           << ", timeout_sec=" << effectiveSolverTimeoutSec
           << ", source=" << sourceLabel << "\n";
   }

@@ -81,6 +81,10 @@ struct LNSParams {
     // - "cbs": always use CBS
     // - "auto": use CBS only for tiny neighborhoods, otherwise PBS
     string nrrMiniSolver = "cbs";
+    // CAT backend for NRR mini-solver MAPF-PC subprocesses:
+    // - "legacy": existing large-map CAT lists
+    // - "pathtablewc": sparse PathTableWC backend on large maps
+    string nrrCatBackend = "pathtablewc";
     // Solver used when repairHeuristic is MAPF-PC-based: "pbs" or "cbs".
     string repairMapfpcSolver = "cbs";
     // MAPF-PC timeout in seconds per neighborhood repair attempt.

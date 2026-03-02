@@ -90,6 +90,7 @@
   bool nrrFallbackToStandard_ = true;
   bool forceNeighborhoodChangeOnReject_ = false;
   string nrrMiniSolver_ = "cbs";
+  string nrrCatBackend_ = "pathtablewc";
   NrrStats nrrStats_;
   string repairMapfpcSolver_ = "cbs";
   int repairMapfpcTimeoutSec_ = 30;

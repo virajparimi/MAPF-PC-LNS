@@ -161,6 +161,11 @@ int main(int argc, char** argv) {
       po::value<string>()->default_value("cbs"),
       "NRR mini-solver mode: 'pbs', 'cbs', or 'auto' (default: cbs)");
   desc.add_options()(
+      "nrrCatBackend",
+      po::value<string>()->default_value("pathtablewc"),
+      "CAT backend for NRR MAPF-PC mini-solver calls: 'legacy' or "
+      "'pathtablewc'");
+  desc.add_options()(
       "repairMapfpcSolver",
       po::value<string>()->default_value("cbs"),
       "When repairHeuristic is MAPF-PC-based, solver to use: 'pbs' or 'cbs'");
@@ -512,6 +517,11 @@ int main(int argc, char** argv) {
     PLOGE << "nrrMiniSolver must be 'pbs', 'cbs', or 'auto'\n";
     return 1;
   }
+  const string nrrCatBackend = vm["nrrCatBackend"].as<string>();
+  if (nrrCatBackend != "legacy" && nrrCatBackend != "pathtablewc") {
+    PLOGE << "nrrCatBackend must be 'legacy' or 'pathtablewc'\n";
+    return 1;
+  }
   const string repairMapfpcSolver = vm["repairMapfpcSolver"].as<string>();
   if (repairMapfpcSolver != "pbs" && repairMapfpcSolver != "cbs") {
     PLOGE << "repairMapfpcSolver must be 'pbs' or 'cbs'\n";
@@ -818,6 +828,7 @@ int main(int argc, char** argv) {
   parameters.core.forceNeighborhoodChangeOnReject =
       forceNeighborhoodChangeOnReject;
   parameters.core.nrrMiniSolver = nrrMiniSolver;
+  parameters.core.nrrCatBackend = nrrCatBackend;
   parameters.core.repairMapfpcSolver = repairMapfpcSolver;
   parameters.core.repairMapfpcTimeoutSec = repairMapfpcTimeoutSec;
   parameters.core.regretType = regretType;

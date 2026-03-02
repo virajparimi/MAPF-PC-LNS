@@ -108,7 +108,8 @@ class LNS {
                              const string& mutableAgentsFilePath = "",
                              const string& initialPathsFilePath = "",
                              const string& mutableTasksFilePath = "",
-                             const string& lowLevelPlannerOverride = "");
+                             const string& lowLevelPlannerOverride = "",
+                             const string& catBackendOverride = "");
   bool runMAPFPCOnAssignments(const vector<vector<int>>& assignments,
                               const string& solverVariant,
                               int solverTimeoutSec,

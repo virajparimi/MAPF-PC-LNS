@@ -420,6 +420,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     }
     manifest << "seed=" << seed_ << "\n";
     manifest << "mini_solver=" << miniSolver << "\n";
+    manifest << "cat_backend=" << nrrCatBackend_ << "\n";
     manifest << "destroyed_count=" << destroyedTasks.size() << "\n";
     manifest << "destroyed_tasks=";
     for (int i = 0; i < (int)destroyedTasks.size(); i++) {
@@ -467,12 +468,14 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
         << ", neighborhood_agents=" << neighborhoodAgents.size()
         << ", frozen_agents=" << frozenAgents.size()
         << ", mini_solver=" << miniSolver
+        << ", cat_backend=" << nrrCatBackend_
         << ", timeout_sec=" << solverTimeoutSec << ")\n";
 
   const bool miniSolved = runMAPFPCForAgentFile(
       instance_.getAgentTaskFName(), miniSolver, solverTimeoutSec, sourceLabel,
       assignmentPath.string(), mutableAgentsPath.string(),
-      initialPathsPath.string(), mutableTasksPath.string(), "sipps");
+      initialPathsPath.string(), mutableTasksPath.string(), "sipps",
+      nrrCatBackend_);
   if (keepNrrInputs) {
     PLOGE << "nrr_repair: kept inputs for verification: manifest='"
           << manifestPath.string() << "' assignment='"
