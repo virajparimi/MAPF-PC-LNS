@@ -26,6 +26,10 @@ void IterationSetupOrchestrator::initialize(
   context.debugRow.previousSoc = context.previousSocForIter;
   context.debugRow.candidateSoc = context.previousSocForIter;
   context.debugRow.incumbentSocBefore = context.incumbentSocBeforeIter;
+  context.softRecoveryModeBefore = lns.softRecoveryActive_;
+  context.softRecoveryModeAfter = lns.softRecoveryActive_;
+  context.debugRow.softRecoveryModeBefore = lns.softRecoveryActive_;
+  context.debugRow.softRecoveryModeAfter = lns.softRecoveryActive_;
 
   lns.improvementDiagnosticsStats_.iterationsStarted++;
   lns.improvementDiagnosticsStats_.sumPreviousSoc +=

@@ -6,7 +6,8 @@
 
 AcceptanceDecisionResult AcceptanceOrchestrator::runDecision(
     LNS& lns, bool candidateValid, double previousPressureForIter,
-    double previousWaitForIter, LNS::IterationDebugRecord& debugRow) {
+    double previousWaitForIter, int previousConflictSignalForIter,
+    LNS::IterationDebugRecord& debugRow) {
   AcceptanceDecisionResult result;
   auto elapsedSecSince = [](const Time::time_point& startTimePoint) -> double {
     return ((fsec)(Time::now() - startTimePoint)).count();
@@ -22,8 +23,109 @@ AcceptanceDecisionResult AcceptanceOrchestrator::runDecision(
           std::max(0.0, lns.temperature_ - lns.greatDelugeDecay_);
     }
   };
+  auto finalizeDecision = [&](const Time::time_point& acceptanceStart) {
+    result.softRecoveryModeAfter = lns.softRecoveryActive_;
+    result.timeAcceptanceSec += elapsedSecSince(acceptanceStart);
+    return result;
+  };
 
   const Time::time_point acceptanceStart = Time::now();
+  result.softRecoveryModeBefore = lns.softRecoveryActive_;
+  result.softRecoveryModeAfter = lns.softRecoveryActive_;
+  const bool candidateIsNrrSoftCandidate =
+      (!candidateValid && lns.lastNrrSoftCandidate_ &&
+       lns.lastNrrSoftOnlyInvalid_ && lns.lastNrrSoftConflictCount_ > 0);
+  if (!lns.acceptOnlyValidCandidates_ &&
+      (lns.softRecoveryActive_ || candidateIsNrrSoftCandidate)) {
+    if (!lns.softRecoveryActive_ && candidateIsNrrSoftCandidate &&
+        previousConflictSignalForIter == 0) {
+      lns.softRecoveryActive_ = true;
+      lns.softRecoveryCurrentConflicts_ = lns.lastNrrSoftConflictCount_;
+      lns.lastSoftFailureConflictAgents_.clear();
+      lns.lastSoftFailureConflictTasks_.clear();
+      lns.nrrStats_.softRecoveryEntries++;
+      lns.improvementDiagnosticsStats_.softRecoveryEntries++;
+      lns.nrrStats_.softModeEntryConflictSum += lns.lastNrrSoftConflictCount_;
+      lns.improvementDiagnosticsStats_.softModeEntryConflictSum +=
+          lns.lastNrrSoftConflictCount_;
+      result.accepted = true;
+      result.acceptedAsWorse =
+          lns.previousSolution_.utility < lns.solution_.utility;
+      result.usedSoftRecoveryOverride = true;
+      result.softRecoveryDecisionReason = "soft_entry_accept";
+      lns.nrrStats_.softCandidatesAccepted++;
+      lns.improvementDiagnosticsStats_.softCandidateAccepted++;
+      lns.nrrStats_.softRecoveryAcceptedEntry++;
+      lns.improvementDiagnosticsStats_.softRecoveryAcceptedEntry++;
+      return finalizeDecision(acceptanceStart);
+    }
+
+    if (lns.softRecoveryActive_) {
+      if (candidateValid) {
+        lns.softRecoveryActive_ = false;
+        lns.softRecoveryCurrentConflicts_ = -1;
+        lns.nrrStats_.softRecoveryExits++;
+        lns.improvementDiagnosticsStats_.softRecoveryExits++;
+        lns.nrrStats_.softModeExitConflictSum += 0;
+        lns.improvementDiagnosticsStats_.softModeExitConflictSum += 0;
+        lns.nrrStats_.softModeResolvedEntries++;
+        lns.improvementDiagnosticsStats_.softModeResolvedEntries++;
+        result.accepted = true;
+        result.acceptedAsWorse =
+            lns.previousSolution_.utility < lns.solution_.utility;
+        result.usedSoftRecoveryOverride = true;
+        result.softRecoveryDecisionReason = "soft_exit_on_valid_accept";
+        return finalizeDecision(acceptanceStart);
+      }
+
+      if (candidateIsNrrSoftCandidate) {
+        const int64_t candidateSoftConflicts = lns.lastNrrSoftConflictCount_;
+        if (candidateSoftConflicts <= lns.softRecoveryCurrentConflicts_) {
+          lns.softRecoveryCurrentConflicts_ = candidateSoftConflicts;
+          result.accepted = true;
+          result.acceptedAsWorse =
+              lns.previousSolution_.utility < lns.solution_.utility;
+          result.usedSoftRecoveryOverride = true;
+          result.softRecoveryDecisionReason = "soft_descent_accept";
+          lns.nrrStats_.softCandidatesAccepted++;
+          lns.improvementDiagnosticsStats_.softCandidateAccepted++;
+          lns.nrrStats_.softRecoveryAcceptedDescent++;
+          lns.improvementDiagnosticsStats_.softRecoveryAcceptedDescent++;
+          return finalizeDecision(acceptanceStart);
+        }
+        lns.restoreSolutionFromPrevious();
+        result.accepted = false;
+        result.usedSoftRecoveryOverride = true;
+        result.softRecoveryDecisionReason = "soft_descent_reject_non_improving";
+        lns.lastSoftFailureConflictAgents_ = lns.lastValidationConflictAgents_;
+        lns.lastSoftFailureConflictTasks_ = lns.lastValidationConflictTasks_;
+        lns.nrrStats_.softCandidatesRejected++;
+        lns.improvementDiagnosticsStats_.softCandidateRejected++;
+        lns.nrrStats_.softRecoveryRejected++;
+        lns.improvementDiagnosticsStats_.softRecoveryRejected++;
+        advanceTemperatureOnGuardReject();
+        return finalizeDecision(acceptanceStart);
+      }
+      lns.restoreSolutionFromPrevious();
+      result.accepted = false;
+      result.usedSoftRecoveryOverride = true;
+      result.softRecoveryDecisionReason = "soft_mode_reject_nonsoft_invalid";
+      lns.nrrStats_.softRecoveryRejected++;
+      lns.improvementDiagnosticsStats_.softRecoveryRejected++;
+      advanceTemperatureOnGuardReject();
+      return finalizeDecision(acceptanceStart);
+    } else if (candidateIsNrrSoftCandidate) {
+      lns.restoreSolutionFromPrevious();
+      result.accepted = false;
+      result.usedSoftRecoveryOverride = true;
+      result.softRecoveryDecisionReason = "soft_entry_reject_prev_nonzero";
+      lns.nrrStats_.softCandidatesRejected++;
+      lns.improvementDiagnosticsStats_.softCandidateRejected++;
+      advanceTemperatureOnGuardReject();
+      return finalizeDecision(acceptanceStart);
+    }
+  }
+
   if (!candidateValid && !lns.acceptOnlyValidCandidates_) {
     PLOGD << "Invalid candidate forwarded to acceptance criteria\n";
   }
@@ -31,10 +133,16 @@ AcceptanceDecisionResult AcceptanceOrchestrator::runDecision(
     lns.restoreSolutionFromPrevious();
     result.accepted = false;
     result.invalidGuardRejected = true;
+    if (candidateIsNrrSoftCandidate) {
+      lns.nrrStats_.softCandidatesRejected++;
+      lns.improvementDiagnosticsStats_.softCandidateRejected++;
+      if (result.softRecoveryDecisionReason == "none") {
+        result.softRecoveryDecisionReason = "soft_reject_strict_valid_guard";
+      }
+    }
     advanceTemperatureOnGuardReject();
     PLOGD << "Rejecting this solution due to strict-valid acceptance guard\n";
-    result.timeAcceptanceSec += elapsedSecSince(acceptanceStart);
-    return result;
+    return finalizeDecision(acceptanceStart);
   }
 
   const MarketGuardDecision guardDecision =
@@ -48,8 +156,7 @@ AcceptanceDecisionResult AcceptanceOrchestrator::runDecision(
     result.guardRejected = guardDecision.guardRejected;
     advanceTemperatureOnGuardReject();
     PLOGD << "Rejecting this solution due to market acceptance guards\n";
-    result.timeAcceptanceSec += elapsedSecSince(acceptanceStart);
-    return result;
+    return finalizeDecision(acceptanceStart);
   }
 
   if (lns.acceptanceCriteria == "SA") {
@@ -64,15 +171,26 @@ AcceptanceDecisionResult AcceptanceOrchestrator::runDecision(
     PLOGE << "Unknown acceptance criteria: " << lns.acceptanceCriteria << "\n";
     debugRow.earlyAbortReason = "acceptance_criteria_error";
     result.ok = false;
-    result.timeAcceptanceSec += elapsedSecSince(acceptanceStart);
-    return result;
+    return finalizeDecision(acceptanceStart);
   }
   if (result.accepted) {
     result.acceptedAsWorse =
         lns.previousSolution_.utility < lns.solution_.utility;
+    if (lns.softRecoveryActive_ && candidateValid) {
+      lns.softRecoveryActive_ = false;
+      lns.softRecoveryCurrentConflicts_ = -1;
+      lns.nrrStats_.softRecoveryExits++;
+      lns.improvementDiagnosticsStats_.softRecoveryExits++;
+      lns.nrrStats_.softModeExitConflictSum += 0;
+      lns.improvementDiagnosticsStats_.softModeExitConflictSum += 0;
+      lns.nrrStats_.softModeResolvedEntries++;
+      lns.improvementDiagnosticsStats_.softModeResolvedEntries++;
+      if (result.softRecoveryDecisionReason == "none") {
+        result.softRecoveryDecisionReason = "soft_exit_on_valid_accept";
+      }
+    }
   }
-  result.timeAcceptanceSec += elapsedSecSince(acceptanceStart);
-  return result;
+  return finalizeDecision(acceptanceStart);
 }
 
 void AcceptanceOrchestrator::updateAlnsStats(
@@ -125,9 +243,27 @@ void AcceptanceOrchestrator::applyOutcome(
     IterationQuality& quality, LNS::IterationDebugRecord& debugRow) {
   const bool accepted = decisionResult.accepted;
   const bool acceptedAsWorse = decisionResult.acceptedAsWorse;
+  debugRow.softRecoveryModeBefore = decisionResult.softRecoveryModeBefore;
+  debugRow.softRecoveryModeAfter = decisionResult.softRecoveryModeAfter;
+  if (!decisionResult.softRecoveryDecisionReason.empty()) {
+    debugRow.softRecoveryDecisionReason =
+        decisionResult.softRecoveryDecisionReason;
+  }
   if (accepted) {
     debugRow.accepted = true;
     debugRow.acceptedAsWorseUtility = acceptedAsWorse;
+    if (debugRow.destroySelectedInSoftMode && debugRow.destroyHeuristicId >= 0 &&
+        debugRow.destroyHeuristicId <
+            (int)lns.nrrStats_.softModeAcceptedByDestroy.size()) {
+      lns.nrrStats_.softModeAcceptedByDestroy[debugRow.destroyHeuristicId]++;
+      lns.improvementDiagnosticsStats_
+          .softModeAcceptedByDestroy[debugRow.destroyHeuristicId]++;
+      if (feasibleSolutionUpdated) {
+        lns.nrrStats_.softModeBestUpdatesByDestroy[debugRow.destroyHeuristicId]++;
+        lns.improvementDiagnosticsStats_
+            .softModeBestUpdatesByDestroy[debugRow.destroyHeuristicId]++;
+      }
+    }
     lns.improvementDiagnosticsStats_.accepted++;
     if (acceptedAsWorse) {
       lns.improvementDiagnosticsStats_.acceptedAsWorseUtility++;
@@ -203,6 +339,10 @@ void AcceptanceOrchestrator::applyOutcome(
     debugRow.accepted = false;
     debugRow.acceptedAsWorseUtility = false;
     lns.improvementDiagnosticsStats_.rejected++;
+    if (decisionResult.usedSoftRecoveryOverride &&
+        decisionResult.softRecoveryDecisionReason != "none") {
+      debugRow.earlyAbortReason = decisionResult.softRecoveryDecisionReason;
+    }
     if (decisionResult.invalidGuardRejected) {
       debugRow.earlyAbortReason = "invalid_candidate_guard_reject";
     }

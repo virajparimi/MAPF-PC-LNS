@@ -7,7 +7,8 @@ class AcceptanceOrchestrator {
  public:
   static AcceptanceDecisionResult runDecision(
       LNS& lns, bool candidateValid, double previousPressureForIter,
-      double previousWaitForIter, LNS::IterationDebugRecord& debugRow);
+      double previousWaitForIter, int previousConflictSignalForIter,
+      LNS::IterationDebugRecord& debugRow);
 
   static void updateAlnsStats(LNS& lns, int alnsHeuristicForIter,
                               int previousSocForIter, int proposedSocForIter,

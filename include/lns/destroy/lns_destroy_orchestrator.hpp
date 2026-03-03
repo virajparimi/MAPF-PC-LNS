@@ -13,6 +13,8 @@ struct DestroySamplingContext {
   ALNS& adaptiveLns;
   std::mt19937& rng;
   bool alnsEnablePrecedenceAwareDestroy;
+  bool softRecoveryDestroyModeEnabled;
+  bool softRecoveryActive;
 
   bool marketHeuristicsEnabled;
   bool marketDestroySoftGate;
@@ -33,6 +35,7 @@ class DestroyOrchestrator {
 
   // Maps CLI/string destroy heuristic to numeric id.
   static std::optional<int> heuristicIdFromName(const std::string& name);
+  static const char* heuristicNameFromId(int id);
 
   // Execute one destroy heuristic by id.
   static bool executeHeuristic(LNS& lns, int destroyHeuristicId,

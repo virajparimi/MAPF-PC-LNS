@@ -158,12 +158,15 @@ void LNS::addConflictingTask(int agent, int timestep, ConflictMap* out) const {
   out->emplace(task, Conflicts(task, agent, taskIdx));
 }
 
-bool LNS::validateSolution(ConflictMap* conflictedTasks,
-                           ValidationStats* stats) {
+bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
+                           vector<pair<int, int>>* collisionPairs) {
 
   bool result = true;
   if (stats != nullptr) {
     *stats = ValidationStats{};
+  }
+  if (collisionPairs != nullptr) {
+    collisionPairs->clear();
   }
   const int taskCount = instance_.getTasksNum();
   vector<int> taskOwner(taskCount, UNASSIGNED);
@@ -365,6 +368,11 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks,
         if (stats != nullptr) {
           stats->vertexCollisions++;
         }
+        if (collisionPairs != nullptr) {
+          const int a = std::min(otherAgent, agent);
+          const int b = std::max(otherAgent, agent);
+          collisionPairs->emplace_back(a, b);
+        }
         result = false;
         if (conflictedTasks == nullptr) {
           return false;
@@ -429,6 +437,11 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks,
               << "]\n";
         if (stats != nullptr) {
           stats->edgeSwapCollisions++;
+        }
+        if (collisionPairs != nullptr) {
+          const int c = std::min(agent, otherAgent);
+          const int d = std::max(agent, otherAgent);
+          collisionPairs->emplace_back(c, d);
         }
         result = false;
         if (conflictedTasks == nullptr) {

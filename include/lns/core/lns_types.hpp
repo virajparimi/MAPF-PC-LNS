@@ -27,7 +27,9 @@ enum DestroyHeuristic {
   precedenceWaitRemoval = 4,
   lowSlackRemoval = 5,
   marketTatonnementRemoval = 6,
-  destroyHeuristicCount = 7
+  collisionSoftRemoval = 7,
+  failureSoftRemoval = 8,
+  destroyHeuristicCount = 9
 };
 
 struct MarketStats {

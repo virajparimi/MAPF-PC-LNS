@@ -237,7 +237,8 @@ class LNS {
   int getAgentOccupancyHorizon(int agent,
                                bool includeTerminal = true) const;
   bool validateSolution(ConflictMap* conflictedTasks = nullptr,
-                        ValidationStats* stats = nullptr);
+                        ValidationStats* stats = nullptr,
+                        vector<pair<int, int>>* collisionPairs = nullptr);
   void addConflictingTask(int agent, int timestep, ConflictMap* out) const;
 
  private:
@@ -394,6 +395,9 @@ class LNS {
   void lowSlackRemoval(const ConflictMap* potentialNeighborhood = nullptr);
   void marketTatonnementRemoval(
       const ConflictMap* potentialNeighborhood = nullptr);
+  void collisionSoftRemoval(
+      const ConflictMap* potentialNeighborhood = nullptr);
+  void failureSoftRemoval(const ConflictMap* potentialNeighborhood = nullptr);
   bool alnsRemoval(const ConflictMap* potentialNeighborhood);
 
   bool simulatedAnnealing();

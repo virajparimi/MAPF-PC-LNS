@@ -93,6 +93,10 @@ struct LNSParams {
     bool incrementalRegret = false;
     // If false, ALNS excludes precedence_wait and low_slack destroy operators.
     bool alnsEnablePrecedenceAwareDestroy = true;
+    // If true, ALNS keeps the full destroy pool in normal mode, but when
+    // soft-recovery is active it restricts sampling to
+    // collision_soft/failure_soft destroy heuristics.
+    bool softRecoveryDestroyMode = true;
     // Candidate insertion budget per (task, agent) regret evaluation.
     // Tuned default is 8; set 0 to evaluate all candidate positions.
     int regretCandidateTopK = 8;

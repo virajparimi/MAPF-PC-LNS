@@ -564,6 +564,62 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
             ? nrrStats.acceptedDeltaSocSum /
                   (double)nrrStats.acceptedDeltaSocCount
             : 0.0;
+    const double avgSoftCandidateConflicts =
+        nrrStats.softCandidateConflictSamples > 0
+            ? nrrStats.softCandidateConflictSum /
+                  (double)nrrStats.softCandidateConflictSamples
+            : 0.0;
+    const double avgSoftConflictDescentPerResolvedEntry =
+        nrrStats.softModeResolvedEntries > 0
+            ? (double)(nrrStats.softModeEntryConflictSum -
+                       nrrStats.softModeExitConflictSum) /
+                  (double)nrrStats.softModeResolvedEntries
+            : 0.0;
+    auto formatSoftHeuristicHistogram = [](const std::vector<int64_t>& values) {
+      if (values.empty()) {
+        return string("(none)");
+      }
+      auto nameForId = [](int id) -> const char* {
+        switch (id) {
+          case DestroyHeuristic::randomRemoval:
+            return "random";
+          case DestroyHeuristic::worstRemoval:
+            return "worst";
+          case DestroyHeuristic::conflictRemoval:
+            return "conflict";
+          case DestroyHeuristic::shawRemoval:
+            return "shaw";
+          case DestroyHeuristic::precedenceWaitRemoval:
+            return "precedence_wait";
+          case DestroyHeuristic::lowSlackRemoval:
+            return "low_slack";
+          case DestroyHeuristic::marketTatonnementRemoval:
+            return "market_tatonnement";
+          case DestroyHeuristic::collisionSoftRemoval:
+            return "collision_soft";
+          case DestroyHeuristic::failureSoftRemoval:
+            return "failure_soft";
+          default:
+            return "unknown";
+        }
+      };
+      std::ostringstream oss;
+      bool first = true;
+      for (int i = 0; i < (int)values.size(); i++) {
+        if (values[i] <= 0) {
+          continue;
+        }
+        if (!first) {
+          oss << ", ";
+        }
+        first = false;
+        oss << nameForId(i) << "->" << values[i];
+      }
+      if (first) {
+        return string("(all_zero)");
+      }
+      return oss.str();
+    };
     std::cout << "\n=== NRR Stats ===\n";
     printMetric("Attempts", nrrStats.attempts);
     printMetric("Success", nrrStats.success);
@@ -582,6 +638,34 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
                 formatHistogram(nrrStats.neighborhoodAgentsHistogram));
     printMetric("Failure reasons",
                 formatReasonHistogram(nrrStats.failureReasonHistogram));
+    printMetric("Soft candidates produced", nrrStats.softCandidatesProduced);
+    printMetric("Soft candidates accepted", nrrStats.softCandidatesAccepted);
+    printMetric("Soft candidates rejected", nrrStats.softCandidatesRejected);
+    printMetric("Soft-recovery entries", nrrStats.softRecoveryEntries);
+    printMetric("Soft-recovery exits", nrrStats.softRecoveryExits);
+    printMetric("Soft-recovery accepted entry",
+                nrrStats.softRecoveryAcceptedEntry);
+    printMetric("Soft-recovery accepted descent",
+                nrrStats.softRecoveryAcceptedDescent);
+    printMetric("Soft-recovery rejected", nrrStats.softRecoveryRejected);
+    printMetric("Soft-mode entry conflict sum",
+                nrrStats.softModeEntryConflictSum);
+    printMetric("Soft-mode exit conflict sum",
+                nrrStats.softModeExitConflictSum);
+    printMetric("Soft-mode resolved entries",
+                nrrStats.softModeResolvedEntries);
+    printMetric("Soft-mode avg conflict descent/resolved-entry",
+                avgSoftConflictDescentPerResolvedEntry);
+    printMetric("Soft-mode heuristic selections",
+                formatSoftHeuristicHistogram(
+                    nrrStats.softModeSelectionsByDestroy));
+    printMetric("Soft-mode heuristic accepted",
+                formatSoftHeuristicHistogram(
+                    nrrStats.softModeAcceptedByDestroy));
+    printMetric("Soft-mode heuristic best updates",
+                formatSoftHeuristicHistogram(
+                    nrrStats.softModeBestUpdatesByDestroy));
+    printMetric("Soft-candidate avg conflicts", avgSoftCandidateConflicts);
     printMetric("Stitched-invalid attempts", nrrStats.stitchedInvalidAttempts);
     printMetric("Stitched-invalid precedence violations",
                 nrrStats.stitchedInvalidPrecedenceViolations);
@@ -683,6 +767,17 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
             ? debugStats.sumCandidateConflictSignal /
                   (double)candidateEvaluated
             : 0.0;
+    const double avgSoftCandidateConflict =
+        debugStats.softCandidateConflictSamples > 0
+            ? debugStats.softCandidateConflictSum /
+                  (double)debugStats.softCandidateConflictSamples
+            : 0.0;
+    const double avgSoftConflictDescentPerResolvedEntry =
+        debugStats.softModeResolvedEntries > 0
+            ? (double)(debugStats.softModeEntryConflictSum -
+                       debugStats.softModeExitConflictSum) /
+                  (double)debugStats.softModeResolvedEntries
+            : 0.0;
 
     const double measuredDebugSec =
         debugStats.timeDestroyAndPrepareSec +
@@ -728,6 +823,32 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
     printMetric("Accepted feasible-no-best rate",
                 acceptedFeasibleNoBestRate);
     printMetric("Accepted invalid", debugStats.acceptedInvalid);
+    printMetric("Soft candidates produced",
+                debugStats.softCandidateProduced);
+    printMetric("Soft candidates accepted",
+                debugStats.softCandidateAccepted);
+    printMetric("Soft candidates rejected",
+                debugStats.softCandidateRejected);
+    printMetric("Soft-recovery entries",
+                debugStats.softRecoveryEntries);
+    printMetric("Soft-recovery exits",
+                debugStats.softRecoveryExits);
+    printMetric("Soft-recovery accepted entry",
+                debugStats.softRecoveryAcceptedEntry);
+    printMetric("Soft-recovery accepted descent",
+                debugStats.softRecoveryAcceptedDescent);
+    printMetric("Soft-recovery rejected",
+                debugStats.softRecoveryRejected);
+    printMetric("Soft-mode entry conflict sum",
+                debugStats.softModeEntryConflictSum);
+    printMetric("Soft-mode exit conflict sum",
+                debugStats.softModeExitConflictSum);
+    printMetric("Soft-mode resolved entries",
+                debugStats.softModeResolvedEntries);
+    printMetric("Soft-mode avg conflict descent/resolved-entry",
+                avgSoftConflictDescentPerResolvedEntry);
+    printMetric("Avg soft-candidate conflicts",
+                avgSoftCandidateConflict);
     printMetric("Conflict signal better", debugStats.conflictSignalBetter);
     printMetric("Conflict signal equal", debugStats.conflictSignalEqual);
     printMetric("Conflict signal worse", debugStats.conflictSignalWorse);

@@ -43,6 +43,17 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     feasibleSolutionUpdated = context.feasibleSolutionUpdated;
     return false;
   }
+  context.debugRow.destroyHeuristicId = context.alnsHeuristicForIter;
+  context.debugRow.destroyHeuristicName =
+      DestroyOrchestrator::heuristicNameFromId(context.alnsHeuristicForIter);
+  context.debugRow.destroySelectedInSoftMode = lastDestroySampledInSoftMode_;
+  if (context.debugRow.destroySelectedInSoftMode &&
+      context.alnsHeuristicForIter >= 0 &&
+      context.alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
+    nrrStats_.softModeSelectionsByDestroy[context.alnsHeuristicForIter]++;
+    improvementDiagnosticsStats_
+        .softModeSelectionsByDestroy[context.alnsHeuristicForIter]++;
+  }
 
   oldNeighborhood = lnsNeighborhood_.removedTasks;
 

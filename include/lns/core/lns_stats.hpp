@@ -4,6 +4,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace lns_stats {
 
@@ -123,6 +124,23 @@ struct NrrStats {
   std::map<int, int64_t> neighborhoodAgentsHistogram;
   double acceptedDeltaSocSum = 0.0;
   int64_t acceptedDeltaSocCount = 0;
+  int64_t softCandidatesProduced = 0;
+  int64_t softCandidatesAccepted = 0;
+  int64_t softCandidatesRejected = 0;
+  int64_t softRecoveryEntries = 0;
+  int64_t softRecoveryExits = 0;
+  int64_t softRecoveryAcceptedEntry = 0;
+  int64_t softRecoveryAcceptedDescent = 0;
+  int64_t softRecoveryRejected = 0;
+  // Heuristic-attributed soft-recovery stats (indexed by DestroyHeuristic id).
+  std::vector<int64_t> softModeSelectionsByDestroy;
+  std::vector<int64_t> softModeAcceptedByDestroy;
+  std::vector<int64_t> softModeBestUpdatesByDestroy;
+  int64_t softModeEntryConflictSum = 0;
+  int64_t softModeExitConflictSum = 0;
+  int64_t softModeResolvedEntries = 0;
+  double softCandidateConflictSum = 0.0;
+  int64_t softCandidateConflictSamples = 0;
 
   void reset() { *this = NrrStats(); }
 };
@@ -200,6 +218,22 @@ struct ImprovementDiagnosticsStats {
   int64_t acceptedConflictSignalWorse = 0;
   int64_t acceptedFingerprintUnique = 0;
   int64_t acceptedFingerprintRepeat = 0;
+  int64_t softCandidateProduced = 0;
+  int64_t softCandidateAccepted = 0;
+  int64_t softCandidateRejected = 0;
+  int64_t softRecoveryEntries = 0;
+  int64_t softRecoveryExits = 0;
+  int64_t softRecoveryAcceptedEntry = 0;
+  int64_t softRecoveryAcceptedDescent = 0;
+  int64_t softRecoveryRejected = 0;
+  std::vector<int64_t> softModeSelectionsByDestroy;
+  std::vector<int64_t> softModeAcceptedByDestroy;
+  std::vector<int64_t> softModeBestUpdatesByDestroy;
+  int64_t softModeEntryConflictSum = 0;
+  int64_t softModeExitConflictSum = 0;
+  int64_t softModeResolvedEntries = 0;
+  double softCandidateConflictSum = 0.0;
+  int64_t softCandidateConflictSamples = 0;
 
   int64_t neighborhoodsCount = 0;
   int64_t neighborhoodsWithChanges = 0;
@@ -268,6 +302,15 @@ struct IterationDebugRecord {
   bool feasibleBestUpdate = false;
   bool fingerprintSeenBefore = false;
   uint64_t fingerprint = 0;
+  bool nrrSoftCandidate = false;
+  bool nrrSoftOnlyInvalid = false;
+  bool softRecoveryModeBefore = false;
+  bool softRecoveryModeAfter = false;
+  int64_t nrrSoftConflictCount = -1;
+  std::string softRecoveryDecisionReason = "none";
+  int destroyHeuristicId = -1;
+  std::string destroyHeuristicName = "unknown";
+  bool destroySelectedInSoftMode = false;
   std::string earlyAbortReason;
   std::string quality;
   double timeDestroyAndPrepareSec = 0.0;

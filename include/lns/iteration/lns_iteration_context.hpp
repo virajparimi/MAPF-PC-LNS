@@ -3,6 +3,9 @@
 #include "lns.hpp"
 #include "lns_iteration_phase_types.hpp"
 
+#include <cstdint>
+#include <string>
+
 // Mutable per-iteration state shared across phase orchestrators.
 struct IterationExecutionContext {
   int previousSocForIter = 0;
@@ -29,6 +32,12 @@ struct IterationExecutionContext {
 
   LNS::ValidationStats candidateValidationStats;
   bool candidateValid = false;
+  bool candidateNrrSoftCandidate = false;
+  bool candidateNrrSoftOnlyInvalid = false;
+  int64_t candidateNrrSoftConflictCount = -1;
+  bool softRecoveryModeBefore = false;
+  bool softRecoveryModeAfter = false;
+  std::string softRecoveryDecisionReason = "none";
   int candidateConflictSignal = 0;
   int previousConflictSignalForIter = 0;
   int proposedSocForIter = 0;

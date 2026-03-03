@@ -644,6 +644,16 @@ LNS::LNS(int numOfIterations, const Instance& instance,
     nrrCatBackend_ = "pathtablewc";
   }
   nrrStats_.reset();
+  const int destroyHeuristicCount = adaptiveLNS_.numDestroyHeuristics;
+  nrrStats_.softModeSelectionsByDestroy.assign(destroyHeuristicCount, 0);
+  nrrStats_.softModeAcceptedByDestroy.assign(destroyHeuristicCount, 0);
+  nrrStats_.softModeBestUpdatesByDestroy.assign(destroyHeuristicCount, 0);
+  improvementDiagnosticsStats_.softModeSelectionsByDestroy.assign(
+      destroyHeuristicCount, 0);
+  improvementDiagnosticsStats_.softModeAcceptedByDestroy.assign(
+      destroyHeuristicCount, 0);
+  improvementDiagnosticsStats_.softModeBestUpdatesByDestroy.assign(
+      destroyHeuristicCount, 0);
   repairMapfpcSolver_ = parameters.core.repairMapfpcSolver;
   if (repairMapfpcSolver_ != "pbs" && repairMapfpcSolver_ != "cbs") {
     PLOGW << "Unknown repairMapfpcSolver '" << repairMapfpcSolver_
@@ -666,6 +676,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   adaptiveCascadeBudgetLastUsed_ = adaptiveCascadeBudgetCurrent_;
   alnsEnablePrecedenceAwareDestroy_ =
       parameters.core.alnsEnablePrecedenceAwareDestroy;
+  softRecoveryDestroyMode_ = parameters.core.softRecoveryDestroyMode;
   if (parameters.lowLevel.planner == "sipps") {
     lowLevelPlannerType_ = LowLevelPlannerType::sipps;
   } else {

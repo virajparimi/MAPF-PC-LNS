@@ -36,6 +36,9 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
   repairFailed = false;
   nrrRepairSucceeded = false;
   lns.regretEvalStatsCurrent_.reset();
+  lns.lastNrrSoftCandidate_ = false;
+  lns.lastNrrSoftConflictCount_ = -1;
+  lns.lastNrrSoftOnlyInvalid_ = false;
   {
     const int removedCount = (int)lns.lnsNeighborhood_.removedTasks.size();
     lns.regretEvalStatsCurrent_.neighborhoods++;

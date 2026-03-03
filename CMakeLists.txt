@@ -45,6 +45,7 @@ set(SOURCES
   src/lns/destroy/lns_destroy_market.cpp
   src/lns/destroy/lns_destroy_orchestrator.cpp
   src/lns/destroy/lns_destroy_precedence.cpp
+  src/lns/destroy/lns_destroy_soft.cpp
   src/lns/init/lns_initialization.cpp
   src/lns/init/lns_initialization_mapfpc.cpp
   src/lns/init/lns_initialization_reposition.cpp

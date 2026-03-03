@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <unordered_set>
 
 void LNS::appendIterationStatBounded(const IterationStats& stat) {
   constexpr size_t kMaxStoredIterationStatsUnbounded = 200000;
@@ -123,7 +124,10 @@ bool LNS::writeIterationDebugTsv(const string& outputPath) const {
   out << "iteration\truntime_s\tprevious_soc\tcandidate_soc\tincumbent_soc_before\t"
          "candidate_valid\taccepted\tguard_rejected\taccepted_as_worse_utility\t"
          "feasible_best_update\tquality\tearly_abort_reason\tprevious_conflict\t"
-         "candidate_conflict\tremoved_tasks\tremoved_task_ids_csv\tremoved_tasks_changed_agent\t"
+         "candidate_conflict\tnrr_soft_candidate\tnrr_soft_only_invalid\t"
+         "nrr_soft_conflicts\tsoft_recovery_mode_before\tsoft_recovery_mode_after\t"
+         "soft_recovery_decision_reason\tdestroy_heuristic_id\tdestroy_heuristic_name\t"
+         "destroy_selected_in_soft_mode\tremoved_tasks\tremoved_task_ids_csv\tremoved_tasks_changed_agent\t"
          "removed_tasks_changed_order\tremoved_tasks_unchanged\t"
          "neighborhood_fingerprint_seen_before\tneighborhood_fingerprint_hex\t"
          "neighborhood_jaccard_prev\tneighborhood_repeat_streak\t"
@@ -150,6 +154,15 @@ bool LNS::writeIterationDebugTsv(const string& outputPath) const {
         << row.earlyAbortReason << '\t'
         << row.previousConflictSignal << '\t'
         << row.candidateConflictSignal << '\t'
+        << (row.nrrSoftCandidate ? 1 : 0) << '\t'
+        << (row.nrrSoftOnlyInvalid ? 1 : 0) << '\t'
+        << row.nrrSoftConflictCount << '\t'
+        << (row.softRecoveryModeBefore ? 1 : 0) << '\t'
+        << (row.softRecoveryModeAfter ? 1 : 0) << '\t'
+        << row.softRecoveryDecisionReason << '\t'
+        << row.destroyHeuristicId << '\t'
+        << row.destroyHeuristicName << '\t'
+        << (row.destroySelectedInSoftMode ? 1 : 0) << '\t'
         << row.removedTasks << '\t'
         << row.removedTaskIdsCsv << '\t'
         << row.removedTasksChangedAgent << '\t'
@@ -184,11 +197,28 @@ bool LNS::run() {
   invalidCandidateRejections = 0;
   marketGuardRejections = 0;
   improvementDiagnosticsStats_.reset();
+  improvementDiagnosticsStats_.softModeSelectionsByDestroy.assign(
+      adaptiveLNS_.numDestroyHeuristics, 0);
+  improvementDiagnosticsStats_.softModeAcceptedByDestroy.assign(
+      adaptiveLNS_.numDestroyHeuristics, 0);
+  improvementDiagnosticsStats_.softModeBestUpdatesByDestroy.assign(
+      adaptiveLNS_.numDestroyHeuristics, 0);
   acceptedSolutionFingerprints_.clear();
   seenNeighborhoodFingerprints_.clear();
   previousNeighborhoodTasksSorted_.clear();
   currentNeighborhoodRepeatStreak_ = 0;
   iterationDebugRecords_.clear();
+  softRecoveryActive_ = false;
+  softRecoveryCurrentConflicts_ = -1;
+  lastNrrSoftCandidate_ = false;
+  lastNrrSoftConflictCount_ = -1;
+  lastNrrSoftOnlyInvalid_ = false;
+  lastDestroySampledInSoftMode_ = false;
+  lastValidationCollisionPairs_.clear();
+  lastValidationConflictAgents_.clear();
+  lastValidationConflictTasks_.clear();
+  lastSoftFailureConflictAgents_.clear();
+  lastSoftFailureConflictTasks_.clear();
   auto flushDebugTsv = [&]() {
     if (debugIterationTsvPath_.empty()) {
       return;
@@ -612,10 +642,43 @@ bool LNS::run() {
 
   ConflictMap potentialNeighborhood;  // Need for the conflict removal case
   ValidationStats currentValidationStats;
+  vector<pair<int, int>> initialCollisionPairs;
   useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
   bool currentSolutionValid =
-      validateSolution(&potentialNeighborhood, &currentValidationStats);
+      validateSolution(&potentialNeighborhood, &currentValidationStats,
+                       &initialCollisionPairs);
   useTerminalPathsInValidation_ = false;
+  std::sort(initialCollisionPairs.begin(), initialCollisionPairs.end());
+  initialCollisionPairs.erase(
+      std::unique(initialCollisionPairs.begin(), initialCollisionPairs.end()),
+      initialCollisionPairs.end());
+  lastValidationCollisionPairs_ = initialCollisionPairs;
+  lastValidationConflictTasks_.clear();
+  lastValidationConflictTasks_.reserve(potentialNeighborhood.size());
+  std::unordered_set<int> initialConflictAgents;
+  for (const auto& [task, conflict] : potentialNeighborhood) {
+    lastValidationConflictTasks_.push_back(task);
+    if (conflict.agent >= 0 && conflict.agent < instance_.getAgentNum()) {
+      initialConflictAgents.insert(conflict.agent);
+    } else if (task >= 0 && task < (int)solution_.taskAgentMap.size()) {
+      const int owner = solution_.taskAgentMap[task];
+      if (owner >= 0 && owner < instance_.getAgentNum()) {
+        initialConflictAgents.insert(owner);
+      }
+    }
+  }
+  for (const auto& [a, b] : initialCollisionPairs) {
+    if (a >= 0 && a < instance_.getAgentNum()) {
+      initialConflictAgents.insert(a);
+    }
+    if (b >= 0 && b < instance_.getAgentNum()) {
+      initialConflictAgents.insert(b);
+    }
+  }
+  lastValidationConflictAgents_.assign(initialConflictAgents.begin(),
+                                       initialConflictAgents.end());
+  std::sort(lastValidationConflictAgents_.begin(),
+            lastValidationConflictAgents_.end());
 
   bool feasibleSolutionUpdated = false;
   if (currentSolutionValid) {

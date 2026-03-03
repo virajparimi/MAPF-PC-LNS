@@ -11,7 +11,12 @@ bool IterationAcceptanceBookkeepingOrchestrator::run(
   const AcceptanceDecisionResult acceptanceDecision =
       AcceptanceOrchestrator::runDecision(
           lns, context.candidateValid, context.previousPressureForIter,
-          context.previousWaitForIter, context.debugRow);
+          context.previousWaitForIter, context.previousConflictSignalForIter,
+          context.debugRow);
+  context.softRecoveryModeBefore = acceptanceDecision.softRecoveryModeBefore;
+  context.softRecoveryModeAfter = acceptanceDecision.softRecoveryModeAfter;
+  context.softRecoveryDecisionReason =
+      acceptanceDecision.softRecoveryDecisionReason;
   context.timeAcceptanceSec += acceptanceDecision.timeAcceptanceSec;
   if (!acceptanceDecision.ok) {
     lns.runtime = ((fsec)(Time::now() - lns.plannerStartTime_)).count();

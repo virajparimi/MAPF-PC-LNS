@@ -67,6 +67,11 @@ int main(int argc, char** argv) {
       "alnsEnablePrecedenceAwareDestroy",
       po::value<bool>()->default_value(true),
       "Allow ALNS to sample precedence_wait and low_slack destroy operators");
+  desc.add_options()(
+      "softRecoveryDestroyMode",
+      po::value<bool>()->default_value(true),
+      "If true, keep full ALNS destroy pool normally, but restrict to "
+      "collision_soft/failure_soft while soft-recovery is active");
   desc.add_options()("severity,d", po::value<int>()->default_value(0),
                      "Debugging level");
   desc.add_options()("initialSolution,s",
@@ -477,11 +482,14 @@ int main(int argc, char** argv) {
       destroyHeuristic != "random" && destroyHeuristic != "shaw" &&
       destroyHeuristic != "precedence_wait" &&
       destroyHeuristic != "low_slack" &&
+      destroyHeuristic != "collision_soft" &&
+      destroyHeuristic != "failure_soft" &&
       destroyHeuristic != "market_tatonnement" &&
       destroyHeuristic != "alns") {
     PLOGE << "The destroy heuristic provided is not supported! Please choose "
              "from 'conflict', 'worst', 'random', 'shaw', 'precedence_wait', "
-             "'low_slack', 'market_tatonnement' and 'alns' removal operators\n";
+             "'low_slack', 'collision_soft', 'failure_soft', "
+             "'market_tatonnement' and 'alns' removal operators\n";
     return 1;
   }
 
@@ -693,6 +701,8 @@ int main(int argc, char** argv) {
       vm["adaptiveCascadeBudget"].as<bool>();
   const bool alnsEnablePrecedenceAwareDestroy =
       vm["alnsEnablePrecedenceAwareDestroy"].as<bool>();
+  const bool softRecoveryDestroyMode =
+      vm["softRecoveryDestroyMode"].as<bool>();
   if (agentNum < 0) {
     PLOGE << "agentNum must be non-negative (0 means all agents from file)\n";
     return 1;
@@ -840,6 +850,7 @@ int main(int argc, char** argv) {
   parameters.core.adaptiveCascadeBudget = adaptiveCascadeBudget;
   parameters.core.alnsEnablePrecedenceAwareDestroy =
       alnsEnablePrecedenceAwareDestroy;
+  parameters.core.softRecoveryDestroyMode = softRecoveryDestroyMode;
   parameters.core.incrementalRegretMode = incrementalRegretMode;
   parameters.core.seed = seed;
 

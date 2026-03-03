@@ -6,8 +6,10 @@
 
 std::optional<int> DestroyOrchestrator::sampleAlnsHeuristic(
     DestroySamplingContext& ctx) {
+  const bool restrictToSoftPool =
+      ctx.softRecoveryDestroyModeEnabled && ctx.softRecoveryActive;
   const bool marketNotReady = (!ctx.marketWarmupReady || !ctx.marketStableReady);
-  if (ctx.marketHeuristicsEnabled && marketNotReady) {
+  if (!restrictToSoftPool && ctx.marketHeuristicsEnabled && marketNotReady) {
     if (!ctx.marketWarmupReady) {
       ctx.marketDestroyWarmupSkipped++;
     } else {
@@ -18,6 +20,16 @@ std::optional<int> DestroyOrchestrator::sampleAlnsHeuristic(
   std::vector<int> eligibleHeuristics;
   eligibleHeuristics.reserve(ctx.adaptiveLns.numDestroyHeuristics);
   for (int i = 0; i < ctx.adaptiveLns.numDestroyHeuristics; i++) {
+    if (restrictToSoftPool &&
+        i != DestroyHeuristic::collisionSoftRemoval &&
+        i != DestroyHeuristic::failureSoftRemoval) {
+      continue;
+    }
+    if (!restrictToSoftPool &&
+        (i == DestroyHeuristic::collisionSoftRemoval ||
+         i == DestroyHeuristic::failureSoftRemoval)) {
+      // These two are always eligible in normal mode; no extra gate here.
+    }
     if (!ctx.alnsEnablePrecedenceAwareDestroy &&
         (i == DestroyHeuristic::precedenceWaitRemoval ||
          i == DestroyHeuristic::lowSlackRemoval)) {
@@ -126,5 +138,36 @@ std::optional<int> DestroyOrchestrator::heuristicIdFromName(
   if (name == "market_tatonnement") {
     return DestroyHeuristic::marketTatonnementRemoval;
   }
+  if (name == "collision_soft") {
+    return DestroyHeuristic::collisionSoftRemoval;
+  }
+  if (name == "failure_soft") {
+    return DestroyHeuristic::failureSoftRemoval;
+  }
   return std::nullopt;
+}
+
+const char* DestroyOrchestrator::heuristicNameFromId(int id) {
+  switch (id) {
+    case DestroyHeuristic::randomRemoval:
+      return "random";
+    case DestroyHeuristic::worstRemoval:
+      return "worst";
+    case DestroyHeuristic::conflictRemoval:
+      return "conflict";
+    case DestroyHeuristic::shawRemoval:
+      return "shaw";
+    case DestroyHeuristic::precedenceWaitRemoval:
+      return "precedence_wait";
+    case DestroyHeuristic::lowSlackRemoval:
+      return "low_slack";
+    case DestroyHeuristic::marketTatonnementRemoval:
+      return "market_tatonnement";
+    case DestroyHeuristic::collisionSoftRemoval:
+      return "collision_soft";
+    case DestroyHeuristic::failureSoftRemoval:
+      return "failure_soft";
+    default:
+      return "unknown";
+  }
 }

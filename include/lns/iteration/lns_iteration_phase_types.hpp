@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 enum class CandidatePhaseStatus { success, join_failed, terminal_failed };
 
@@ -31,6 +32,10 @@ struct AcceptanceDecisionResult {
   bool guardRejected = false;
   bool invalidGuardRejected = false;
   bool acceptedAsWorse = false;
+  bool usedSoftRecoveryOverride = false;
+  bool softRecoveryModeBefore = false;
+  bool softRecoveryModeAfter = false;
+  std::string softRecoveryDecisionReason = "none";
   double candidatePressure = 0.0;
   double candidateWait = 0.0;
   double timeAcceptanceSec = 0.0;

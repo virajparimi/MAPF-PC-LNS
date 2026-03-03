@@ -7,6 +7,7 @@
 #include <limits>
 #include <numeric>
 #include <stack>
+#include <unordered_set>
 
 std::vector<int> CandidatePhaseOrchestrator::collectImpactedAgents(
     const Instance& instance, const Solution& candidate, const Solution& previous,
@@ -161,10 +162,43 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
   const Time::time_point validationStart = Time::now();
   potentialNeighborhood.clear();
   LNS::ValidationStats candidateValidationStats;
+  std::vector<std::pair<int, int>> candidateCollisionPairs;
   lns.useTerminalPathsInValidation_ = (lns.goalOccupationMode_ == "reposition_true");
   result.candidateValid =
-      lns.validateSolution(&potentialNeighborhood, &candidateValidationStats);
+      lns.validateSolution(&potentialNeighborhood, &candidateValidationStats,
+                           &candidateCollisionPairs);
   lns.useTerminalPathsInValidation_ = false;
+  std::sort(candidateCollisionPairs.begin(), candidateCollisionPairs.end());
+  candidateCollisionPairs.erase(
+      std::unique(candidateCollisionPairs.begin(), candidateCollisionPairs.end()),
+      candidateCollisionPairs.end());
+  lns.lastValidationCollisionPairs_ = candidateCollisionPairs;
+  lns.lastValidationConflictTasks_.clear();
+  lns.lastValidationConflictTasks_.reserve(potentialNeighborhood.size());
+  std::unordered_set<int> conflictAgentsSet;
+  for (const auto& [task, conflict] : potentialNeighborhood) {
+    lns.lastValidationConflictTasks_.push_back(task);
+    if (conflict.agent >= 0 && conflict.agent < lns.instance_.getAgentNum()) {
+      conflictAgentsSet.insert(conflict.agent);
+    } else if (task >= 0 && task < (int)lns.solution_.taskAgentMap.size()) {
+      const int owner = lns.solution_.taskAgentMap[task];
+      if (owner >= 0 && owner < lns.instance_.getAgentNum()) {
+        conflictAgentsSet.insert(owner);
+      }
+    }
+  }
+  for (const auto& [a, b] : candidateCollisionPairs) {
+    if (a >= 0 && a < lns.instance_.getAgentNum()) {
+      conflictAgentsSet.insert(a);
+    }
+    if (b >= 0 && b < lns.instance_.getAgentNum()) {
+      conflictAgentsSet.insert(b);
+    }
+  }
+  lns.lastValidationConflictAgents_.assign(conflictAgentsSet.begin(),
+                                           conflictAgentsSet.end());
+  std::sort(lns.lastValidationConflictAgents_.begin(),
+            lns.lastValidationConflictAgents_.end());
   result.precedenceViolations = candidateValidationStats.precedenceViolations;
   result.vertexCollisions = candidateValidationStats.vertexCollisions;
   result.edgeSwapCollisions = candidateValidationStats.edgeSwapCollisions;

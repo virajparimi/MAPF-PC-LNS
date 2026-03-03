@@ -495,9 +495,8 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     solution_.agents[frozenAgent] = previousSolution_.agents[frozenAgent];
   }
 
-  // Strict NRR commit gate: mutable-vs-frozen soft conflicts must be zero.
-  // This keeps global validity constraints explicit even when mini-solver uses
-  // soft conflict minimization internally.
+  // Compute mutable-vs-frozen soft conflicts under existing occupancy
+  // semantics. Classification against full validation happens below.
   auto countCrossSetConflicts = [&](const vector<int>& mutableAgents,
                                     const vector<int>& frozenAgentsSet,
                                     bool includeTerminal) -> int64_t {
@@ -540,10 +539,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
       (goalOccupationMode_ == "reposition_true");
   const int64_t softConflicts = countCrossSetConflicts(
       neighborhoodAgents, frozenAgents, includeTerminalForSoftCheck);
-  if (softConflicts > 0) {
-    solution_ = backupSolution;
-    return fail("soft_conflicts_nonzero:" + std::to_string(softConflicts));
-  }
 
   solution_.taskAgentMap.assign(numTasks, UNASSIGNED);
   for (int agent = 0; agent < numAgents; agent++) {
@@ -588,7 +583,13 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   ValidationStats stitchedStats;
   const bool stitchedValid = validateSolution(nullptr, &stitchedStats);
   useTerminalPathsInValidation_ = previousTerminalValidationFlag;
-  if (!stitchedValid) {
+  const bool hardSuccess = stitchedValid && softConflicts == 0;
+  const bool softOnlyInvalid =
+      (!stitchedValid && softConflicts > 0 &&
+       stitchedStats.precedenceViolations == 0 &&
+       stitchedStats.structuralViolations == 0);
+  const bool softCandidateSuccess = softOnlyInvalid;
+  if (!hardSuccess && !softCandidateSuccess) {
     nrrStats_.stitchedInvalidAttempts++;
     nrrStats_.stitchedInvalidPrecedenceViolations +=
         stitchedStats.precedenceViolations;
@@ -598,12 +599,34 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     nrrStats_.stitchedInvalidStructuralViolations +=
         stitchedStats.structuralViolations;
     solution_ = backupSolution;
+    if (softConflicts > 0) {
+      if (stitchedValid) {
+        return fail("soft_conflicts_nonzero_validated:" +
+                    std::to_string(softConflicts));
+      }
+      return fail("soft_conflicts_with_hard_invalid:" +
+                  std::to_string(softConflicts));
+    }
     return fail("stitched_solution_invalid");
   }
 
-  PLOGI << "nrr_repair: success (mini_solver=" << miniSolver
-        << ", removed=" << destroyedTasks.size()
-        << ", neighborhood_agents=" << neighborhoodAgents.size()
-        << ", soc=" << solution_.sumOfCosts << ")\n";
+  if (softCandidateSuccess) {
+    lastNrrSoftCandidate_ = true;
+    lastNrrSoftConflictCount_ = softConflicts;
+    lastNrrSoftOnlyInvalid_ = true;
+    nrrStats_.softCandidatesProduced++;
+    nrrStats_.softCandidateConflictSum += static_cast<double>(softConflicts);
+    nrrStats_.softCandidateConflictSamples++;
+    PLOGI << "nrr_repair: soft-candidate success (mini_solver=" << miniSolver
+          << ", removed=" << destroyedTasks.size()
+          << ", neighborhood_agents=" << neighborhoodAgents.size()
+          << ", soft_conflicts=" << softConflicts
+          << ", soc=" << solution_.sumOfCosts << ")\n";
+  } else {
+    PLOGI << "nrr_repair: success (mini_solver=" << miniSolver
+          << ", removed=" << destroyedTasks.size()
+          << ", neighborhood_agents=" << neighborhoodAgents.size()
+          << ", soc=" << solution_.sumOfCosts << ")\n";
+  }
   return finalizeAttempt(true);
 }

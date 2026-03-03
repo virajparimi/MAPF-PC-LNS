@@ -46,7 +46,26 @@ void IterationCandidatePostprocessOrchestrator::process(
       candidatePhase.precedencePairsChecked;
   context.candidateValid = candidatePhase.candidateValid;
   context.candidateConflictSignal = candidatePhase.candidateConflictSignal;
+  context.candidateNrrSoftCandidate = lns.lastNrrSoftCandidate_;
+  context.candidateNrrSoftOnlyInvalid = lns.lastNrrSoftOnlyInvalid_;
+  context.candidateNrrSoftConflictCount = lns.lastNrrSoftConflictCount_;
+  context.softRecoveryModeBefore = lns.softRecoveryActive_;
+  context.softRecoveryModeAfter = lns.softRecoveryActive_;
+  context.softRecoveryDecisionReason = "none";
   context.debugRow.candidateConflictSignal = context.candidateConflictSignal;
+  context.debugRow.nrrSoftCandidate = context.candidateNrrSoftCandidate;
+  context.debugRow.nrrSoftOnlyInvalid = context.candidateNrrSoftOnlyInvalid;
+  context.debugRow.nrrSoftConflictCount = context.candidateNrrSoftConflictCount;
+  context.debugRow.softRecoveryModeBefore = context.softRecoveryModeBefore;
+  context.debugRow.softRecoveryModeAfter = context.softRecoveryModeAfter;
+  context.debugRow.softRecoveryDecisionReason = context.softRecoveryDecisionReason;
+  if (context.candidateNrrSoftCandidate &&
+      context.candidateNrrSoftConflictCount >= 0) {
+    lns.improvementDiagnosticsStats_.softCandidateProduced++;
+    lns.improvementDiagnosticsStats_.softCandidateConflictSum +=
+        static_cast<double>(context.candidateNrrSoftConflictCount);
+    lns.improvementDiagnosticsStats_.softCandidateConflictSamples++;
+  }
 
   if (!context.candidateValid) {
     context.feasibleSolutionUpdated = false;
