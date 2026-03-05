@@ -666,7 +666,7 @@ struct ALNS {
   vector<int64_t> selections, accepted, rejected, feasible, bestUpdates,
       improvedAccepted, downgradedAccepted, couldNotFind, cascadeAborted,
       proposedBetter, proposedEqual, proposedWorse, acceptedWorse;
-  vector<double> deltaSocAll, deltaSocAccepted;
+  vector<double> deltaSocAll, deltaSocAccepted, bestUpdateDeltaSocSum;
 
   ALNS() {
     weights.assign(numDestroyHeuristics, 1.0);
@@ -687,5 +687,6 @@ struct ALNS {
     acceptedWorse.assign(numDestroyHeuristics, 0);
     deltaSocAll.assign(numDestroyHeuristics, 0.0);
     deltaSocAccepted.assign(numDestroyHeuristics, 0.0);
+    bestUpdateDeltaSocSum.assign(numDestroyHeuristics, 0.0);
   }
 };

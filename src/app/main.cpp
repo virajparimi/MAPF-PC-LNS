@@ -31,6 +31,14 @@ int main(int argc, char** argv) {
                      "Output file for schedule");
   desc.add_options()("cutoffTime,t", po::value<double>()->default_value(7200),
                      "Cutoff time (seconds)");
+  desc.add_options()(
+      "lnsConflictWeight",
+      po::value<double>()->default_value(0.75),
+      "Weight of conflict signal in moving utility");
+  desc.add_options()(
+      "lnsCostWeight",
+      po::value<double>()->default_value(0.25),
+      "Weight of optimization objective signal in moving utility");
   desc.add_options()("agentNum,k", po::value<int>()->default_value(0),
                      "Number of agents to plan for");
   desc.add_options()("taskNum,l", po::value<int>()->default_value(0),
@@ -72,12 +80,18 @@ int main(int argc, char** argv) {
       po::value<bool>()->default_value(true),
       "If true, keep full ALNS destroy pool normally, but restrict to "
       "collision_soft/failure_soft while soft-recovery is active");
+  desc.add_options()(
+      "softPersistentConflictGraph",
+      po::value<bool>()->default_value(false),
+      "If true, soft destroy heuristics sample from a persistent "
+      "accepted-solution conflict graph (pairs/agents)");
   desc.add_options()("severity,d", po::value<int>()->default_value(0),
                      "Debugging level");
   desc.add_options()("initialSolution,s",
                      po::value<string>()->default_value("portfolio"),
                      "Strategy for the initial solution (portfolio default for "
-                     "best final SoC; use greedy/prioritized for faster time-to-best)");
+                     "best final SoC; use greedy/prioritized for faster time-to-best; "
+                     "or use seeded_mapfpc_log with --initialSeedFromMapfpcLog)");
   desc.add_options()(
       "initialPortfolioTimeFraction",
       po::value<double>()->default_value(0.10),
@@ -89,10 +103,10 @@ int main(int argc, char** argv) {
       "Enable adaptive scaling of portfolio warm-start budget using "
       "agents/tasks/precedence counts (used when initialSolution='portfolio')");
   desc.add_options()(
-      "initialSeedFromPbsLog",
+      "initialSeedFromMapfpcLog",
       po::value<string>()->default_value(""),
-      "Path to MAPF-PC/PBS log with TASK ASSIGNMENTS and TASK PATHS sections; "
-      "if provided, seed initialization directly from this log");
+      "Path to MAPF-PC log (PBS/CBS) with TASK ASSIGNMENTS and TASK PATHS "
+      "sections; if provided, seed initialization directly from this log");
   desc.add_options()(
       "postRefineWithMapfpc",
       po::value<bool>()->default_value(false),
@@ -117,7 +131,7 @@ int main(int argc, char** argv) {
   desc.add_options()(
       "postRefineAcceptOnlyIfBetter",
       po::value<bool>()->default_value(true),
-      "If true, adopt post-refined solution only when SoC strictly improves");
+      "If true, adopt post-refined solution only when optimization objective strictly improves");
   desc.add_options()(
       "debugImprovementDiagnostics",
       po::value<bool>()->default_value(false),
@@ -138,6 +152,10 @@ int main(int argc, char** argv) {
                      po::value<string>()->default_value("TA"),
                      "Acceptance criteria for new solutions");
   desc.add_options()(
+      "optimizationObjective",
+      po::value<string>()->default_value("soc"),
+      "Optimization objective: 'soc' or 'makespan'");
+  desc.add_options()(
       "acceptOnlyValidCandidates",
       po::value<bool>()->default_value(false),
       "If true, reject invalid candidates before applying acceptance criteria");
@@ -157,6 +175,11 @@ int main(int argc, char** argv) {
       po::value<bool>()->default_value(true),
       "If true, failed NRR falls back to the configured standard repair; if "
       "false, failed NRR terminates repair for that iteration");
+  desc.add_options()(
+      "nrrGlobalReassign",
+      po::value<bool>()->default_value(false),
+      "If true, NRR iterative proposal evaluates insertions against all agents "
+      "with dynamic frozen-occupancy demotion");
   desc.add_options()(
       "forceNeighborhoodChangeOnReject",
       po::value<bool>()->default_value(false),
@@ -411,7 +434,9 @@ int main(int argc, char** argv) {
   plog::get()->setMaxSeverity(static_cast<plog::Severity>(severity));
 
   string initialSolutionStrategy = vm["initialSolution"].as<string>();
-  const string initialSeedFromPbsLog = vm["initialSeedFromPbsLog"].as<string>();
+  const string initialSeedFromMapfpcLogCli =
+      vm["initialSeedFromMapfpcLog"].as<string>();
+  const string initialSeedFromMapfpcLog = initialSeedFromMapfpcLogCli;
   const bool postRefineWithMapfpc =
       vm["postRefineWithMapfpc"].as<bool>();
   const string postRefineAssignmentSource =
@@ -426,17 +451,17 @@ int main(int argc, char** argv) {
       vm["debugImprovementDiagnostics"].as<bool>();
   const string debugIterationTsvPath =
       vm["debugIterationTsvPath"].as<string>();
-  if (!initialSeedFromPbsLog.empty()) {
-    initialSolutionStrategy = "seeded_pbs_log";
+  if (!initialSeedFromMapfpcLog.empty()) {
+    initialSolutionStrategy = "seeded_mapfpc_log";
   }
   if (initialSolutionStrategy != "greedy" &&
       initialSolutionStrategy != "prioritized" &&
       initialSolutionStrategy != "portfolio" &&
-      initialSolutionStrategy != "seeded_pbs_log" &&
+      initialSolutionStrategy != "seeded_mapfpc_log" &&
       initialSolutionStrategy.find("sota") == string::npos) {
     PLOGE << "Incorrect initial solution strategy provided. Please choose from "
              "'greedy', 'prioritized', 'portfolio', "
-             "'sota_cbs', 'sota_pbs', or provide --initialSeedFromPbsLog"
+             "'sota_cbs', 'sota_pbs', or provide --initialSeedFromMapfpcLog"
           << "\n";
     return 1;
   }
@@ -501,6 +526,12 @@ int main(int argc, char** argv) {
              "Bachelor's Acceptance and GDA(Great Deluge Algorithm)\n";
     return 1;
   }
+  string optimizationObjective = vm["optimizationObjective"].as<string>();
+  if (optimizationObjective != "soc" &&
+      optimizationObjective != "makespan") {
+    PLOGE << "optimizationObjective must be 'soc' or 'makespan'\n";
+    return 1;
+  }
   const bool acceptOnlyValidCandidates =
       vm["acceptOnlyValidCandidates"].as<bool>();
   const string repairHeuristic = vm["repairHeuristic"].as<string>();
@@ -517,8 +548,11 @@ int main(int argc, char** argv) {
   }
   const bool enableNrrRepair = vm["enableNrrRepair"].as<bool>();
   const bool nrrFallbackToStandard = vm["nrrFallbackToStandard"].as<bool>();
+  const bool nrrGlobalReassign = vm["nrrGlobalReassign"].as<bool>();
   const bool forceNeighborhoodChangeOnReject =
       vm["forceNeighborhoodChangeOnReject"].as<bool>();
+  const bool softPersistentConflictGraph =
+      vm["softPersistentConflictGraph"].as<bool>();
   const string nrrMiniSolver = vm["nrrMiniSolver"].as<string>();
   if (nrrMiniSolver != "pbs" && nrrMiniSolver != "cbs" &&
       nrrMiniSolver != "auto") {
@@ -740,6 +774,20 @@ int main(int argc, char** argv) {
   if (cutoffTime == 0.0) {
     PLOGW << "cutoffTime is 0: planner will stop immediately after start\n";
   }
+  const double lnsConflictWeight = vm["lnsConflictWeight"].as<double>();
+  const double lnsCostWeight = vm["lnsCostWeight"].as<double>();
+  if (!std::isfinite(lnsConflictWeight) || lnsConflictWeight < 0.0) {
+    PLOGE << "lnsConflictWeight must be finite and non-negative\n";
+    return 1;
+  }
+  if (!std::isfinite(lnsCostWeight) || lnsCostWeight < 0.0) {
+    PLOGE << "lnsCostWeight must be finite and non-negative\n";
+    return 1;
+  }
+  if (lnsConflictWeight == 0.0 && lnsCostWeight == 0.0) {
+    PLOGE << "At least one of lnsConflictWeight or lnsCostWeight must be > 0\n";
+    return 1;
+  }
 
   // Need to store the seed for debugging.
   unsigned int seed = vm["seed"].as<unsigned int>();
@@ -813,12 +861,14 @@ int main(int argc, char** argv) {
   LNSParams parameters{};
   parameters.core.neighborhoodSize = effectiveNeighborSize;
   parameters.core.timeLimit = cutoffTime;
+  parameters.core.lnsConflictWeight = lnsConflictWeight;
+  parameters.core.lnsCostWeight = lnsCostWeight;
   parameters.core.initialSolutionStrategy = initialSolutionStrategy;
   parameters.core.initialPortfolioTimeFraction =
       initialPortfolioTimeFraction;
   parameters.core.adaptiveInitialPortfolioBudget =
       adaptiveInitialPortfolioBudget;
-  parameters.core.initialSeedFromPbsLog = initialSeedFromPbsLog;
+  parameters.core.initialSeedFromMapfpcLog = initialSeedFromMapfpcLog;
   parameters.core.postRefineWithMapfpc = postRefineWithMapfpc;
   parameters.core.postRefineAssignmentSource = postRefineAssignmentSource;
   parameters.core.postRefineAssignmentLog = postRefineAssignmentLog;
@@ -831,10 +881,12 @@ int main(int argc, char** argv) {
   parameters.core.goalOccupationMode = goalOccupationMode;
   parameters.core.destroyHeuristic = destroyHeuristic;
   parameters.core.acceptanceCriteria = acceptanceCriteria;
+  parameters.core.optimizationObjective = optimizationObjective;
   parameters.core.acceptOnlyValidCandidates = acceptOnlyValidCandidates;
   parameters.core.repairHeuristic = repairHeuristic;
   parameters.core.enableNrrRepair = enableNrrRepair;
   parameters.core.nrrFallbackToStandard = nrrFallbackToStandard;
+  parameters.core.nrrGlobalReassign = nrrGlobalReassign;
   parameters.core.forceNeighborhoodChangeOnReject =
       forceNeighborhoodChangeOnReject;
   parameters.core.nrrMiniSolver = nrrMiniSolver;
@@ -851,6 +903,7 @@ int main(int argc, char** argv) {
   parameters.core.alnsEnablePrecedenceAwareDestroy =
       alnsEnablePrecedenceAwareDestroy;
   parameters.core.softRecoveryDestroyMode = softRecoveryDestroyMode;
+  parameters.core.softPersistentConflictGraph = softPersistentConflictGraph;
   parameters.core.incrementalRegretMode = incrementalRegretMode;
   parameters.core.seed = seed;
 

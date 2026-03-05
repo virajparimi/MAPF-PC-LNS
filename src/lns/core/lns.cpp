@@ -158,6 +158,11 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
                                      ConstraintTable& constraintTable,
                                      int startTime, int stage,
                                      int lowerBound) {
+  const Time::time_point lowLevelStart = Time::now();
+  auto accumulateLowLevelRuntime = [&]() {
+    cumulativeLowLevelSearchSec_ +=
+        ((fsec)(Time::now() - lowLevelStart)).count();
+  };
   const double remainingBudget = remainingRuntimeBudgetSec();
   lastLowLevelRemainingBudgetSec_ = remainingBudget;
   if (remainingBudget <= 0.0) {
@@ -166,6 +171,7 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
     lastLowLevelOutcome_ = solver.getLastSearchOutcome();
     lastLowLevelEffectiveTimeoutSec_ = 0.0;
     lowLevelBudgetExhausted_++;
+    accumulateLowLevelRuntime();
     return AgentTaskPath();
   }
 
@@ -223,6 +229,7 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
         lowLevelTimeoutDiagnosticsLogsEmitted_++;
       }
       solver.setSegmentTimeout(configuredTimeout);
+      accumulateLowLevelRuntime();
       return AgentTaskPath();
     }
   }
@@ -259,6 +266,7 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
       break;
   }
   solver.setSegmentTimeout(configuredTimeout);
+  accumulateLowLevelRuntime();
   return path;
 }
 
@@ -545,6 +553,53 @@ void LNS::restoreSolutionFromPrevious() {
   solutionRestoreStats_.fullRestores++;
 }
 
+int LNS::computeObjectiveValue(const Solution& solution) const {
+  if (optimizationObjective_ == "soc") {
+    return solution.sumOfCosts;
+  }
+  long long makespan = 0;
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+    makespan = max(makespan, static_cast<long long>(
+                                 solution.agents[agent].path.endTimeOrZero()));
+  }
+  if (makespan > std::numeric_limits<int>::max()) {
+    return std::numeric_limits<int>::max();
+  }
+  return static_cast<int>(makespan);
+}
+
+int LNS::computeObjectiveValue(const FeasibleSolution& solution) const {
+  if (optimizationObjective_ == "soc") {
+    return solution.sumOfCosts;
+  }
+  long long makespan = 0;
+  const int cappedAgents = std::min(instance_.getAgentNum(),
+                                    static_cast<int>(solution.agentPaths.size()));
+  for (int agent = 0; agent < cappedAgents; agent++) {
+    makespan = max(makespan,
+                   static_cast<long long>(solution.agentPaths[agent].endTimeOrZero()));
+  }
+  if (makespan > std::numeric_limits<int>::max()) {
+    return std::numeric_limits<int>::max();
+  }
+  return static_cast<int>(makespan);
+}
+
+int LNS::currentObjectiveValue() const {
+  return computeObjectiveValue(solution_);
+}
+
+int LNS::previousObjectiveValue() const {
+  return computeObjectiveValue(previousSolution_);
+}
+
+int LNS::incumbentObjectiveValueOrMax() const {
+  if (incumbentSolution_.agentPaths.empty()) {
+    return std::numeric_limits<int>::max();
+  }
+  return computeObjectiveValue(incumbentSolution_);
+}
+
 LNS::LNS(int numOfIterations, const Instance& instance,
          const LNSParams& parameters)
     : numOfIterations_(numOfIterations),
@@ -574,7 +629,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
       min(1.0, max(0.0, initialPortfolioTimeFraction_));
   adaptiveInitialPortfolioBudget_ =
       parameters.core.adaptiveInitialPortfolioBudget;
-  initialSeedFromPbsLog_ = parameters.core.initialSeedFromPbsLog;
+  initialSeedFromMapfpcLog_ = parameters.core.initialSeedFromMapfpcLog;
   postRefineWithMapfpc_ = parameters.core.postRefineWithMapfpc;
   postRefineAssignmentSource_ = parameters.core.postRefineAssignmentSource;
   if (postRefineAssignmentSource_ != "solution" &&
@@ -601,6 +656,13 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   initialSolutionEffective_ = initialSolutionStrategy;
   initialSolutionFallbackUsed_ = false;
   initialSolutionFallbackReason_ = "none";
+  optimizationObjective_ = parameters.core.optimizationObjective;
+  if (optimizationObjective_ != "soc" &&
+      optimizationObjective_ != "makespan") {
+    PLOGW << "Unknown optimizationObjective '" << optimizationObjective_
+          << "'; defaulting to 'soc'\n";
+    optimizationObjective_ = "soc";
+  }
   goalOccupationMode_ = parameters.core.goalOccupationMode;
   terminalRepositionStats_.reset();
   improvementDiagnosticsStats_.reset();
@@ -628,6 +690,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   }
   enableNrrRepair_ = parameters.core.enableNrrRepair;
   nrrFallbackToStandard_ = parameters.core.nrrFallbackToStandard;
+  nrrGlobalReassign_ = parameters.core.nrrGlobalReassign;
   forceNeighborhoodChangeOnReject_ =
       parameters.core.forceNeighborhoodChangeOnReject;
   nrrMiniSolver_ = parameters.core.nrrMiniSolver;
@@ -677,6 +740,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   alnsEnablePrecedenceAwareDestroy_ =
       parameters.core.alnsEnablePrecedenceAwareDestroy;
   softRecoveryDestroyMode_ = parameters.core.softRecoveryDestroyMode;
+  softPersistentConflictGraph_ = parameters.core.softPersistentConflictGraph;
   if (parameters.lowLevel.planner == "sipps") {
     lowLevelPlannerType_ = LowLevelPlannerType::sipps;
   } else {

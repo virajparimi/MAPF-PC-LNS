@@ -10,6 +10,8 @@ struct FeasibleTrajectoryStats {
   std::vector<int> improvingIterations;
   std::vector<double> improvingRuntimes;
   std::vector<int> improvingValues;
+  std::vector<int> improvingMakespans;
+  std::vector<double> improvingPrecedenceWaits;
   double firstFeasibleRuntime = std::numeric_limits<double>::infinity();
   int numFeasibleIterations = 0;
   int numImprovingFeasibleUpdates = 0;

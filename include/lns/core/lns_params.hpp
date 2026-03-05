@@ -14,6 +14,10 @@ struct LNSParams {
     double shawTemporalWeight = 3.0;
     double lnsConflictWeight = 0.75;
     double lnsCostWeight = 0.25;
+    // Optimization objective used for incumbent/best-update comparisons:
+    // - "soc": minimize sum of costs
+    // - "makespan": minimize maximum individual completion time
+    string optimizationObjective = "soc";
     string initialSolutionStrategy;
     // Portfolio warm-start budget as a fraction of total cutoff.
     // Used only when initialSolutionStrategy == "portfolio".
@@ -21,10 +25,10 @@ struct LNSParams {
     // If true, scale initialPortfolioTimeFraction by instance difficulty
     // (agents/tasks/precedence), then clamp to [0.05, 0.35].
     bool adaptiveInitialPortfolioBudget = false;
-    // Optional path to a MAPF-PC/PBS log containing TASK ASSIGNMENTS and
+    // Optional path to a MAPF-PC log (PBS/CBS) containing TASK ASSIGNMENTS and
     // TASK PATHS sections. If set, initialization can be seeded directly from
     // this log instead of running an initializer arm.
-    string initialSeedFromPbsLog;
+    string initialSeedFromMapfpcLog;
     // Optional post-LNS refinement stage: rerun MAPF-PC (PBS/CBS) on a fixed
     // task assignment to improve final routed paths.
     bool postRefineWithMapfpc = false;
@@ -38,7 +42,8 @@ struct LNSParams {
     string postRefineSolver = "pbs";
     // MAPF-PC solver cutoff in seconds for post-refinement.
     int postRefineTimeoutSec = 120;
-    // If true, adopt post-refinement only when SoC is strictly better.
+    // If true, adopt post-refinement only when the selected optimization
+    // objective is strictly better.
     bool postRefineAcceptOnlyIfBetter = true;
     // Emit additional end-of-run diagnostics to explain why accepted
     // iterations may fail to improve global best SoC and where time is spent.
@@ -73,6 +78,10 @@ struct LNSParams {
     // If true, failed NRR attempts fallback to the configured repairHeuristic.
     // If false, failed NRR attempts terminate repair for that iteration.
     bool nrrFallbackToStandard = true;
+    // If true, NRR iterative proposal considers all agents as insertion
+    // candidates and maintains a dynamic frozen occupancy index by demoting
+    // newly touched agents during proposal construction.
+    bool nrrGlobalReassign = false;
     // If true, rejected iterations do not reuse the previous removed-task
     // neighborhood seed for the next destroy step.
     bool forceNeighborhoodChangeOnReject = false;
@@ -97,6 +106,10 @@ struct LNSParams {
     // soft-recovery is active it restricts sampling to
     // collision_soft/failure_soft destroy heuristics.
     bool softRecoveryDestroyMode = true;
+    // If true, soft destroy heuristics use a persistent accepted-solution
+    // conflict structure (pairs/agents) instead of seeding only from the
+    // current potentialNeighborhood.
+    bool softPersistentConflictGraph = false;
     // Candidate insertion budget per (task, agent) regret evaluation.
     // Tuned default is 8; set 0 to evaluate all candidate positions.
     int regretCandidateTopK = 8;

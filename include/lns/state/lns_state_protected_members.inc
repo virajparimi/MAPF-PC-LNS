@@ -64,12 +64,18 @@
   bool acceptOnlyValidCandidates_ = false;
   double maxTemperature_ = std::numeric_limits<double>::infinity();
   double greatDelugeDecay_ = 0.0;
-  double timeLimit_, initialSolutionRuntime_ = 0, temperature_ = 100,
+  double timeLimit_, initialSolutionRuntime_ = 0,
+                     initialSolutionRuntimeReported_ = 0,
+                     lnsLoopRuntimeSec_ = 0, postRefineRuntimeSec_ = 0,
+                     cumulativeRegretCandidateEvalSec_ = 0,
+                     cumulativeRegretCommitSec_ = 0,
+                     cumulativeLowLevelSearchSec_ = 0, temperature_ = 100,
                      coolingCoefficient_ = 0.99975,
                      heatingCoefficient_ = 1.00025, tolerance_ = 5,
                      shawDistanceWeight_ = 9, shawTemporalWeight_ = 3,
                      lnsConflictWeight_ = 0.75, lnsCostWeight_ = 0.25;
   Time::time_point plannerStartTime_;
+  string optimizationObjective_ = "soc";
   string goalOccupationMode_ = "reposition_true";
   mutable unordered_map<int, vector<int>> parkingCandidatesCache_;
   TerminalRepositionStats terminalRepositionStats_;
@@ -77,10 +83,22 @@
   string initialSolutionEffective_;
   bool initialSolutionFallbackUsed_ = false;
   string initialSolutionFallbackReason_;
+  double initialSeedRuntimeFromLogSec_ = -1.0;
+  bool initialAssignmentSnapshotAvailable_ = false;
+  bool initialMetricsAvailable_ = false;
+  int initialObjectiveValue_ = std::numeric_limits<int>::max();
+  int initialSoc_ = std::numeric_limits<int>::max();
+  int initialMakespan_ = -1;
+  double initialPrecedenceWait_ = std::numeric_limits<double>::quiet_NaN();
+  vector<vector<int>> initialAssignmentsByAgent_;
+  vector<int> initialTaskOwnerByTask_;
+  vector<int> initialTaskPosByTask_;
   double initialPortfolioTimeFraction_ = 0.10;
   bool adaptiveInitialPortfolioBudget_ = false;
-  string initialSeedFromPbsLog_;
+  string initialSeedFromMapfpcLog_;
   bool postRefineWithMapfpc_ = false;
+  bool postRefineAttempted_ = false;
+  bool postRefineAccepted_ = false;
   string postRefineAssignmentSource_ = "solution";
   string postRefineAssignmentLog_;
   string postRefineSolver_ = "pbs";
@@ -88,8 +106,10 @@
   bool postRefineAcceptOnlyIfBetter_ = true;
   bool enableNrrRepair_ = false;
   bool nrrFallbackToStandard_ = true;
+  bool nrrGlobalReassign_ = false;
   bool forceNeighborhoodChangeOnReject_ = false;
   bool softRecoveryDestroyMode_ = false;
+  bool softPersistentConflictGraph_ = false;
   string nrrMiniSolver_ = "cbs";
   string nrrCatBackend_ = "pathtablewc";
   NrrStats nrrStats_;
@@ -99,6 +119,8 @@
   bool softRecoveryActive_ = false;
   int64_t softRecoveryCurrentConflicts_ = -1;
   bool lastDestroySampledInSoftMode_ = false;
+  vector<pair<int, int>> persistentConflictPairs_;
+  vector<int> persistentConflictAgents_;
   vector<pair<int, int>> lastValidationCollisionPairs_;
   vector<int> lastValidationConflictAgents_;
   vector<int> lastValidationConflictTasks_;

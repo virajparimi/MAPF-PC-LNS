@@ -266,9 +266,9 @@ bool LNS::buildPrioritizedInitialSolution() {
 
 bool LNS::extractFeasibleSolution() {
 
-  // Only update the feasible solution if the new solution has better cost!
+  // Only update the feasible solution if the selected objective is improved.
   if (incumbentSolution_.agentPaths.empty() ||
-      incumbentSolution_.sumOfCosts > solution_.sumOfCosts) {
+      currentObjectiveValue() < incumbentObjectiveValueOrMax()) {
     overwriteIncumbentFromCurrentSolution();
     return true;
   }

@@ -9,6 +9,12 @@ void IterationLifecycleOrchestrator::commitTimingAndMaybeRecord(
       context.timeDestroyAndPrepareSec;
   lns.improvementDiagnosticsStats_.timeRepairAndCommitSec +=
       context.timeRepairAndCommitSec;
+  lns.improvementDiagnosticsStats_.timeRegretCandidateEvalSec +=
+      context.timeRegretCandidateEvalSec;
+  lns.improvementDiagnosticsStats_.timeRegretCommitSec +=
+      context.timeRegretCommitSec;
+  lns.improvementDiagnosticsStats_.timeRegretLowLevelSec +=
+      context.timeRegretLowLevelSec;
   lns.improvementDiagnosticsStats_.timeJoinPathsSec += context.timeJoinPathsSec;
   lns.improvementDiagnosticsStats_.timeTerminalReplanSec +=
       context.timeTerminalReplanSec;
@@ -26,6 +32,10 @@ void IterationLifecycleOrchestrator::commitTimingAndMaybeRecord(
     context.debugRow.quality = lns.iterationQualityName(context.quality);
     context.debugRow.timeDestroyAndPrepareSec = context.timeDestroyAndPrepareSec;
     context.debugRow.timeRepairAndCommitSec = context.timeRepairAndCommitSec;
+    context.debugRow.timeRegretCandidateEvalSec =
+        context.timeRegretCandidateEvalSec;
+    context.debugRow.timeRegretCommitSec = context.timeRegretCommitSec;
+    context.debugRow.timeRegretLowLevelSec = context.timeRegretLowLevelSec;
     context.debugRow.timeJoinPathsSec = context.timeJoinPathsSec;
     context.debugRow.timeTerminalReplanSec = context.timeTerminalReplanSec;
     context.debugRow.timeRecomputeSocSec = context.timeRecomputeSocSec;

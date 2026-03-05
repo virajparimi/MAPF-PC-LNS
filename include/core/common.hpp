@@ -143,12 +143,16 @@ struct IterationStats {
   bool feasibleSolutionFound;
   int numOfAgents, numOfTasks, sumOfCosts, sumOfCostsLowerBound,
       numOfConflictingPairs;
+  int makespan;
+  double precedenceWait;
   IterationQuality quality;
   IterationStats(double runtimeIn, string algorithmIn, int numOfAgentsIn,
                  int numOfTasksIn, int sumOfCostsIn,
                  bool feasibleSolutionFoundIn, IterationQuality qualityIn,
                  int sumOfCostsLowerBoundIn = 0,
-                 int numOfConflictingPairsIn = 0)
+                 int numOfConflictingPairsIn = 0, int makespanIn = -1,
+                 double precedenceWaitIn =
+                     std::numeric_limits<double>::quiet_NaN())
       : runtime(runtimeIn),
         algorithm(std::move(algorithmIn)),
         feasibleSolutionFound(feasibleSolutionFoundIn),
@@ -157,5 +161,7 @@ struct IterationStats {
         sumOfCosts(sumOfCostsIn),
         sumOfCostsLowerBound(sumOfCostsLowerBoundIn),
         numOfConflictingPairs(numOfConflictingPairsIn),
+        makespan(makespanIn),
+        precedenceWait(precedenceWaitIn),
         quality(qualityIn) {}
 };

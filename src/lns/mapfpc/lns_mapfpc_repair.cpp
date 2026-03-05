@@ -1,6 +1,7 @@
 #include "lns.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -590,6 +591,78 @@ bool LNS::buildSeededSolutionFromMAPFPCLog(const string& logFilePath) {
     PLOGE << "buildSeededSolutionFromMAPFPCLog: empty log path\n";
     return false;
   }
+  initialSeedRuntimeFromLogSec_ = -1.0;
+  {
+    std::ifstream runtimeStream(logFilePath);
+    if (runtimeStream.is_open()) {
+      string line;
+      double parsedRuntime = -1.0;
+      auto trim = [](const string& input) -> string {
+        const size_t first = input.find_first_not_of(" \t\r\n");
+        if (first == string::npos) {
+          return "";
+        }
+        const size_t last = input.find_last_not_of(" \t\r\n");
+        return input.substr(first, last - first + 1);
+      };
+      auto parseNonNegativeFiniteDouble = [](const string& token,
+                                             double& out) -> bool {
+        std::istringstream stream(token);
+        double value = -1.0;
+        if (!(stream >> value)) {
+          return false;
+        }
+        if (!std::isfinite(value) || value < 0.0) {
+          return false;
+        }
+        out = value;
+        return true;
+      };
+      while (std::getline(runtimeStream, line)) {
+        const string trimmed = trim(line);
+        const size_t runtimePos = line.find("Runtime");
+        if (runtimePos == string::npos) {
+          // MAPF-PC/PBS-CBS logs often encode runtime as
+          //   Solved,<soc>,<runtime>,...
+          //   Optimal,<soc>,<runtime>,...
+          if (trimmed.rfind("Solved,", 0) == 0 ||
+              trimmed.rfind("Optimal,", 0) == 0 ||
+              trimmed.rfind("Timeout,", 0) == 0 ||
+              trimmed.rfind("No solution,", 0) == 0) {
+            std::vector<string> tokens;
+            size_t start = 0;
+            while (start <= trimmed.size()) {
+              const size_t comma = trimmed.find(',', start);
+              if (comma == string::npos) {
+                tokens.push_back(trimmed.substr(start));
+                break;
+              }
+              tokens.push_back(trimmed.substr(start, comma - start));
+              start = comma + 1;
+            }
+            if (tokens.size() >= 3) {
+              double runtimeValue = -1.0;
+              if (parseNonNegativeFiniteDouble(trim(tokens[2]), runtimeValue)) {
+                parsedRuntime = runtimeValue;
+              }
+            }
+          }
+          continue;
+        }
+        const size_t equalsPos = line.find('=', runtimePos);
+        if (equalsPos != string::npos) {
+          double runtimeValue = -1.0;
+          if (parseNonNegativeFiniteDouble(
+                  trim(line.substr(equalsPos + 1)), runtimeValue)) {
+            parsedRuntime = runtimeValue;
+          }
+        }
+      }
+      if (parsedRuntime >= 0.0) {
+        initialSeedRuntimeFromLogSec_ = parsedRuntime;
+      }
+    }
+  }
   std::ifstream inputStream(logFilePath);
   if (!inputStream.is_open()) {
     PLOGE << "buildSeededSolutionFromMAPFPCLog: failed to open '" << logFilePath
@@ -637,9 +710,10 @@ bool LNS::runPostMAPFPCRefinement() {
 
   const Solution previousSolution = solution_;
   const FeasibleSolution previousIncumbent = incumbentSolution_;
-  const int baselineSoc =
-      previousIncumbent.agentPaths.empty() ? previousSolution.sumOfCosts
-                                           : previousIncumbent.sumOfCosts;
+  const int baselineObjective =
+      previousIncumbent.agentPaths.empty()
+          ? computeObjectiveValue(previousSolution)
+          : computeObjectiveValue(previousIncumbent);
 
   const string solverVariant = postRefineSolver_;
   const string sourceLabel =
@@ -675,13 +749,14 @@ bool LNS::runPostMAPFPCRefinement() {
     return false;
   }
 
-  const int refinedSoc = solution_.sumOfCosts;
-  const bool strictlyBetter =
-      previousIncumbent.agentPaths.empty() ||
-      refinedSoc < previousIncumbent.sumOfCosts;
+  const int refinedObjective = currentObjectiveValue();
+  const bool strictlyBetter = previousIncumbent.agentPaths.empty() ||
+                              refinedObjective <
+                                  computeObjectiveValue(previousIncumbent);
   if (postRefineAcceptOnlyIfBetter_ && !strictlyBetter) {
     PLOGI << "post_refine_mapfpc: rejected non-improving refinement (baseline="
-          << baselineSoc << ", refined=" << refinedSoc << ")\n";
+          << baselineObjective << ", refined=" << refinedObjective
+          << ", objective=" << optimizationObjective_ << ")\n";
     solution_ = previousSolution;
     incumbentSolution_ = previousIncumbent;
     return false;
@@ -692,14 +767,26 @@ bool LNS::runPostMAPFPCRefinement() {
   } else {
     overwriteIncumbentFromCurrentSolution();
   }
+  long long refinedMakespanLl = 0;
+  for (const auto& agent : solution_.agents) {
+    refinedMakespanLl = std::max(
+        refinedMakespanLl, static_cast<long long>(agent.path.endTimeOrZero()));
+  }
+  const int refinedMakespan =
+      refinedMakespanLl > std::numeric_limits<int>::max()
+          ? std::numeric_limits<int>::max()
+          : static_cast<int>(refinedMakespanLl);
+  const double refinedPrecedenceWait = computeSolutionPrecedenceWait();
   runtime = elapsedRuntimeSec();
   appendIterationStatBounded(IterationStats(
       runtime, sourceLabel, instance_.getAgentNum(), instance_.getTasksNum(),
-      refinedSoc, true,
+      refinedObjective, true,
       strictlyBetter ? IterationQuality::bestSolutionYet
-                     : IterationQuality::improvedSolution));
-  PLOGI << "post_refine_mapfpc: accepted refinement (baseline=" << baselineSoc
-        << ", refined=" << refinedSoc
+                     : IterationQuality::improvedSolution,
+      0, 0, refinedMakespan, refinedPrecedenceWait));
+  PLOGI << "post_refine_mapfpc: accepted refinement (baseline="
+        << baselineObjective << ", refined=" << refinedObjective
+        << ", objective=" << optimizationObjective_
         << ", accept_only_if_better="
         << (postRefineAcceptOnlyIfBetter_ ? "true" : "false") << ")\n";
   return true;

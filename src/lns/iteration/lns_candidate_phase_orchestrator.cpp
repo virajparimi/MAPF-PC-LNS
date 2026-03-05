@@ -149,6 +149,10 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
   }
   PLOGD << "Old sum of costs = " << lns.previousSolution_.sumOfCosts << "\n";
   PLOGD << "New sum of costs = " << lns.solution_.sumOfCosts << "\n";
+  PLOGD << "Old objective(" << lns.optimizationObjective_ << ") = "
+        << lns.previousObjectiveValue() << "\n";
+  PLOGD << "New objective(" << lns.optimizationObjective_ << ") = "
+        << lns.currentObjectiveValue() << "\n";
   result.timeRecomputeSocSec += elapsedSecSince(recomputeSocStart);
 
   const RemovedTaskChangeStats removedTaskChanges =
@@ -210,7 +214,7 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
         << "\n";
 
   lns.solution_.utility = metrics.computeMovingMetrics(
-      result.candidateConflictSignal, lns.solution_.sumOfCosts);
+      result.candidateConflictSignal, lns.currentObjectiveValue());
   if (result.candidateValid) {
     result.feasibleBestUpdate = lns.extractFeasibleSolution();
   } else {
@@ -218,7 +222,7 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
     PLOGE << "The solution was not valid!\n";
   }
   result.timeValidationSec += elapsedSecSince(validationStart);
-  result.proposedSoc = lns.solution_.sumOfCosts;
+  result.proposedSoc = lns.currentObjectiveValue();
 
   return result;
 }

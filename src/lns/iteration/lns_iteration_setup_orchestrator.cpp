@@ -2,24 +2,19 @@
 
 #include "lns_market_iteration_orchestrator.hpp"
 
-#include <limits>
-
 void IterationSetupOrchestrator::initialize(
     LNS& lns, const LNS::ValidationStats& currentValidationStats,
     IterationExecutionContext& context) {
   const IterationMarketContext marketContext =
       MarketIterationOrchestrator::begin(lns);
 
-  context.previousSocForIter = lns.previousSolution_.sumOfCosts;
+  context.previousSocForIter = lns.previousObjectiveValue();
   context.previousValidationStatsForIter = currentValidationStats;
   context.previousPressureForIter = marketContext.previousPressure;
   context.previousWaitForIter = marketContext.previousWait;
   const int64_t iterationIndex =
       static_cast<int64_t>(lns.iterationDebugRecords_.size());
-  context.incumbentSocBeforeIter =
-      lns.incumbentSolution_.agentPaths.empty()
-          ? std::numeric_limits<int>::max()
-          : lns.incumbentSolution_.sumOfCosts;
+  context.incumbentSocBeforeIter = lns.incumbentObjectiveValueOrMax();
   context.collectIterationDebug =
       lns.debugImprovementDiagnostics_ || !lns.debugIterationTsvPath_.empty();
   context.debugRow.iteration = iterationIndex;

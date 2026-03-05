@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <queue>
 #include <set>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -39,6 +40,38 @@ std::vector<int> collectAgentsFromPotential(const ConflictMap* potentialNeighbor
   return agents;
 }
 
+std::string joinInts(const std::vector<int>& values) {
+  std::ostringstream oss;
+  oss << "[";
+  for (int i = 0; i < (int)values.size(); i++) {
+    if (i > 0) {
+      oss << ",";
+    }
+    oss << values[i];
+  }
+  oss << "]";
+  return oss.str();
+}
+
+std::string summarizeConflictMap(const ConflictMap* conflictMap) {
+  if (conflictMap == nullptr) {
+    return "null";
+  }
+  std::ostringstream oss;
+  oss << "{size=" << conflictMap->size() << ",tasks=[";
+  int idx = 0;
+  for (const auto& [task, conflict] : *conflictMap) {
+    if (idx > 0) {
+      oss << ";";
+    }
+    oss << task << "(a=" << conflict.agent << ",p=" << conflict.taskPosition
+        << ")";
+    idx++;
+  }
+  oss << "]}";
+  return oss.str();
+}
+
 std::vector<int> bfsComponent(const std::vector<std::unordered_set<int>>& adjacency,
                               int seed) {
   std::vector<int> component;
@@ -68,7 +101,7 @@ void fillRemovedTasksFromAgents(Solution& solution, Neighbor& neighborhood,
                                 const Instance& instance,
                                 const std::vector<int>& selectedAgents,
                                 const ConflictMap* potentialNeighborhood,
-                                int targetTasks) {
+                                int targetTasks, std::mt19937& rng) {
   const int taskCount = instance.getTasksNum();
   if (targetTasks <= 0 || taskCount <= 0) {
     return;
@@ -110,18 +143,27 @@ void fillRemovedTasksFromAgents(Solution& solution, Neighbor& neighborhood,
 
   std::vector<std::vector<int>> conflictedPositionsByAgent(numAgents);
   if (potentialNeighborhood != nullptr) {
+    std::vector<int> potentialTasks;
+    potentialTasks.reserve(potentialNeighborhood->size());
     for (const auto& [task, conflict] : *potentialNeighborhood) {
       if (conflict.agent < 0 || conflict.agent >= numAgents ||
           !selectedAgentMask[conflict.agent]) {
         continue;
       }
-      addTask(task);
+      potentialTasks.push_back(task);
       const int pos = (task >= 0 && task < (int)taskPosByTask.size())
                           ? taskPosByTask[task]
                           : UNASSIGNED;
       if (pos != UNASSIGNED) {
         conflictedPositionsByAgent[conflict.agent].push_back(pos);
       }
+    }
+    std::shuffle(potentialTasks.begin(), potentialTasks.end(), rng);
+    for (int task : potentialTasks) {
+      if ((int)neighborhood.removedTasks.size() >= cappedTarget) {
+        break;
+      }
+      addTask(task);
     }
   }
 
@@ -320,6 +362,8 @@ std::vector<int> collectTargetRelatedAgents(
 
 void LNS::collisionSoftRemoval(const ConflictMap* potentialNeighborhood) {
   PLOGD << "Using collision-soft removal\n";
+  PLOGD << "collisionSoftRemoval: incoming potential="
+        << summarizeConflictMap(potentialNeighborhood) << "\n";
   clearNeighborhood();
 
   const int taskCount = instance_.getTasksNum();
@@ -331,8 +375,15 @@ void LNS::collisionSoftRemoval(const ConflictMap* potentialNeighborhood) {
     return;
   }
 
-  const std::vector<int> conflictAgents =
-      collectAgentsFromPotential(potentialNeighborhood, instance_.getAgentNum());
+  std::vector<int> conflictAgents;
+  if (softPersistentConflictGraph_ && !persistentConflictAgents_.empty()) {
+    conflictAgents = persistentConflictAgents_;
+  } else {
+    conflictAgents =
+        collectAgentsFromPotential(potentialNeighborhood, instance_.getAgentNum());
+  }
+  PLOGD << "collisionSoftRemoval: conflictAgents=" << joinInts(conflictAgents)
+        << "\n";
   if (conflictAgents.empty()) {
     if (potentialNeighborhood != nullptr) {
       conflictRemoval(potentialNeighborhood);
@@ -344,11 +395,19 @@ void LNS::collisionSoftRemoval(const ConflictMap* potentialNeighborhood) {
 
   const int targetAgentCount =
       std::max(1, std::min((int)conflictAgents.size(), cappedNeighborSize));
+  PLOGD << "collisionSoftRemoval: targetAgentCount=" << targetAgentCount
+        << ", cappedNeighborSize=" << cappedNeighborSize << "\n";
+  const auto& collisionPairsForSampling =
+      (softPersistentConflictGraph_ && !persistentConflictPairs_.empty())
+          ? persistentConflictPairs_
+          : lastValidationCollisionPairs_;
   const std::vector<int> selectedAgents =
       buildConflictAdjacencyAndSampleAgents(
-          conflictAgents, lastValidationCollisionPairs_, rng_,
+          conflictAgents, collisionPairsForSampling, rng_,
           instance_.getAgentNum(),
           targetAgentCount);
+  PLOGD << "collisionSoftRemoval: selectedAgents=" << joinInts(selectedAgents)
+        << "\n";
   if (selectedAgents.empty()) {
     if (potentialNeighborhood != nullptr) {
       conflictRemoval(potentialNeighborhood);
@@ -360,7 +419,9 @@ void LNS::collisionSoftRemoval(const ConflictMap* potentialNeighborhood) {
 
   fillRemovedTasksFromAgents(solution_, lnsNeighborhood_, instance_,
                              selectedAgents, potentialNeighborhood,
-                             cappedNeighborSize);
+                             cappedNeighborSize, rng_);
+  PLOGD << "collisionSoftRemoval: produced removedTasks="
+        << summarizeConflictMap(&lnsNeighborhood_.removedTasks) << "\n";
   if ((int)lnsNeighborhood_.removedTasks.size() < cappedNeighborSize) {
     PLOGW << "collisionSoftRemoval: could only remove "
           << lnsNeighborhood_.removedTasks.size() << " out of requested "
@@ -370,6 +431,8 @@ void LNS::collisionSoftRemoval(const ConflictMap* potentialNeighborhood) {
 
 void LNS::failureSoftRemoval(const ConflictMap* potentialNeighborhood) {
   PLOGD << "Using failure-soft removal\n";
+  PLOGD << "failureSoftRemoval: incoming potential="
+        << summarizeConflictMap(potentialNeighborhood) << "\n";
   clearNeighborhood();
 
   const int taskCount = instance_.getTasksNum();
@@ -383,12 +446,17 @@ void LNS::failureSoftRemoval(const ConflictMap* potentialNeighborhood) {
 
   std::vector<int> sourceAgents = lastSoftFailureConflictAgents_;
   if (sourceAgents.empty()) {
-    sourceAgents =
-        collectAgentsFromPotential(potentialNeighborhood, instance_.getAgentNum());
+    if (softPersistentConflictGraph_ && !persistentConflictAgents_.empty()) {
+      sourceAgents = persistentConflictAgents_;
+    } else {
+      sourceAgents =
+          collectAgentsFromPotential(potentialNeighborhood, instance_.getAgentNum());
+    }
   }
   std::sort(sourceAgents.begin(), sourceAgents.end());
   sourceAgents.erase(std::unique(sourceAgents.begin(), sourceAgents.end()),
                      sourceAgents.end());
+  PLOGD << "failureSoftRemoval: sourceAgents=" << joinInts(sourceAgents) << "\n";
 
   if (sourceAgents.empty()) {
     collisionSoftRemoval(potentialNeighborhood);
@@ -402,11 +470,15 @@ void LNS::failureSoftRemoval(const ConflictMap* potentialNeighborhood) {
     return;
   }
 
+  const auto& collisionPairsForSampling =
+      (softPersistentConflictGraph_ && !persistentConflictPairs_.empty())
+          ? persistentConflictPairs_
+          : lastValidationCollisionPairs_;
   std::unordered_map<int, int> degree;
   for (int a : sourceAgents) {
     degree[a] = 0;
   }
-  for (const auto& [a, b] : lastValidationCollisionPairs_) {
+  for (const auto& [a, b] : collisionPairsForSampling) {
     if (degree.count(a) == 0 || degree.count(b) == 0) {
       continue;
     }
@@ -430,6 +502,7 @@ void LNS::failureSoftRemoval(const ConflictMap* potentialNeighborhood) {
   if (!bestAnchors.empty()) {
     anchor = bestAnchors[pickRandomIndex(rng_, (int)bestAnchors.size())];
   }
+  PLOGD << "failureSoftRemoval: anchor=" << anchor << "\n";
 
   const int numAgents = instance_.getAgentNum();
   std::vector<char> sourceMask(numAgents, 0);
@@ -562,9 +635,13 @@ void LNS::failureSoftRemoval(const ConflictMap* potentialNeighborhood) {
   }
 
   std::vector<int> selectedAgents(neighborsSet.begin(), neighborsSet.end());
+  PLOGD << "failureSoftRemoval: selectedAgents=" << joinInts(selectedAgents)
+        << ", targetAgentCount=" << targetAgentCount << "\n";
   fillRemovedTasksFromAgents(solution_, lnsNeighborhood_, instance_,
                              selectedAgents, potentialNeighborhood,
-                             cappedNeighborSize);
+                             cappedNeighborSize, rng_);
+  PLOGD << "failureSoftRemoval: produced removedTasks="
+        << summarizeConflictMap(&lnsNeighborhood_.removedTasks) << "\n";
 
   if (lnsNeighborhood_.removedTasks.empty()) {
     collisionSoftRemoval(potentialNeighborhood);

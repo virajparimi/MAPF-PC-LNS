@@ -132,7 +132,9 @@ bool LNS::writeIterationDebugTsv(const string& outputPath) const {
          "neighborhood_fingerprint_seen_before\tneighborhood_fingerprint_hex\t"
          "neighborhood_jaccard_prev\tneighborhood_repeat_streak\t"
          "fingerprint_seen_before\tfingerprint_hex\t"
-         "time_destroy_prepare_s\ttime_repair_commit_s\ttime_join_s\t"
+         "time_destroy_prepare_s\ttime_repair_commit_s\t"
+         "time_regret_candidate_eval_s\ttime_regret_commit_s\t"
+         "time_regret_low_level_s\ttime_join_s\t"
          "time_terminal_replan_s\ttime_recompute_soc_s\ttime_validation_s\t"
          "time_acceptance_s\ttime_bookkeeping_s\n";
 
@@ -176,6 +178,9 @@ bool LNS::writeIterationDebugTsv(const string& outputPath) const {
     out << std::hex << row.fingerprint << std::dec << '\t'
         << row.timeDestroyAndPrepareSec << '\t'
         << row.timeRepairAndCommitSec << '\t'
+        << row.timeRegretCandidateEvalSec << '\t'
+        << row.timeRegretCommitSec << '\t'
+        << row.timeRegretLowLevelSec << '\t'
         << row.timeJoinPathsSec << '\t'
         << row.timeTerminalReplanSec << '\t'
         << row.timeRecomputeSocSec << '\t'
@@ -197,6 +202,25 @@ bool LNS::run() {
   invalidCandidateRejections = 0;
   marketGuardRejections = 0;
   improvementDiagnosticsStats_.reset();
+  initialSolutionRuntime_ = 0.0;
+  initialSolutionRuntimeReported_ = 0.0;
+  initialSeedRuntimeFromLogSec_ = -1.0;
+  initialAssignmentSnapshotAvailable_ = false;
+  initialMetricsAvailable_ = false;
+  initialObjectiveValue_ = std::numeric_limits<int>::max();
+  initialSoc_ = std::numeric_limits<int>::max();
+  initialMakespan_ = -1;
+  initialPrecedenceWait_ = std::numeric_limits<double>::quiet_NaN();
+  initialAssignmentsByAgent_.clear();
+  initialTaskOwnerByTask_.clear();
+  initialTaskPosByTask_.clear();
+  lnsLoopRuntimeSec_ = 0.0;
+  postRefineRuntimeSec_ = 0.0;
+  postRefineAttempted_ = false;
+  postRefineAccepted_ = false;
+  cumulativeRegretCandidateEvalSec_ = 0.0;
+  cumulativeRegretCommitSec_ = 0.0;
+  cumulativeLowLevelSearchSec_ = 0.0;
   improvementDiagnosticsStats_.softModeSelectionsByDestroy.assign(
       adaptiveLNS_.numDestroyHeuristics, 0);
   improvementDiagnosticsStats_.softModeAcceptedByDestroy.assign(
@@ -214,6 +238,8 @@ bool LNS::run() {
   lastNrrSoftConflictCount_ = -1;
   lastNrrSoftOnlyInvalid_ = false;
   lastDestroySampledInSoftMode_ = false;
+  persistentConflictPairs_.clear();
+  persistentConflictAgents_.clear();
   lastValidationCollisionPairs_.clear();
   lastValidationConflictAgents_.clear();
   lastValidationConflictTasks_.clear();
@@ -232,18 +258,19 @@ bool LNS::run() {
   auto runInitialSolutionStrategy =
       [&](const string& strategy,
           std::optional<double> armBudgetSec = std::nullopt) -> bool {
-    if (strategy == "seeded_pbs_log") {
-      if (initialSeedFromPbsLog_.empty()) {
-        PLOGE << "seeded_pbs_log requested but --initialSeedFromPbsLog was not provided\n";
+    if (strategy == "seeded_mapfpc_log") {
+      if (initialSeedFromMapfpcLog_.empty()) {
+        PLOGE << "seeded_mapfpc_log requested but no seed log path was provided\n";
         return false;
       }
-      const bool loaded = buildSeededSolutionFromMAPFPCLog(initialSeedFromPbsLog_);
+      const bool loaded =
+          buildSeededSolutionFromMAPFPCLog(initialSeedFromMapfpcLog_);
       if (loaded) {
-        const std::filesystem::path logPath(initialSeedFromPbsLog_);
+        const std::filesystem::path logPath(initialSeedFromMapfpcLog_);
         const std::string logName = logPath.filename().string();
         initialSolutionEffective_ = logName.empty()
-                                        ? "seeded_pbs_log"
-                                        : ("seeded_pbs_log(" + logName + ")");
+                                        ? "seeded_mapfpc_log"
+                                        : ("seeded_mapfpc_log(" + logName + ")");
       }
       return loaded;
     }
@@ -345,15 +372,15 @@ bool LNS::run() {
   struct InitialCheckpoint {
     double runtimeSec = 0.0;
     string label;
-    int soc = 0;
+    int objective = 0;
     bool feasible = false;
     IterationQuality quality = IterationQuality::none;
   };
   vector<InitialCheckpoint> initialCheckpoints;
 
   string requestedInitialStrategy = initialSolutionStrategy;
-  if (!initialSeedFromPbsLog_.empty()) {
-    requestedInitialStrategy = "seeded_pbs_log";
+  if (!initialSeedFromMapfpcLog_.empty()) {
+    requestedInitialStrategy = "seeded_mapfpc_log";
   }
   initialSolutionRequested_ = requestedInitialStrategy;
   initialSolutionEffective_ = requestedInitialStrategy;
@@ -481,13 +508,13 @@ bool LNS::run() {
 
     struct PortfolioCandidate {
       string arm;
-      int soc;
+      int objective;
       FeasibleSolution snapshot;
 
-      PortfolioCandidate(const string& armName, int socValue,
+      PortfolioCandidate(const string& armName, int objectiveValue,
                          FeasibleSolution solutionSnapshot)
           : arm(armName),
-            soc(socValue),
+            objective(objectiveValue),
             snapshot(std::move(solutionSnapshot)) {}
     };
     vector<PortfolioCandidate> feasiblePortfolioCandidates;
@@ -495,7 +522,7 @@ bool LNS::run() {
     bool haveBestPortfolioSolution = false;
     string bestPortfolioArm;
     Solution bestPortfolioSolution(instance_);
-    int bestServicePortfolioSoc = std::numeric_limits<int>::max();
+    int bestPortfolioObjective = std::numeric_limits<int>::max();
 
     for (int i = 0; i < (int)portfolioArms.size(); i++) {
       if (runtimeBudgetExhausted() ||
@@ -522,10 +549,10 @@ bool LNS::run() {
           runInitialSolutionStrategyWithBudget(arm, armBudgetSec);
 
       bool armFeasible = false;
-      int armSoc = 0;
+      int armObjective = 0;
       IterationQuality armQuality = IterationQuality::none;
       if (armSuccess) {
-        armSoc = solution_.sumOfCosts;
+        armObjective = currentObjectiveValue();
         ValidationStats armValidationStats;
         ConflictMap armPotentialNeighborhood;
         const bool previousTerminalValidationFlag =
@@ -536,9 +563,9 @@ bool LNS::run() {
         useTerminalPathsInValidation_ = previousTerminalValidationFlag;
         if (armFeasible) {
           feasiblePortfolioCandidates.emplace_back(
-              arm, armSoc, captureFeasibleSnapshotFromCurrent());
-          if (armSoc < bestServicePortfolioSoc) {
-            bestServicePortfolioSoc = armSoc;
+              arm, armObjective, captureFeasibleSnapshotFromCurrent());
+          if (armObjective < bestPortfolioObjective) {
+            bestPortfolioObjective = armObjective;
             armQuality = IterationQuality::bestSolutionYet;
           }
         }
@@ -552,7 +579,7 @@ bool LNS::run() {
       InitialCheckpoint checkpoint;
       checkpoint.runtimeSec = armEndSec;
       checkpoint.label = "InitPortfolio:" + arm;
-      checkpoint.soc = armSoc;
+      checkpoint.objective = armObjective;
       checkpoint.feasible = armFeasible;
       checkpoint.quality = armQuality;
       initialCheckpoints.push_back(std::move(checkpoint));
@@ -562,7 +589,7 @@ bool LNS::run() {
       std::stable_sort(
           feasiblePortfolioCandidates.begin(), feasiblePortfolioCandidates.end(),
           [](const PortfolioCandidate& a, const PortfolioCandidate& b) {
-            return a.soc < b.soc;
+            return a.objective < b.objective;
           });
 
       for (const auto& candidate : feasiblePortfolioCandidates) {
@@ -623,10 +650,23 @@ bool LNS::run() {
   }
 
   initialSolutionRuntime_ = ((fsec)(Time::now() - plannerStartTime_)).count();
+  initialSolutionRuntimeReported_ = initialSolutionRuntime_;
+  if (requestedInitialStrategy == "seeded_mapfpc_log" &&
+      initialSeedRuntimeFromLogSec_ >= 0.0 &&
+      std::isfinite(initialSeedRuntimeFromLogSec_)) {
+    initialSolutionRuntimeReported_ = initialSeedRuntimeFromLogSec_;
+  }
+  improvementDiagnosticsStats_.timeInitialSolutionSec = initialSolutionRuntime_;
+  improvementDiagnosticsStats_.timeInitialSolutionReportedSec =
+      initialSolutionRuntimeReported_;
   runtime = initialSolutionRuntime_;
 
   PLOGD << "Initial solution cost = " << solution_.sumOfCosts
-        << ", Runtime = " << initialSolutionRuntime_ << "\n";
+        << ", Objective(" << optimizationObjective_
+        << ") = " << currentObjectiveValue()
+        << ", Runtime(measured) = " << initialSolutionRuntime_
+        << ", Runtime(reported) = " << initialSolutionRuntimeReported_
+        << "\n";
 
   if (goalOccupationMode_ == "reposition_true" &&
       !terminalPreparedDuringPortfolio) {
@@ -679,11 +719,52 @@ bool LNS::run() {
                                        initialConflictAgents.end());
   std::sort(lastValidationConflictAgents_.begin(),
             lastValidationConflictAgents_.end());
+  if (softPersistentConflictGraph_) {
+    persistentConflictPairs_ = initialCollisionPairs;
+    persistentConflictAgents_ = lastValidationConflictAgents_;
+  }
 
   bool feasibleSolutionUpdated = false;
   if (currentSolutionValid) {
     feasibleSolutionUpdated = true;
     extractFeasibleSolution();
+  }
+
+  // Snapshot the initial assignment state for end-of-run delta diagnostics.
+  const int taskCount = instance_.getTasksNum();
+  const int agentCount = instance_.getAgentNum();
+  initialAssignmentsByAgent_.assign(agentCount, {});
+  for (int agent = 0; agent < agentCount; agent++) {
+    initialAssignmentsByAgent_[agent] = solution_.agents[agent].taskAssignments;
+  }
+  initialTaskOwnerByTask_.assign(taskCount, UNASSIGNED);
+  initialTaskPosByTask_.assign(taskCount, UNASSIGNED);
+  for (int agent = 0; agent < agentCount; agent++) {
+    const auto& tasks = initialAssignmentsByAgent_[agent];
+    for (int pos = 0; pos < (int)tasks.size(); pos++) {
+      const int task = tasks[pos];
+      if (task < 0 || task >= taskCount) {
+        continue;
+      }
+      initialTaskOwnerByTask_[task] = agent;
+      initialTaskPosByTask_[task] = pos;
+    }
+  }
+  initialAssignmentSnapshotAvailable_ = true;
+  if (currentSolutionValid) {
+    long long initialMakespanLl = 0;
+    for (const auto& agent : solution_.agents) {
+      initialMakespanLl = std::max(
+          initialMakespanLl, static_cast<long long>(agent.path.endTimeOrZero()));
+    }
+    initialMakespan_ =
+        initialMakespanLl > std::numeric_limits<int>::max()
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(initialMakespanLl);
+    initialSoc_ = solution_.sumOfCosts;
+    initialObjectiveValue_ = currentObjectiveValue();
+    initialPrecedenceWait_ = computeSolutionPrecedenceWait();
+    initialMetricsAvailable_ = true;
   }
 
   if (market_.heuristics) {
@@ -699,15 +780,27 @@ bool LNS::run() {
     checkpointHasFeasible = checkpointHasFeasible || checkpoint.feasible;
     appendIterationStatBounded(IterationStats(
         checkpoint.runtimeSec, checkpoint.label, instance_.getAgentNum(),
-        instance_.getTasksNum(), checkpoint.soc, checkpoint.feasible,
+        instance_.getTasksNum(), checkpoint.objective, checkpoint.feasible,
         checkpoint.quality));
   }
   if (initialCheckpoints.empty() ||
       (!checkpointHasFeasible && feasibleSolutionUpdated)) {
+    long long initialMakespanLl = 0;
+    for (const auto& agent : solution_.agents) {
+      initialMakespanLl = std::max(
+          initialMakespanLl, static_cast<long long>(agent.path.endTimeOrZero()));
+    }
+    const int initialMakespan =
+        initialMakespanLl > std::numeric_limits<int>::max()
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(initialMakespanLl);
     appendIterationStatBounded(IterationStats(
         initialSolutionRuntime_, initialSolutionEffective_,
-        instance_.getAgentNum(), instance_.getTasksNum(), solution_.sumOfCosts,
-        feasibleSolutionUpdated, IterationQuality::bestSolutionYet));
+        instance_.getAgentNum(), instance_.getTasksNum(), currentObjectiveValue(),
+        feasibleSolutionUpdated, IterationQuality::bestSolutionYet, 0, 0,
+        feasibleSolutionUpdated ? initialMakespan : -1,
+        feasibleSolutionUpdated ? computeSolutionPrecedenceWait()
+                                : std::numeric_limits<double>::quiet_NaN()));
   }
 
   ConflictMap oldNeighborhood;
@@ -721,10 +814,11 @@ bool LNS::run() {
       (numOfIterations_ > 0) ? max(2, numOfIterations_)
                              : kDefaultMetricsWindowSize;
   const int initialConflictSignal = currentValidationStats.totalConflictEvents();
+  const int initialObjective = currentObjectiveValue();
   MovingMetrics metrics(metricsWindowSize, lnsConflictWeight_, lnsCostWeight_,
-                        initialConflictSignal, solution_.sumOfCosts);
+                        initialConflictSignal, initialObjective);
   solution_.utility =
-      metrics.computeMovingMetrics(initialConflictSignal, solution_.sumOfCosts);
+      metrics.computeMovingMetrics(initialConflictSignal, initialObjective);
 
   constexpr double kMinTemperature = 1e-9;
   const double toleranceScale = tolerance_ / 100.0;
@@ -736,7 +830,7 @@ bool LNS::run() {
     const double conflictScale =
         max(1.0, std::abs(static_cast<double>(initialConflictSignal)));
     const double costScale =
-        max(1.0, std::abs(static_cast<double>(solution_.sumOfCosts)));
+        max(1.0, std::abs(static_cast<double>(initialObjective)));
     const double blendedScale =
         lnsConflictWeight_ * conflictScale + lnsCostWeight_ * costScale;
     const double fallbackScale = max(1.0, blendedScale);
@@ -761,6 +855,7 @@ bool LNS::run() {
   int64_t executedLnsIterations = 0;
 
   // LNS loop
+  const Time::time_point lnsLoopStart = Time::now();
   while (runtime < timeLimit_ &&
          (numOfIterations_ <= 0 ||
           executedLnsIterations < static_cast<int64_t>(numOfIterations_))) {
@@ -772,13 +867,22 @@ bool LNS::run() {
     }
     executedLnsIterations++;
   }
+  lnsLoopRuntimeSec_ = ((fsec)(Time::now() - lnsLoopStart)).count();
+  improvementDiagnosticsStats_.timeLnsLoopSec = lnsLoopRuntimeSec_;
 
+  postRefineRuntimeSec_ = 0.0;
   if (postRefineWithMapfpc_) {
+    postRefineAttempted_ = true;
+    const Time::time_point postRefineStart = Time::now();
     const bool accepted = runPostMAPFPCRefinement();
+    postRefineAccepted_ = accepted;
+    postRefineRuntimeSec_ = ((fsec)(Time::now() - postRefineStart)).count();
+    improvementDiagnosticsStats_.timePostRefineSec = postRefineRuntimeSec_;
     PLOGI << "post_refine_mapfpc: accepted="
           << (accepted ? "true" : "false") << "\n";
   }
 
+  runtime = elapsedRuntimeSec();
   // printPaths();
   flushDebugTsv();
   return !incumbentSolution_.agentPaths.empty();

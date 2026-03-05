@@ -40,7 +40,8 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
                                 const string& initialPathsFilePath,
                                 const string& mutableTasksFilePath,
                                 const string& lowLevelPlannerOverride,
-                                const string& catBackendOverride) {
+                                const string& catBackendOverride,
+                                int catBackendSmallMapsOverride) {
   const auto solver = normalizeMapfpcSolverVariant(solverVariant);
   if (!solver.has_value()) {
     PLOGE << "MAPF-PC solver variant not supported: '" << solverVariant
@@ -125,6 +126,10 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
       "--solver", *solver,
       "--lowLevelPlanner", lowLevelPlanner,
   };
+  if (optimizationObjective_ == "soc" || optimizationObjective_ == "makespan") {
+    args.push_back("--optimizationObjective");
+    args.push_back(optimizationObjective_);
+  }
   if (lowLevelPlanner == "sipps") {
     args.push_back("--sippsSuboptimality");
     args.push_back(std::to_string(lowLevelSippsSuboptimality_));
@@ -149,23 +154,48 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
     args.push_back("--catBackend");
     args.push_back(catBackendOverride);
   }
-  // Keep LNS-spawned CBS configuration aligned with MAPF-LNS2 defaults:
-  // rectangle/corridor/target/bypass on, mutex off, no disjoint splitting.
+  if (catBackendSmallMapsOverride == 0 || catBackendSmallMapsOverride == 1) {
+    args.push_back("--catBackendSmallMaps");
+    args.push_back(std::to_string(catBackendSmallMapsOverride));
+  }
+  const char* cbsVanillaReasoningEnv =
+      std::getenv("MAPFPC_NRR_CBS_VANILLA_REASONING");
+  const bool useVanillaCbsReasoning =
+      cbsVanillaReasoningEnv != nullptr &&
+      std::string(cbsVanillaReasoningEnv) != "0" &&
+      std::string(cbsVanillaReasoningEnv) != "false" &&
+      std::string(cbsVanillaReasoningEnv) != "False" &&
+      std::string(cbsVanillaReasoningEnv) != "FALSE";
+  const char* cbsPcEnv = std::getenv("MAPFPC_NRR_CBS_PC");
+  const bool useCbsPc = cbsPcEnv != nullptr && std::string(cbsPcEnv) != "0" &&
+                        std::string(cbsPcEnv) != "false" &&
+                        std::string(cbsPcEnv) != "False" &&
+                        std::string(cbsPcEnv) != "FALSE";
+  // By default keep LNS-spawned CBS configuration aligned with MAPF-LNS2
+  // defaults (rectangle/corridor/target/bypass on, mutex off, no disjoint
+  // splitting). For A/B testing we can opt into vanilla task_assignment CBS
+  // defaults via MAPFPC_NRR_CBS_VANILLA_REASONING=1.
   if (*solver == "CBS") {
-    args.push_back("--rectangle");
-    args.push_back("1");
-    args.push_back("--corridor");
-    args.push_back("1");
-    args.push_back("--bypass");
-    args.push_back("1");
-    args.push_back("--mutex");
-    args.push_back("0");
-    args.push_back("--disjoint");
-    args.push_back("0");
-    args.push_back("--target");
-    args.push_back("1");
-    args.push_back("--stp");
-    args.push_back("1");
+    if (useCbsPc) {
+      args.push_back("--pc");
+      args.push_back("1");
+    }
+    if (!useVanillaCbsReasoning) {
+      args.push_back("--rectangle");
+      args.push_back("1");
+      args.push_back("--corridor");
+      args.push_back("1");
+      args.push_back("--bypass");
+      args.push_back("1");
+      args.push_back("--mutex");
+      args.push_back("0");
+      args.push_back("--disjoint");
+      args.push_back("0");
+      args.push_back("--target");
+      args.push_back("1");
+      args.push_back("--stp");
+      args.push_back("1");
+    }
   }
   std::optional<bp::child> childProcess;
   try {
@@ -197,11 +227,24 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
   if (!sourceLabel.empty()) {
     PLOGI << "MAPF-PC task_assignment start: solver=" << *solver
           << ", ll=" << lowLevelPlanner
+          << ", objective=" << optimizationObjective_
           << (lowLevelPlanner == "sipps"
                   ? (", ll_w=" + std::to_string(lowLevelSippsSuboptimality_))
                   : "")
           << (catBackendOverride.empty() ? ""
                                          : (", catBackend=" + catBackendOverride))
+          << ((catBackendSmallMapsOverride == 0 ||
+               catBackendSmallMapsOverride == 1)
+                  ? (", catBackendSmallMaps=" +
+                     std::to_string(catBackendSmallMapsOverride))
+                  : "")
+          << ((*solver == "CBS")
+                  ? (std::string(", cbs_reasoning_profile=") +
+                     (useVanillaCbsReasoning ? "vanilla" : "lns_forced"))
+                  : "")
+          << ((*solver == "CBS")
+                  ? (std::string(", cbs_pc=") + (useCbsPc ? "1" : "0"))
+                  : "")
           << ", timeout_sec=" << effectiveSolverTimeoutSec
           << ", source=" << sourceLabel << "\n";
   }

@@ -12,6 +12,7 @@
 #include "lns_market_iteration_orchestrator.hpp"
 #include "lns_repair_engine.hpp"
 #include "utils.hpp"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -121,7 +122,16 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
 
   bool repairFailed = false;
   bool nrrRepairSucceeded = false;
+  const double regretEvalBefore = cumulativeRegretCandidateEvalSec_;
+  const double regretCommitBefore = cumulativeRegretCommitSec_;
+  const double regretLowLevelBefore = cumulativeLowLevelSearchSec_;
   RepairEngine::run(*this, repairFailed, nrrRepairSucceeded);
+  context.timeRegretCandidateEvalSec +=
+      std::max(0.0, cumulativeRegretCandidateEvalSec_ - regretEvalBefore);
+  context.timeRegretCommitSec +=
+      std::max(0.0, cumulativeRegretCommitSec_ - regretCommitBefore);
+  context.timeRegretLowLevelSec +=
+      std::max(0.0, cumulativeLowLevelSearchSec_ - regretLowLevelBefore);
 
   context.timeRepairAndCommitSec += elapsedSecSince(phaseStart);
 

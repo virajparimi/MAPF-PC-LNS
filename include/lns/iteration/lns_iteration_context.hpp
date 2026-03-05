@@ -21,6 +21,9 @@ struct IterationExecutionContext {
 
   double timeDestroyAndPrepareSec = 0.0;
   double timeRepairAndCommitSec = 0.0;
+  double timeRegretCandidateEvalSec = 0.0;
+  double timeRegretCommitSec = 0.0;
+  double timeRegretLowLevelSec = 0.0;
   double timeJoinPathsSec = 0.0;
   double timeTerminalReplanSec = 0.0;
   double timeRecomputeSocSec = 0.0;

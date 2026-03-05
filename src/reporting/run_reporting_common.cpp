@@ -243,6 +243,8 @@ FeasibleTrajectoryStats collectFeasibleTrajectoryStats(const LNS& lns,
         stats.improvingIterations.push_back(counter);
         stats.improvingRuntimes.push_back(iter.runtime);
         stats.improvingValues.push_back(iter.sumOfCosts);
+        stats.improvingMakespans.push_back(iter.makespan);
+        stats.improvingPrecedenceWaits.push_back(iter.precedenceWait);
       }
     }
     if (iter.quality == IterationQuality::couldNotFind) {
@@ -317,8 +319,8 @@ void printAdaptiveLNSPerformance(const LNS& lns,
             << std::setw(10) << "Accept%" << std::setw(12) << "BestUpd%"
             << std::setw(12) << "FailFind%" << std::setw(12) << "Cascade%"
             << std::setw(15) << "AvgDelta(all)" << std::setw(15)
-            << "AvgDelta(acc)" << '\n';
-  std::cout << std::string(156, '-') << '\n';
+            << "AvgDelta(acc)" << std::setw(17) << "AvgBestUpdDelta" << '\n';
+  std::cout << std::string(173, '-') << '\n';
 
   std::cout << std::fixed << std::setprecision(2);
   const double historySize =
@@ -348,6 +350,10 @@ void printAdaptiveLNSPerformance(const LNS& lns,
     const double avgDeltaSocAccepted =
         accepted > 0 ? adaptiveLNS.deltaSocAccepted[i] / (double)accepted
                      : 0.0;
+    const double avgBestUpdateDelta =
+        bestUpdates > 0
+            ? adaptiveLNS.bestUpdateDeltaSocSum[i] / (double)bestUpdates
+            : 0.0;
     std::cout << std::left << std::setw(18)
               << heuristicName((DestroyHeuristic)i) << std::right
               << std::setw(9) << (share * 100.0) << std::setw(10) << selected
@@ -358,7 +364,8 @@ void printAdaptiveLNSPerformance(const LNS& lns,
               << (bestRate * 100.0) << std::setw(12)
               << (couldNotFindRate * 100.0) << std::setw(12)
               << (cascadeAbortRate * 100.0) << std::setw(15) << avgDeltaSocAll
-              << std::setw(15) << avgDeltaSocAccepted << '\n';
+              << std::setw(15) << avgDeltaSocAccepted << std::setw(17)
+              << avgBestUpdateDelta << '\n';
   }
   std::cout.flags(oldFlags);
   std::cout.precision(oldPrecision);
@@ -372,4 +379,7 @@ void printFeasibleTrajectoryReport(const FeasibleTrajectoryStats& stats) {
   printIntListLine("Improving iterations", stats.improvingIterations);
   printDoubleListLine("Improving runtimes (s)", stats.improvingRuntimes);
   printIntListLine("Improving solution costs", stats.improvingValues);
+  printIntListLine("Improving makespans", stats.improvingMakespans);
+  printDoubleListLine("Improving precedence waits",
+                      stats.improvingPrecedenceWaits);
 }

@@ -91,6 +91,11 @@ class LNS {
   uint64_t computeNeighborhoodFingerprint(
       const ConflictMap& removedTasks) const;
   string iterationQualityName(IterationQuality quality) const;
+  int computeObjectiveValue(const Solution& solution) const;
+  int computeObjectiveValue(const FeasibleSolution& solution) const;
+  int currentObjectiveValue() const;
+  int previousObjectiveValue() const;
+  int incumbentObjectiveValueOrMax() const;
   bool writeIterationDebugTsv(const string& outputPath) const;
   bool parseMAPFPCStreamIntoSolution(std::istream& inputStream,
                                      const string& sourceLabel);
@@ -109,7 +114,8 @@ class LNS {
                              const string& initialPathsFilePath = "",
                              const string& mutableTasksFilePath = "",
                              const string& lowLevelPlannerOverride = "",
-                             const string& catBackendOverride = "");
+                             const string& catBackendOverride = "",
+                             int catBackendSmallMapsOverride = -1);
   bool runMAPFPCOnAssignments(const vector<vector<int>>& assignments,
                               const string& solverVariant,
                               int solverTimeoutSec,
@@ -314,6 +320,82 @@ class LNS {
   const string& getInitialSolutionFallbackReason() const {
     return initialSolutionFallbackReason_;
   }
+  const string& getInitialSeedFromMapfpcLog() const {
+    return initialSeedFromMapfpcLog_;
+  }
+  bool hasInitialAssignmentSnapshot() const {
+    return initialAssignmentSnapshotAvailable_;
+  }
+  const vector<vector<int>>& getInitialAssignmentsByAgent() const {
+    return initialAssignmentsByAgent_;
+  }
+  const vector<int>& getInitialTaskOwnerByTask() const {
+    return initialTaskOwnerByTask_;
+  }
+  const vector<int>& getInitialTaskPosByTask() const {
+    return initialTaskPosByTask_;
+  }
+  bool hasInitialMetrics() const {
+    return initialMetricsAvailable_;
+  }
+  int getInitialObjectiveValue() const {
+    return initialObjectiveValue_;
+  }
+  int getInitialSoc() const {
+    return initialSoc_;
+  }
+  int getInitialMakespan() const {
+    return initialMakespan_;
+  }
+  double getInitialPrecedenceWait() const {
+    return initialPrecedenceWait_;
+  }
+  double getInitialSolutionRuntimeSec() const {
+    return initialSolutionRuntime_;
+  }
+  double getInitialSolutionRuntimeReportedSec() const {
+    return initialSolutionRuntimeReported_;
+  }
+  double getInitialSeedRuntimeFromLogSec() const {
+    return initialSeedRuntimeFromLogSec_;
+  }
+  double getLnsLoopRuntimeSec() const {
+    return lnsLoopRuntimeSec_;
+  }
+  double getPostRefineRuntimeSec() const {
+    return postRefineRuntimeSec_;
+  }
+  bool isPostRefineEnabled() const {
+    return postRefineWithMapfpc_;
+  }
+  bool wasPostRefineAttempted() const {
+    return postRefineAttempted_;
+  }
+  bool wasPostRefineAccepted() const {
+    return postRefineAccepted_;
+  }
+  const string& getPostRefineAssignmentSource() const {
+    return postRefineAssignmentSource_;
+  }
+  const string& getPostRefineAssignmentLog() const {
+    return postRefineAssignmentLog_;
+  }
+  const string& getPostRefineSolver() const {
+    return postRefineSolver_;
+  }
+  int getPostRefineTimeoutSec() const {
+    return postRefineTimeoutSec_;
+  }
+  bool isPostRefineAcceptOnlyIfBetter() const {
+    return postRefineAcceptOnlyIfBetter_;
+  }
+  const string& getOptimizationObjective() const {
+    return optimizationObjective_;
+  }
+  int evaluateObjective(const FeasibleSolution& solution) const {
+    return computeObjectiveValue(solution);
+  }
+  unsigned int getSeed() const { return seed_; }
   const ALNS& getAdaptiveLNSRef() const { return adaptiveLNS_; }
   ALNS getAdaptiveLNS() const { return adaptiveLNS_; }
   bool lastPrepareAbortedByCascade() const {
@@ -378,6 +460,7 @@ class LNS {
                : "descendants+agent";
   }
   const NrrStats& getNrrStats() const { return nrrStats_; }
+  bool isNrrGlobalReassignEnabled() const { return nrrGlobalReassign_; }
 
   bool extractFeasibleSolution();
   const FeasibleSolution& getFeasibleSolution() const {

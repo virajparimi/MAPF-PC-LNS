@@ -229,6 +229,7 @@ void AcceptanceOrchestrator::updateAlnsStats(
   }
   if (feasibleSolutionUpdated) {
     lns.adaptiveLNS_.bestUpdates[alnsHeuristicForIter]++;
+    lns.adaptiveLNS_.bestUpdateDeltaSocSum[alnsHeuristicForIter] += deltaSoc;
   }
 }
 
@@ -368,6 +369,10 @@ void AcceptanceOrchestrator::applyOutcome(
     quality = IterationQuality::improvedSolution;
   }
   lns.previousSolution_ = lns.solution_;
+  if (lns.softPersistentConflictGraph_) {
+    lns.persistentConflictPairs_ = lns.lastValidationCollisionPairs_;
+    lns.persistentConflictAgents_ = lns.lastValidationConflictAgents_;
+  }
   currentSolutionValid = candidateValid;
   currentValidationStats = candidateValidationStats;
   MarketIterationOrchestrator::updateBestOnAccepted(

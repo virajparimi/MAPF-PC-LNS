@@ -16,7 +16,8 @@ bool IterationOutcomeOrchestrator::finalizeCouldNotFindAbort(
   lns.runtime = ((fsec)(Time::now() - lns.plannerStartTime_)).count();
   lns.appendIterationStatBounded(IterationStats(
       lns.runtime, "LNS", lns.instance_.getAgentNum(), lns.instance_.getTasksNum(),
-      lns.solution_.sumOfCosts, context.feasibleSolutionUpdated, context.quality));
+      lns.currentObjectiveValue(), context.feasibleSolutionUpdated,
+      context.quality));
   context.timeBookkeepingSec += ((fsec)(Time::now() - bookkeepingStart)).count();
   if (lns.forceNeighborhoodChangeOnReject_) {
     potentialNeighborhood.clear();

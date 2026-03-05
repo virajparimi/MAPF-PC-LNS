@@ -104,7 +104,9 @@ struct IncrementalRegretStats {
 };
 
 struct NrrStats {
+  int64_t calls = 0;
   int64_t attempts = 0;
+  int64_t miniSolverCalls = 0;
   int64_t success = 0;
   int64_t fallbackToStandard = 0;
   std::map<std::string, int64_t> failureReasonHistogram;
@@ -116,12 +118,30 @@ struct NrrStats {
   int64_t solverPbs = 0;
   int64_t solverCbs = 0;
   double runtimeSecSum = 0.0;
+  double timeSetupSecSum = 0.0;
+  double timeBoundaryWindowsSecSum = 0.0;
+  double timeProposalBuildSecSum = 0.0;
+  double timeTemporalPrecheckSecSum = 0.0;
+  double timeInputBuildSecSum = 0.0;
+  double timeMiniSolverSecSum = 0.0;
+  double timeStitchSecSum = 0.0;
+  double timeTaskMapRebuildSecSum = 0.0;
+  double timeTerminalReplanSecSum = 0.0;
+  double timeRecomputeObjectiveSecSum = 0.0;
+  double timeValidationSecSum = 0.0;
   int64_t removedTasksSum = 0;
   int64_t removedTasksMax = 0;
   int64_t neighborhoodAgentsSum = 0;
   int64_t neighborhoodAgentsMax = 0;
+  int64_t globalTouchedAgentsSum = 0;
+  int64_t globalTouchedAgentsMax = 0;
+  int64_t globalDemotionsCount = 0;
+  int64_t globalPatchedTasksSum = 0;
+  int64_t globalSlotEvalCount = 0;
+  int64_t globalNoFeasibleSlotCount = 0;
   std::map<int, int64_t> removedTasksHistogram;
   std::map<int, int64_t> neighborhoodAgentsHistogram;
+  std::map<int, int64_t> globalTouchedAgentsHistogram;
   double acceptedDeltaSocSum = 0.0;
   int64_t acceptedDeltaSocCount = 0;
   int64_t softCandidatesProduced = 0;
@@ -268,12 +288,19 @@ struct ImprovementDiagnosticsStats {
 
   double timeDestroyAndPrepareSec = 0.0;
   double timeRepairAndCommitSec = 0.0;
+  double timeRegretCandidateEvalSec = 0.0;
+  double timeRegretCommitSec = 0.0;
+  double timeRegretLowLevelSec = 0.0;
   double timeJoinPathsSec = 0.0;
   double timeTerminalReplanSec = 0.0;
   double timeRecomputeSocSec = 0.0;
   double timeValidationSec = 0.0;
   double timeAcceptanceSec = 0.0;
   double timeBookkeepingSec = 0.0;
+  double timeInitialSolutionSec = 0.0;
+  double timeInitialSolutionReportedSec = 0.0;
+  double timeLnsLoopSec = 0.0;
+  double timePostRefineSec = 0.0;
 
   void reset() { *this = ImprovementDiagnosticsStats(); }
 };
@@ -315,6 +342,9 @@ struct IterationDebugRecord {
   std::string quality;
   double timeDestroyAndPrepareSec = 0.0;
   double timeRepairAndCommitSec = 0.0;
+  double timeRegretCandidateEvalSec = 0.0;
+  double timeRegretCommitSec = 0.0;
+  double timeRegretLowLevelSec = 0.0;
   double timeJoinPathsSec = 0.0;
   double timeTerminalReplanSec = 0.0;
   double timeRecomputeSocSec = 0.0;

@@ -24,6 +24,9 @@ RepairPlan RepairEngine::buildPlan(bool enableNrrRepair,
 }
 
 bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
+  auto elapsedSecSince = [](const Time::time_point& startTimePoint) -> double {
+    return ((fsec)(Time::now() - startTimePoint)).count();
+  };
   lns.lnsNeighborhood_.regretMaxHeap.clear();
   std::fill(lns.regretBestOption_.begin(), lns.regretBestOption_.end(),
             std::make_pair(UNASSIGNED, -1));
@@ -118,7 +121,9 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
         repairFailed = true;
         break;
       }
+      const Time::time_point evalStart = Time::now();
       bool enoughSpace = lns.computeRegret();
+      lns.cumulativeRegretCandidateEvalSec_ += elapsedSecSince(evalStart);
       if (!enoughSpace) {
         repairFailed = true;
         break;
@@ -130,22 +135,30 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
       }
       assert(!lns.lnsNeighborhood_.regretMaxHeap.empty());
       Regret bestRegret = lns.lnsNeighborhood_.regretMaxHeap.top();
+      const Time::time_point commitStart = Time::now();
       if (!lns.commitBestRegretTask(bestRegret)) {
+        lns.cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
         PLOGE << "run: failed to commit best-regret task " << bestRegret.task
               << "\n";
         repairFailed = true;
         break;
       }
+      lns.cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
     }
     return !repairFailed;
   }
 
   lns.incrementalRegretStatsCurrent_.reset();
+  const Time::time_point initialRecomputeStart = Time::now();
   if (lns.runtimeBudgetExhausted() ||
       !lns.recomputeRegretsForTasks(lns.collectRemainingRemovedTasks())) {
+    lns.cumulativeRegretCandidateEvalSec_ +=
+        elapsedSecSince(initialRecomputeStart);
     repairFailed = true;
     return false;
   }
+  lns.cumulativeRegretCandidateEvalSec_ +=
+      elapsedSecSince(initialRecomputeStart);
 
   int64_t stalePopsAtLastCheck = lns.incrementalRegretStatsCurrent_.stalePops;
   int64_t stalePopsSinceRefresh = 0;
@@ -168,10 +181,15 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
       lns.incrementalRegretStatsCurrent_.refreshByPeriodic++;
       lns.incrementalRegretStatsTotal_.refreshByPeriodic++;
     }
+    const Time::time_point refreshRecomputeStart = Time::now();
     if (!lns.recomputeRegretsForTasks(lns.collectRemainingRemovedTasks())) {
+      lns.cumulativeRegretCandidateEvalSec_ +=
+          elapsedSecSince(refreshRecomputeStart);
       repairFailed = true;
       return;
     }
+    lns.cumulativeRegretCandidateEvalSec_ +=
+        elapsedSecSince(refreshRecomputeStart);
     stalePopsAtLastCheck = lns.incrementalRegretStatsCurrent_.stalePops;
     stalePopsSinceRefresh = 0;
     commitsSinceRefresh = 0;
@@ -223,9 +241,12 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
     if (!bestRegret.has_value()) {
       lns.incrementalRegretStatsCurrent_.heapRebuilds++;
       lns.incrementalRegretStatsTotal_.heapRebuilds++;
+      const Time::time_point rebuildStart = Time::now();
       if (!lns.recomputeRegretsForTasks(lns.collectRemainingRemovedTasks())) {
+        lns.cumulativeRegretCandidateEvalSec_ += elapsedSecSince(rebuildStart);
         repairFailed = true;
       } else {
+        lns.cumulativeRegretCandidateEvalSec_ += elapsedSecSince(rebuildStart);
         stalePopsAtLastCheck = lns.incrementalRegretStatsCurrent_.stalePops;
         stalePopsSinceRefresh = 0;
         commitsSinceRefresh = 0;
@@ -235,15 +256,18 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
       continue;
     }
 
+    const Time::time_point commitStart = Time::now();
     const vector<int> endTimesBefore = lns.computeCurrentTaskEndTimes();
     const vector<uint64_t> agentSignaturesBefore =
         lns.computeCurrentAgentScheduleSignatures();
     if (!lns.commitBestRegretTask(*bestRegret)) {
+      lns.cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
       PLOGE << "run: failed to commit best-regret task " << bestRegret->task
             << "\n";
       repairFailed = true;
       break;
     }
+    lns.cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
     lns.incrementalRegretStatsCurrent_.commits++;
     lns.incrementalRegretStatsTotal_.commits++;
     commitsSinceRefresh++;
@@ -264,8 +288,14 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
       tasksToRecompute = lns.collectRemainingRemovedTasks();
       endgameFullRefreshDone = true;
     }
+    const Time::time_point localRecomputeStart = Time::now();
     if (!lns.recomputeRegretsForTasks(tasksToRecompute)) {
+      lns.cumulativeRegretCandidateEvalSec_ +=
+          elapsedSecSince(localRecomputeStart);
       repairFailed = true;
+    } else {
+      lns.cumulativeRegretCandidateEvalSec_ +=
+          elapsedSecSince(localRecomputeStart);
     }
   }
   return !repairFailed;
