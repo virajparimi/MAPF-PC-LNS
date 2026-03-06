@@ -27,6 +27,16 @@ std::variant<bool, Utility> LNS::insertTask(
   int startTime = 0, previousTask = UNDEFINED, nextTask = UNDEFINED;
   int insertedTaskPosition = UNASSIGNED;
   const int taskCount = instance_.getTasksNum();
+  if (regretPacket.task < 0 || regretPacket.task >= taskCount) {
+    PLOGE << "insertTask: invalid task id " << regretPacket.task
+          << " (task_count=" << taskCount << ")\n";
+    return false;
+  }
+  if (regretPacket.agent < 0 || regretPacket.agent >= workspace.numAgents()) {
+    PLOGE << "insertTask: invalid agent id " << regretPacket.agent
+          << " (agent_count=" << workspace.numAgents() << ")\n";
+    return false;
+  }
   const AssignmentLookup previousLookup =
       buildAssignmentLookup(previousSolution_, taskCount);
   AssignmentLookup assignmentLookup = buildAssignmentLookup(workspace, taskCount);
@@ -72,6 +82,18 @@ std::variant<bool, Utility> LNS::insertTask(
       &workspace,
       rollbackAfter};
   auto recordInsertAssignment = [&](int agent, int index, int task) {
+    if (agent < 0 || agent >= workspace.numAgents()) {
+      PLOGE << "insertTask: invalid agent in assignment insert: " << agent
+            << "\n";
+      return false;
+    }
+    auto& assignments = workspace.mutableAssignments(agent);
+    if (index < 0 || index > (int)assignments.size()) {
+      PLOGE << "insertTask: assignment insert index out of range (agent="
+            << agent << ", index=" << index
+            << ", size=" << assignments.size() << ")\n";
+      return false;
+    }
     if (rollbackAfter && rollbackLog.has_value()) {
       rollbackLog->ops.push_back({InsertTaskRollbackOp::Kind::insertAssignment,
                                   agent,
@@ -79,11 +101,23 @@ std::variant<bool, Utility> LNS::insertTask(
                                   0,
                                   AgentTaskPath()});
     }
-    auto& assignments = workspace.mutableAssignments(agent);
     assignments.insert(assignments.begin() + index, task);
+    return true;
   };
   auto recordInsertTaskPath = [&](int agent, int index,
                                   const AgentTaskPath& path) {
+    if (agent < 0 || agent >= workspace.numAgents()) {
+      PLOGE << "insertTask: invalid agent in task-path insert: " << agent
+            << "\n";
+      return false;
+    }
+    auto& taskPaths = workspace.mutableTaskPaths(agent);
+    if (index < 0 || index > (int)taskPaths.size()) {
+      PLOGE << "insertTask: task-path insert index out of range (agent="
+            << agent << ", index=" << index
+            << ", size=" << taskPaths.size() << ")\n";
+      return false;
+    }
     if (rollbackAfter && rollbackLog.has_value()) {
       rollbackLog->ops.push_back({InsertTaskRollbackOp::Kind::insertTaskPath,
                                   agent,
@@ -91,11 +125,20 @@ std::variant<bool, Utility> LNS::insertTask(
                                   0,
                                   AgentTaskPath()});
     }
-    auto& taskPaths = workspace.mutableTaskPaths(agent);
     taskPaths.insert(taskPaths.begin() + index, path);
+    return true;
   };
   auto recordSetTaskPath = [&](int agent, int index, AgentTaskPath path) {
+    if (agent < 0 || agent >= workspace.numAgents()) {
+      PLOGE << "insertTask: invalid agent in task-path set: " << agent << "\n";
+      return false;
+    }
     auto& taskPaths = workspace.mutableTaskPaths(agent);
+    if (index < 0 || index >= (int)taskPaths.size()) {
+      PLOGE << "insertTask: task-path set index out of range (agent=" << agent
+            << ", index=" << index << ", size=" << taskPaths.size() << ")\n";
+      return false;
+    }
     if (rollbackAfter && rollbackLog.has_value()) {
       rollbackLog->ops.push_back({InsertTaskRollbackOp::Kind::setTaskPath,
                                   agent,
@@ -104,9 +147,20 @@ std::variant<bool, Utility> LNS::insertTask(
                                   taskPaths[index]});
     }
     taskPaths[index] = std::move(path);
+    return true;
   };
   auto recordSetTaskPathBeginTime = [&](int agent, int index, int beginTime) {
+    if (agent < 0 || agent >= workspace.numAgents()) {
+      PLOGE << "insertTask: invalid agent in begin-time set: " << agent
+            << "\n";
+      return false;
+    }
     auto& taskPaths = workspace.mutableTaskPaths(agent);
+    if (index < 0 || index >= (int)taskPaths.size()) {
+      PLOGE << "insertTask: begin-time set index out of range (agent=" << agent
+            << ", index=" << index << ", size=" << taskPaths.size() << ")\n";
+      return false;
+    }
     if (rollbackAfter && rollbackLog.has_value()) {
       rollbackLog->ops.push_back(
           {InsertTaskRollbackOp::Kind::setTaskPathBeginTime,
@@ -116,6 +170,7 @@ std::variant<bool, Utility> LNS::insertTask(
            AgentTaskPath()});
     }
     taskPaths[index].beginTime = beginTime;
+    return true;
   };
 
   auto assignmentsFor = [&](int agent) -> const vector<int>& {
@@ -139,8 +194,11 @@ std::variant<bool, Utility> LNS::insertTask(
     }
   };
   auto recordInsertAssignmentAndLookup = [&](int agent, int index, int task) {
-    recordInsertAssignment(agent, index, task);
+    if (!recordInsertAssignment(agent, index, task)) {
+      return false;
+    }
     refreshLookupForAgent(agent, index);
+    return true;
   };
   auto addPrecedenceEdgeIfMissing = [&](int pred, int succ) {
     if (activePrecedenceConstraints == nullptr ||
@@ -337,7 +395,22 @@ std::variant<bool, Utility> LNS::insertTask(
     return visited == taskCount;
   };
 
-  int agentTasksSize = (int)assignmentsFor(regretPacket.agent).size();
+  const auto& initialAssignments = assignmentsFor(regretPacket.agent);
+  const auto& initialTaskPaths = taskPathsFor(regretPacket.agent);
+  if (initialTaskPaths.size() != initialAssignments.size()) {
+    PLOGE << "insertTask: assignment/path size mismatch for agent "
+          << regretPacket.agent << " (assignments=" << initialAssignments.size()
+          << ", paths=" << initialTaskPaths.size() << ")\n";
+    return false;
+  }
+  int agentTasksSize = (int)initialAssignments.size();
+  if (regretPacket.taskPosition < 0 ||
+      regretPacket.taskPosition > agentTasksSize) {
+    PLOGE << "insertTask: invalid task position " << regretPacket.taskPosition
+          << " for agent " << regretPacket.agent
+          << " with queue size " << agentTasksSize << "\n";
+    return false;
+  }
   double value = std::numeric_limits<double>::infinity();
 
   // In this case we are inserting a task not at the last position
@@ -349,13 +422,20 @@ std::variant<bool, Utility> LNS::insertTask(
         (double)taskPathsFor(regretPacket.agent)[regretPacket.taskPosition]
             .size();
 
-    recordSetTaskPath(regretPacket.agent, regretPacket.taskPosition,
-                      AgentTaskPath());
+    if (!recordSetTaskPath(regretPacket.agent, regretPacket.taskPosition,
+                           AgentTaskPath())) {
+      return false;
+    }
 
-    recordInsertAssignmentAndLookup(regretPacket.agent, regretPacket.taskPosition,
-                                    regretPacket.task);
-    recordInsertTaskPath(regretPacket.agent, regretPacket.taskPosition,
-                         AgentTaskPath());
+    if (!recordInsertAssignmentAndLookup(regretPacket.agent,
+                                         regretPacket.taskPosition,
+                                         regretPacket.task)) {
+      return false;
+    }
+    if (!recordInsertTaskPath(regretPacket.agent, regretPacket.taskPosition,
+                              AgentTaskPath())) {
+      return false;
+    }
 
     // If we are NOT inserting at the start position then we need to take care of the previous task as well
     if (regretPacket.taskPosition != 0) {
@@ -378,20 +458,29 @@ std::variant<bool, Utility> LNS::insertTask(
         taskPathsFor(regretPacket.agent)[regretPacket.taskPosition - 1]
             .endTime();
 
-    recordInsertAssignmentAndLookup(
-        regretPacket.agent,
-        (int)assignmentsFor(regretPacket.agent).size(),
-        regretPacket.task);
-    recordInsertTaskPath(regretPacket.agent,
-                         (int)taskPathsFor(regretPacket.agent).size(),
-                         AgentTaskPath());
+    if (!recordInsertAssignmentAndLookup(
+            regretPacket.agent,
+            (int)assignmentsFor(regretPacket.agent).size(),
+            regretPacket.task)) {
+      return false;
+    }
+    if (!recordInsertTaskPath(regretPacket.agent,
+                              (int)taskPathsFor(regretPacket.agent).size(),
+                              AgentTaskPath())) {
+      return false;
+    }
   } else if (agentTasksSize == 0) {
     // This is the rare-case when the agent has no tasks assigned to it.
     assert(regretPacket.taskPosition == 0);
 
     startTime = 0;
-    recordInsertAssignmentAndLookup(regretPacket.agent, 0, regretPacket.task);
-    recordInsertTaskPath(regretPacket.agent, 0, AgentTaskPath());
+    if (!recordInsertAssignmentAndLookup(regretPacket.agent, 0,
+                                         regretPacket.task)) {
+      return false;
+    }
+    if (!recordInsertTaskPath(regretPacket.agent, 0, AgentTaskPath())) {
+      return false;
+    }
   }
 
   // Keep eval-time precedence graph consistent with commit-time rewiring.
@@ -522,13 +611,19 @@ std::variant<bool, Utility> LNS::insertTask(
                   << nextTaskAncestorAgent << "\n";
             return false;
           }
-          recordInsertAssignmentAndLookup(nextTaskAncestorAgent,
-                                          ancestorTaskLocalIndexRelativeToSolution,
-                                          nextTaskAncestor);
-          recordInsertTaskPath(nextTaskAncestorAgent,
-                               ancestorTaskLocalIndexRelativeToSolution,
-                               previousSolution_.agents[nextTaskAncestorAgent]
-                                   .taskPaths[ancestorTaskLocalIndex]);
+          if (!recordInsertAssignmentAndLookup(
+                  nextTaskAncestorAgent,
+                  ancestorTaskLocalIndexRelativeToSolution,
+                  nextTaskAncestor)) {
+            return false;
+          }
+          if (!recordInsertTaskPath(
+                  nextTaskAncestorAgent,
+                  ancestorTaskLocalIndexRelativeToSolution,
+                  previousSolution_.agents[nextTaskAncestorAgent]
+                      .taskPaths[ancestorTaskLocalIndex])) {
+            return false;
+          }
           injectedPendingAncestor = true;
           if (nextTaskAncestorAgent >= 0 &&
               nextTaskAncestorAgent < instance_.getAgentNum()) {
@@ -568,11 +663,15 @@ std::variant<bool, Utility> LNS::insertTask(
           return false;
         }
         if (localTask > 0) {
-          recordSetTaskPathBeginTime(
-              agent, localTask,
-              taskPathsFor(agent)[localTask - 1].endTime());
+          if (!recordSetTaskPathBeginTime(
+                  agent, localTask,
+                  taskPathsFor(agent)[localTask - 1].endTime())) {
+            return false;
+          }
         } else {
-          recordSetTaskPathBeginTime(agent, localTask, 0);
+          if (!recordSetTaskPathBeginTime(agent, localTask, 0)) {
+            return false;
+          }
         }
 
         const bool touchesRegretTask =
@@ -587,12 +686,20 @@ std::variant<bool, Utility> LNS::insertTask(
           continue;
         }
 
-        if ((localTask == 0 &&
-             taskPathsFor(agent)[localTask].front().location !=
-                 instance_.getStartLocationsRef()[agent]) ||
-            (localTask > 0 &&
-             taskPathsFor(agent)[localTask - 1].path.back().location !=
-                 taskPathsFor(agent)[localTask].path.front().location)) {
+        const auto& curTaskPath = taskPathsFor(agent)[localTask];
+        const bool brokenStart =
+            (localTask == 0 &&
+             (curTaskPath.empty() ||
+              curTaskPath.front().location !=
+                  instance_.getStartLocationsRef()[agent]));
+        bool brokenLink = false;
+        if (localTask > 0) {
+          const auto& prevTaskPath = taskPathsFor(agent)[localTask - 1];
+          brokenLink = prevTaskPath.empty() || curTaskPath.empty() ||
+                       prevTaskPath.path.back().location !=
+                           curTaskPath.path.front().location;
+        }
+        if (brokenStart || brokenLink) {
 
           if (localTask < 0 || localTask >= (int)goalLocations.size()) {
             PLOGE << "insertTask: invalid local task position " << localTask
@@ -628,7 +735,9 @@ std::variant<bool, Utility> LNS::insertTask(
             return false;
           }
           assert(!path.empty());
-          recordSetTaskPath(agent, localTask, std::move(path));
+          if (!recordSetTaskPath(agent, localTask, std::move(path))) {
+            return false;
+          }
         }
       }
     }
@@ -687,7 +796,9 @@ std::variant<bool, Utility> LNS::insertTask(
       return false;
     }
     const auto pathSize = path.size();
-    recordSetTaskPath(regretPacket.agent, taskPosition, std::move(path));
+    if (!recordSetTaskPath(regretPacket.agent, taskPosition, std::move(path))) {
+      return false;
+    }
     value = pathSize;
     startTime = taskPathsFor(regretPacket.agent)[taskPosition].endTime();
 
@@ -753,7 +864,10 @@ std::variant<bool, Utility> LNS::insertTask(
       return false;
     }
     const auto nextPathSize = nextPath.size();
-    recordSetTaskPath(regretPacket.agent, nextTaskPosition, std::move(nextPath));
+    if (!recordSetTaskPath(regretPacket.agent, nextTaskPosition,
+                           std::move(nextPath))) {
+      return false;
+    }
     value += nextPathSize;
   } else {
     if (!isAcyclicAfterLocalInsertion(assignmentLookup, regretPacket.task,
@@ -788,8 +902,10 @@ std::variant<bool, Utility> LNS::insertTask(
       return false;
     }
     const auto pathSize = path.size();
-    recordSetTaskPath(regretPacket.agent, regretPacket.taskPosition,
-                      std::move(path));
+    if (!recordSetTaskPath(regretPacket.agent, regretPacket.taskPosition,
+                           std::move(path))) {
+      return false;
+    }
     insertedTaskPosition = regretPacket.taskPosition;
     value = pathSize;
   }

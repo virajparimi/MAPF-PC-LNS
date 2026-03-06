@@ -9,12 +9,28 @@
 #include "common.hpp"
 #include "constrainttable.hpp"
 
+// Forward-declare so it can be used as the heap element type before the full
+// class definition.
+class MultiLabelAStarNode;
+
+// d_ary_heap (array-backed) is used instead of pairing_heap to avoid the
+// O(n) recursive merge_first_pair in pairing_heap::pop(), which overflows the
+// stack for large search frontiers.
+using MlAStarOpenHeap =
+    boost::heap::d_ary_heap<MultiLabelAStarNode*,
+                            boost::heap::arity<4>,
+                            boost::heap::compare<LLNode::OpenCompareNode>,
+                            boost::heap::mutable_<true>>;
+using MlAStarFocalHeap =
+    boost::heap::d_ary_heap<MultiLabelAStarNode*,
+                            boost::heap::arity<4>,
+                            boost::heap::compare<LLNode::FocalCompareNode>,
+                            boost::heap::mutable_<true>>;
+
 class MultiLabelAStarNode : public LLNode {
  public:
-  pairing_heap<MultiLabelAStarNode*,
-               compare<LLNode::OpenCompareNode>>::handle_type openHandle;
-  pairing_heap<MultiLabelAStarNode*,
-               compare<LLNode::FocalCompareNode>>::handle_type focalHandle;
+  MlAStarOpenHeap::handle_type openHandle;
+  MlAStarFocalHeap::handle_type focalHandle;
   bool inFocal = false;
   int indexedFVal = std::numeric_limits<int>::min();
 
@@ -112,12 +128,8 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
 
   int agent_ = UNASSIGNED;
   bool incrementalFocalRefresh_ = false;
-  pairing_heap<MultiLabelAStarNode*,
-               compare<MultiLabelAStarNode::OpenCompareNode>>
-      openList_;
-  pairing_heap<MultiLabelAStarNode*,
-               compare<MultiLabelAStarNode::FocalCompareNode>>
-      focalList_;
+  MlAStarOpenHeap openList_;
+  MlAStarFocalHeap focalList_;
   // Optional f-value buckets for incremental focal refresh. Stale entries are
   // tolerated and filtered lazily on promotion.
   std::map<int, std::vector<MultiLabelAStarNode*>> openByF_;

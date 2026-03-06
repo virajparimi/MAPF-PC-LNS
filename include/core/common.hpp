@@ -1,5 +1,11 @@
 #pragma once
 #include <algorithm>
+// Work around a GCC 13 ICE triggered by boost::heap concept-check
+// instantiation when d_ary_heap<mutable_<true>> is used.
+#ifndef BOOST_NO_CONCEPT_CHECKS
+#define BOOST_NO_CONCEPT_CHECKS
+#endif
+#include <boost/heap/d_ary_heap.hpp>
 #include <boost/heap/pairing_heap.hpp>
 #include <boost/unordered_map.hpp>
 #include <boost/unordered_set.hpp>

@@ -4,15 +4,10 @@
 #include "common.hpp"
 
 void MultiLabelSpaceTimeAStar::releaseNodes() {
-  // Boost pairing_heap::clear() recursively disposes heap-node trees.
-  // Large/deep search frontiers can overflow the stack during teardown.
-  // Drain both heaps iteratively instead.
-  while (!openList_.empty()) {
-    openList_.pop();
-  }
-  while (!focalList_.empty()) {
-    focalList_.pop();
-  }
+  // d_ary_heap uses an array-backed structure; pop() and clear() are both
+  // iterative (no recursion), so large frontiers do not overflow the stack.
+  openList_.clear();
+  focalList_.clear();
   openByF_.clear();
   allNodesTable_.clear();
   // Release retained bucket capacity from boost::unordered_set to avoid
