@@ -15,6 +15,116 @@
 #include "run_reporting.hpp"
 #include "utils.hpp"
 
+namespace {
+struct CoreParameterInputs {
+  int neighborhoodSize = 0;
+  double timeLimit = 0.0;
+  double lnsConflictWeight = 0.0;
+  double lnsCostWeight = 0.0;
+  string initialSolutionStrategy;
+  double initialPortfolioTimeFraction = 0.0;
+  bool adaptiveInitialPortfolioBudget = false;
+  string initialSeedFromMapfpcLog;
+  bool postRefineWithMapfpc = false;
+  string postRefineAssignmentSource;
+  string postRefineAssignmentLog;
+  string postRefineSolver;
+  int postRefineTimeoutSec = 0;
+  bool postRefineAcceptOnlyIfBetter = false;
+  bool debugImprovementDiagnostics = false;
+  string debugIterationTsvPath;
+  string goalOccupationMode;
+  string destroyHeuristic;
+  string acceptanceCriteria;
+  string optimizationObjective;
+  bool acceptOnlyValidCandidates = false;
+  string repairHeuristic;
+  bool enableNrrRepair = false;
+  bool nrrFallbackToStandard = false;
+  bool nrrGlobalReassign = false;
+  bool forceNeighborhoodChangeOnReject = false;
+  string nrrMiniSolver;
+  string nrrCatBackend;
+  string repairMapfpcSolver;
+  int repairMapfpcTimeoutSec = 0;
+  string regretType;
+  bool incrementalRegret = false;
+  int regretCandidateTopK = 0;
+  bool regretShortlistDiagnostics = false;
+  double maxCascadeFactor = 0.0;
+  int maxCascadeTasks = 0;
+  bool adaptiveCascadeBudget = false;
+  bool alnsEnablePrecedenceAwareDestroy = false;
+  bool softRecoveryDestroyMode = false;
+  bool softPersistentConflictGraph = false;
+  string incrementalRegretMode;
+  unsigned int seed = 0;
+};
+
+LNSParams buildLnsParams(const CoreParameterInputs& coreInputs,
+                         const LNSParams::LowLevel& lowLevelInputs,
+                         const LNSParams::Market& marketInputs) {
+  LNSParams parameters{};
+  parameters.core.neighborhoodSize = coreInputs.neighborhoodSize;
+  parameters.core.timeLimit = coreInputs.timeLimit;
+  parameters.core.lnsConflictWeight = coreInputs.lnsConflictWeight;
+  parameters.core.lnsCostWeight = coreInputs.lnsCostWeight;
+  parameters.core.initialSolutionStrategy = coreInputs.initialSolutionStrategy;
+  parameters.core.initialPortfolioTimeFraction =
+      coreInputs.initialPortfolioTimeFraction;
+  parameters.core.adaptiveInitialPortfolioBudget =
+      coreInputs.adaptiveInitialPortfolioBudget;
+  parameters.core.initialSeedFromMapfpcLog =
+      coreInputs.initialSeedFromMapfpcLog;
+  parameters.core.postRefineWithMapfpc = coreInputs.postRefineWithMapfpc;
+  parameters.core.postRefineAssignmentSource =
+      coreInputs.postRefineAssignmentSource;
+  parameters.core.postRefineAssignmentLog = coreInputs.postRefineAssignmentLog;
+  parameters.core.postRefineSolver = coreInputs.postRefineSolver;
+  parameters.core.postRefineTimeoutSec = coreInputs.postRefineTimeoutSec;
+  parameters.core.postRefineAcceptOnlyIfBetter =
+      coreInputs.postRefineAcceptOnlyIfBetter;
+  parameters.core.debugImprovementDiagnostics =
+      coreInputs.debugImprovementDiagnostics;
+  parameters.core.debugIterationTsvPath = coreInputs.debugIterationTsvPath;
+  parameters.core.goalOccupationMode = coreInputs.goalOccupationMode;
+  parameters.core.destroyHeuristic = coreInputs.destroyHeuristic;
+  parameters.core.acceptanceCriteria = coreInputs.acceptanceCriteria;
+  parameters.core.optimizationObjective = coreInputs.optimizationObjective;
+  parameters.core.acceptOnlyValidCandidates =
+      coreInputs.acceptOnlyValidCandidates;
+  parameters.core.repairHeuristic = coreInputs.repairHeuristic;
+  parameters.core.enableNrrRepair = coreInputs.enableNrrRepair;
+  parameters.core.nrrFallbackToStandard = coreInputs.nrrFallbackToStandard;
+  parameters.core.nrrGlobalReassign = coreInputs.nrrGlobalReassign;
+  parameters.core.forceNeighborhoodChangeOnReject =
+      coreInputs.forceNeighborhoodChangeOnReject;
+  parameters.core.nrrMiniSolver = coreInputs.nrrMiniSolver;
+  parameters.core.nrrCatBackend = coreInputs.nrrCatBackend;
+  parameters.core.repairMapfpcSolver = coreInputs.repairMapfpcSolver;
+  parameters.core.repairMapfpcTimeoutSec = coreInputs.repairMapfpcTimeoutSec;
+  parameters.core.regretType = coreInputs.regretType;
+  parameters.core.incrementalRegret = coreInputs.incrementalRegret;
+  parameters.core.regretCandidateTopK = coreInputs.regretCandidateTopK;
+  parameters.core.regretShortlistDiagnostics =
+      coreInputs.regretShortlistDiagnostics;
+  parameters.core.maxCascadeFactor = coreInputs.maxCascadeFactor;
+  parameters.core.maxCascadeTasks = coreInputs.maxCascadeTasks;
+  parameters.core.adaptiveCascadeBudget = coreInputs.adaptiveCascadeBudget;
+  parameters.core.alnsEnablePrecedenceAwareDestroy =
+      coreInputs.alnsEnablePrecedenceAwareDestroy;
+  parameters.core.softRecoveryDestroyMode =
+      coreInputs.softRecoveryDestroyMode;
+  parameters.core.softPersistentConflictGraph =
+      coreInputs.softPersistentConflictGraph;
+  parameters.core.incrementalRegretMode = coreInputs.incrementalRegretMode;
+  parameters.core.seed = coreInputs.seed;
+  parameters.lowLevel = lowLevelInputs;
+  parameters.market = marketInputs;
+  return parameters;
+}
+}  // namespace
+
 int main(int argc, char** argv) {
 
   static plog::ColorConsoleAppender<plog::TxtFormatter> consoleAppender;
@@ -858,62 +968,61 @@ int main(int argc, char** argv) {
           << instance.getInputPrecedenceConstraintsRef().size() << ")\n";
   }
 
-  LNSParams parameters{};
-  parameters.core.neighborhoodSize = effectiveNeighborSize;
-  parameters.core.timeLimit = cutoffTime;
-  parameters.core.lnsConflictWeight = lnsConflictWeight;
-  parameters.core.lnsCostWeight = lnsCostWeight;
-  parameters.core.initialSolutionStrategy = initialSolutionStrategy;
-  parameters.core.initialPortfolioTimeFraction =
-      initialPortfolioTimeFraction;
-  parameters.core.adaptiveInitialPortfolioBudget =
-      adaptiveInitialPortfolioBudget;
-  parameters.core.initialSeedFromMapfpcLog = initialSeedFromMapfpcLog;
-  parameters.core.postRefineWithMapfpc = postRefineWithMapfpc;
-  parameters.core.postRefineAssignmentSource = postRefineAssignmentSource;
-  parameters.core.postRefineAssignmentLog = postRefineAssignmentLog;
-  parameters.core.postRefineSolver = postRefineSolver;
-  parameters.core.postRefineTimeoutSec = postRefineTimeoutSec;
-  parameters.core.postRefineAcceptOnlyIfBetter =
-      postRefineAcceptOnlyIfBetter;
-  parameters.core.debugImprovementDiagnostics = debugImprovementDiagnostics;
-  parameters.core.debugIterationTsvPath = debugIterationTsvPath;
-  parameters.core.goalOccupationMode = goalOccupationMode;
-  parameters.core.destroyHeuristic = destroyHeuristic;
-  parameters.core.acceptanceCriteria = acceptanceCriteria;
-  parameters.core.optimizationObjective = optimizationObjective;
-  parameters.core.acceptOnlyValidCandidates = acceptOnlyValidCandidates;
-  parameters.core.repairHeuristic = repairHeuristic;
-  parameters.core.enableNrrRepair = enableNrrRepair;
-  parameters.core.nrrFallbackToStandard = nrrFallbackToStandard;
-  parameters.core.nrrGlobalReassign = nrrGlobalReassign;
-  parameters.core.forceNeighborhoodChangeOnReject =
+  CoreParameterInputs coreInputs{};
+  coreInputs.neighborhoodSize = effectiveNeighborSize;
+  coreInputs.timeLimit = cutoffTime;
+  coreInputs.lnsConflictWeight = lnsConflictWeight;
+  coreInputs.lnsCostWeight = lnsCostWeight;
+  coreInputs.initialSolutionStrategy = initialSolutionStrategy;
+  coreInputs.initialPortfolioTimeFraction = initialPortfolioTimeFraction;
+  coreInputs.adaptiveInitialPortfolioBudget = adaptiveInitialPortfolioBudget;
+  coreInputs.initialSeedFromMapfpcLog = initialSeedFromMapfpcLog;
+  coreInputs.postRefineWithMapfpc = postRefineWithMapfpc;
+  coreInputs.postRefineAssignmentSource = postRefineAssignmentSource;
+  coreInputs.postRefineAssignmentLog = postRefineAssignmentLog;
+  coreInputs.postRefineSolver = postRefineSolver;
+  coreInputs.postRefineTimeoutSec = postRefineTimeoutSec;
+  coreInputs.postRefineAcceptOnlyIfBetter = postRefineAcceptOnlyIfBetter;
+  coreInputs.debugImprovementDiagnostics = debugImprovementDiagnostics;
+  coreInputs.debugIterationTsvPath = debugIterationTsvPath;
+  coreInputs.goalOccupationMode = goalOccupationMode;
+  coreInputs.destroyHeuristic = destroyHeuristic;
+  coreInputs.acceptanceCriteria = acceptanceCriteria;
+  coreInputs.optimizationObjective = optimizationObjective;
+  coreInputs.acceptOnlyValidCandidates = acceptOnlyValidCandidates;
+  coreInputs.repairHeuristic = repairHeuristic;
+  coreInputs.enableNrrRepair = enableNrrRepair;
+  coreInputs.nrrFallbackToStandard = nrrFallbackToStandard;
+  coreInputs.nrrGlobalReassign = nrrGlobalReassign;
+  coreInputs.forceNeighborhoodChangeOnReject =
       forceNeighborhoodChangeOnReject;
-  parameters.core.nrrMiniSolver = nrrMiniSolver;
-  parameters.core.nrrCatBackend = nrrCatBackend;
-  parameters.core.repairMapfpcSolver = repairMapfpcSolver;
-  parameters.core.repairMapfpcTimeoutSec = repairMapfpcTimeoutSec;
-  parameters.core.regretType = regretType;
-  parameters.core.incrementalRegret = incrementalRegret;
-  parameters.core.regretCandidateTopK = regretCandidateTopK;
-  parameters.core.regretShortlistDiagnostics = regretShortlistDiagnostics;
-  parameters.core.maxCascadeFactor = maxCascadeFactor;
-  parameters.core.maxCascadeTasks = maxCascadeTasks;
-  parameters.core.adaptiveCascadeBudget = adaptiveCascadeBudget;
-  parameters.core.alnsEnablePrecedenceAwareDestroy =
+  coreInputs.nrrMiniSolver = nrrMiniSolver;
+  coreInputs.nrrCatBackend = nrrCatBackend;
+  coreInputs.repairMapfpcSolver = repairMapfpcSolver;
+  coreInputs.repairMapfpcTimeoutSec = repairMapfpcTimeoutSec;
+  coreInputs.regretType = regretType;
+  coreInputs.incrementalRegret = incrementalRegret;
+  coreInputs.regretCandidateTopK = regretCandidateTopK;
+  coreInputs.regretShortlistDiagnostics = regretShortlistDiagnostics;
+  coreInputs.maxCascadeFactor = maxCascadeFactor;
+  coreInputs.maxCascadeTasks = maxCascadeTasks;
+  coreInputs.adaptiveCascadeBudget = adaptiveCascadeBudget;
+  coreInputs.alnsEnablePrecedenceAwareDestroy =
       alnsEnablePrecedenceAwareDestroy;
-  parameters.core.softRecoveryDestroyMode = softRecoveryDestroyMode;
-  parameters.core.softPersistentConflictGraph = softPersistentConflictGraph;
-  parameters.core.incrementalRegretMode = incrementalRegretMode;
-  parameters.core.seed = seed;
+  coreInputs.softRecoveryDestroyMode = softRecoveryDestroyMode;
+  coreInputs.softPersistentConflictGraph = softPersistentConflictGraph;
+  coreInputs.incrementalRegretMode = incrementalRegretMode;
+  coreInputs.seed = seed;
 
-  parameters.lowLevel.parityCheck = plannerParityCheck;
-  parameters.lowLevel.planner = lowLevelPlanner;
-  parameters.lowLevel.sippsSuboptimality = sippsSuboptimality;
-  parameters.lowLevel.segmentTimeout = lowLevelSegmentTimeout;
-  parameters.lowLevel.structuralPrePrune = lowLevelStructuralPrePrune;
+  LNSParams::LowLevel lowLevelInputs{};
+  lowLevelInputs.parityCheck = plannerParityCheck;
+  lowLevelInputs.planner = lowLevelPlanner;
+  lowLevelInputs.sippsSuboptimality = sippsSuboptimality;
+  lowLevelInputs.segmentTimeout = lowLevelSegmentTimeout;
+  lowLevelInputs.structuralPrePrune = lowLevelStructuralPrePrune;
 
-  parameters.market = marketCli;
+  LNSParams parameters =
+      buildLnsParams(coreInputs, lowLevelInputs, marketCli);
   auto lnsInstance =
       std::make_unique<LNS>(maxIterations, instance, parameters);
   bool success = lnsInstance->run();

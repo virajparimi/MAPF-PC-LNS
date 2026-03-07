@@ -1,6 +1,7 @@
 #pragma once
 
 #include <plog/Log.h>
+#include <memory>
 #include "common.hpp"
 
 class Instance {
@@ -15,7 +16,8 @@ class Instance {
   // Cache for non-task goal distance tables queried at runtime.
   // This cache is intentionally unsynchronized: Instance is used from a single
   // thread in the current LNS/CBS pipelines.
-  mutable unordered_map<int, vector<int>> extraGoalHeuristicsCache_;
+  mutable unordered_map<int, std::shared_ptr<const vector<int>>>
+      extraGoalHeuristicsCache_;
   static constexpr int kMaxExtraGoalHeuristicsCacheEntries = 2048;
   int numOfAgents_{}, numOfTasks_{};
   vector<int> endPoints_, taskLocations_, startLocations_, inputPlanningOrder_;
@@ -177,7 +179,8 @@ class Instance {
                                   const pair<int, int>& loc2) const {
     return abs(loc1.first - loc2.first) + abs(loc1.second - loc2.second);
   }
-  const vector<int>& getGoalDistanceTable(int goalLocation) const;
+  std::shared_ptr<const vector<int>> getGoalDistanceTable(
+      int goalLocation) const;
   int getDistanceToGoal(int goalLocation, int location) const;
   int getDefaultNumberOfTasks() const { return numOfTasks_; }
   int getDefaultNumberOfAgents() const { return numOfAgents_; }

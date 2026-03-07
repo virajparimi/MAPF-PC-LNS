@@ -15,6 +15,7 @@ bool LNS::parseMAPFPCStreamIntoSolution(std::istream& inputStream,
   // Reset solution state in case this is called more than once.
   Solution freshSolution(instance_);
   solution_ = freshSolution;
+  invalidateCurrentTaskAssignmentIndexCache();
   initialPaths_.resize(instance_.getTasksNum(), AgentTaskPath());
 
   bool readingTaskAssignments = false, readingTaskPaths = false;

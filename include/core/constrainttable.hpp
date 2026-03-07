@@ -12,8 +12,8 @@ class ConstraintTable {
     vector<pair<int, int>> intervals;
   };
   struct SoftTimelineBucket {
-    // Stored as per-timestep collision counts.
-    vector<int> counts;
+    // Stored sparsely as {timestep -> collision count}.
+    map<int, int> counts;
   };
 
   unordered_map<uint64_t, IntervalBucket>

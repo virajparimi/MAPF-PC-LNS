@@ -45,6 +45,7 @@ inline void resetInitialSolutionState(const Instance& instance, Solution& soluti
 bool LNS::buildInitialSolutionCore(bool enforceInterAgentTiming,
                                    const char* callerName) {
   resetInitialSolutionState(instance_, solution_);
+  invalidateCurrentTaskAssignmentIndexCache();
 
   if (!greedyTaskAssignment(&instance_, &solution_)) {
     PLOGE << "Failed to compute greedy task assignment\n";

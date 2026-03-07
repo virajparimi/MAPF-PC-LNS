@@ -23,7 +23,7 @@ class RepairEngine {
   static RepairPlan buildPlan(bool enableNrrRepair,
                               bool nrrFallbackToStandard,
                               bool incrementalRegret,
-                              const std::string& repairHeuristic);
+                              int repairHeuristicMode);
 
   static bool run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded);
 };

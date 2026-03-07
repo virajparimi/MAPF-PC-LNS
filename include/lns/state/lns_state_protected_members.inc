@@ -76,7 +76,10 @@
                      lnsConflictWeight_ = 0.75, lnsCostWeight_ = 0.25;
   Time::time_point plannerStartTime_;
   string optimizationObjective_ = "soc";
+  OptimizationObjectiveMode optimizationObjectiveMode_ =
+      OptimizationObjectiveMode::soc;
   string goalOccupationMode_ = "reposition_true";
+  GoalOccupationMode goalOccupationModeMode_ = GoalOccupationMode::reposition_true;
   mutable unordered_map<int, vector<int>> parkingCandidatesCache_;
   TerminalRepositionStats terminalRepositionStats_;
   string initialSolutionRequested_;
@@ -96,6 +99,9 @@
   double initialPortfolioTimeFraction_ = 0.10;
   bool adaptiveInitialPortfolioBudget_ = false;
   string initialSeedFromMapfpcLog_;
+  mutable vector<int> currentTaskOwnerByTaskCache_;
+  mutable vector<int> currentTaskPosByTaskCache_;
+  mutable bool currentTaskAssignmentIndexCacheValid_ = false;
   bool postRefineWithMapfpc_ = false;
   bool postRefineAttempted_ = false;
   bool postRefineAccepted_ = false;
@@ -111,6 +117,7 @@
   bool softRecoveryDestroyMode_ = false;
   bool softPersistentConflictGraph_ = false;
   string nrrMiniSolver_ = "cbs";
+  NrrMiniSolverMode nrrMiniSolverMode_ = NrrMiniSolverMode::cbs;
   string nrrCatBackend_ = "pathtablewc";
   NrrStats nrrStats_;
   bool lastNrrSoftCandidate_ = false;
@@ -128,3 +135,5 @@
   vector<int> lastSoftFailureConflictTasks_;
   string repairMapfpcSolver_ = "cbs";
   int repairMapfpcTimeoutSec_ = 30;
+  RepairHeuristicMode repairHeuristicMode_ = RepairHeuristicMode::regret;
+  RegretTypeMode regretTypeMode_ = RegretTypeMode::absolute;

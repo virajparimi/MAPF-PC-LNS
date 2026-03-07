@@ -63,7 +63,6 @@ struct LNS::RegretWorkspace {
   int clonedAgents_ = 0;
 };
 
-namespace {
 struct AssignmentLookup {
   vector<int> owner;
   vector<int> pos;
@@ -82,7 +81,7 @@ struct ConstraintTableDigest {
   h *= 1099511628211ULL;
 }
 
-[[maybe_unused]] ConstraintTableDigest computeConstraintTableDigest(
+[[maybe_unused]] inline ConstraintTableDigest computeConstraintTableDigest(
     const ConstraintTable& constraintTable, const Instance& instance) {
   ConstraintTableDigest digest;
   mixConstraintDigest(digest.hash,
@@ -127,8 +126,9 @@ struct ConstraintTableDigest {
   return digest;
 }
 
-[[maybe_unused]] bool shouldTraceConstraintDebugTriple(int task, int agent,
-                                                       int nextTask) {
+[[maybe_unused]] inline bool shouldTraceConstraintDebugTriple(int task,
+                                                              int agent,
+                                                              int nextTask) {
   // Enable with:
   //   LNS_DEBUG_TRIPLE="<task>,<agent>,<nextTask>"
   // Example:
@@ -147,7 +147,7 @@ struct ConstraintTableDigest {
   return tracedTask == task && tracedAgent == agent && tracedNext == nextTask;
 }
 
-[[maybe_unused]] bool shouldTraceConstraintDebugTask(int task) {
+[[maybe_unused]] inline bool shouldTraceConstraintDebugTask(int task) {
   // Enable with:
   //   LNS_DEBUG_CT_TASK="<task>"
   // Example:
@@ -176,8 +176,8 @@ struct ConstraintTableDigest {
   return tracedTask == task;
 }
 
-[[maybe_unused]] string summarizeTaskQueue(const vector<int>& assignments,
-                                           int maxItems = 20) {
+[[maybe_unused]] inline string summarizeTaskQueue(
+    const vector<int>& assignments, int maxItems = 20) {
   std::ostringstream oss;
   const int count = (int)assignments.size();
   oss << "[";
@@ -194,8 +194,8 @@ struct ConstraintTableDigest {
   return oss.str();
 }
 
-[[maybe_unused]] string summarizeIntList(const vector<int>& values,
-                                         int maxItems = 40) {
+[[maybe_unused]] inline string summarizeIntList(const vector<int>& values,
+                                                int maxItems = 40) {
   std::ostringstream oss;
   oss << "[";
   for (int i = 0; i < (int)values.size() && i < maxItems; i++) {
@@ -275,7 +275,7 @@ struct ScopedInsertTaskRollback {
   }
 };
 
-[[maybe_unused]] AssignmentLookup buildAssignmentLookup(
+[[maybe_unused]] inline AssignmentLookup buildAssignmentLookup(
     const LNS::RegretWorkspace& workspace, int taskCount) {
   AssignmentLookup lookup;
   lookup.owner.assign(taskCount, UNASSIGNED);
@@ -293,7 +293,7 @@ struct ScopedInsertTaskRollback {
   return lookup;
 }
 
-[[maybe_unused]] AssignmentLookup buildAssignmentLookup(
+[[maybe_unused]] inline AssignmentLookup buildAssignmentLookup(
     const Solution& solution, int taskCount) {
   AssignmentLookup lookup;
   lookup.owner.assign(taskCount, UNASSIGNED);
@@ -311,13 +311,13 @@ struct ScopedInsertTaskRollback {
   return lookup;
 }
 
-[[maybe_unused]] bool isPendingCommitState(const Neighbor& neighborhood,
-                                           int task) {
+[[maybe_unused]] inline bool isPendingCommitState(
+    const Neighbor& neighborhood, int task) {
   return task >= 0 && task < (int)neighborhood.committedTasks.size() &&
          neighborhood.committedTasks[task] == 0;
 }
 
-[[maybe_unused]] int resolveTaskEndTimeFromMixedState(
+[[maybe_unused]] inline int resolveTaskEndTimeFromMixedState(
     int task, const LNS::RegretWorkspace& workspace,
     const vector<int>& workspaceOwnerLookup,
     const vector<int>& workspacePosLookup, const Solution& previousSolution,
@@ -393,19 +393,22 @@ struct ScopedInsertTaskRollback {
   return previousPath.endTime();
 }
 
-[[maybe_unused]] double computeMedian(vector<double> values) {
+[[maybe_unused]] inline double computeMedian(vector<double>& values) {
   if (values.empty()) {
     return 0.0;
   }
-  std::sort(values.begin(), values.end());
   const size_t mid = values.size() / 2;
+  auto midIt = values.begin() + static_cast<std::ptrdiff_t>(mid);
+  std::nth_element(values.begin(), midIt, values.end());
+  const double upperMedian = *midIt;
   if ((values.size() % 2) == 0) {
-    return 0.5 * (values[mid - 1] + values[mid]);
+    const double lowerMedian = *std::max_element(values.begin(), midIt);
+    return 0.5 * (lowerMedian + upperMedian);
   }
-  return values[mid];
+  return upperMedian;
 }
 
-[[maybe_unused]] void normalizeSeriesByRobustScale(
+[[maybe_unused]] inline void normalizeSeriesByRobustScale(
     const vector<double>& rawValues, const vector<int>& validIndices,
     vector<double>& normalizedValues) {
   normalizedValues.assign(rawValues.size(), 0.0);
@@ -451,4 +454,3 @@ struct ScopedInsertTaskRollback {
     normalizedValues[idx] = (rawValues[idx] - center) / scale;
   }
 }
-}  // namespace

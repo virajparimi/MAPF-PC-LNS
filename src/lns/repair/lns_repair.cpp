@@ -101,6 +101,19 @@ vector<int> orderTasksTopologically(const vector<int>& tasks,
   }
   return ordered;
 }
+
+vector<vector<int>> buildAncestorsGraph(
+    int taskCount, const vector<pair<int, int>>& precedenceConstraints) {
+  vector<vector<int>> ancestors(taskCount);
+  for (const auto& precConstraint : precedenceConstraints) {
+    if (precConstraint.first < 0 || precConstraint.second < 0 ||
+        precConstraint.first >= taskCount || precConstraint.second >= taskCount) {
+      continue;
+    }
+    ancestors[precConstraint.second].push_back(precConstraint.first);
+  }
+  return ancestors;
+}
 }  // namespace
 
 bool LNS::computeRegret() {
@@ -112,6 +125,10 @@ bool LNS::computeRegret() {
   lnsNeighborhood_.regretMaxHeap.clear();
   buildFullPrecedenceConstraints(fullPrecedenceConstraintsScratch_);
   const auto& fullPrecedenceConstraints = fullPrecedenceConstraintsScratch_;
+  const vector<vector<int>> fullAncestors = buildAncestorsGraph(
+      instance_.getTasksNum(), fullPrecedenceConstraints);
+  const AssignmentLookup previousLookup =
+      buildAssignmentLookup(previousSolution_, instance_.getTasksNum());
   const vector<int> orderedTasks =
       orderTasksTopologically(collectRemainingRemovedTasks(),
                               fullPrecedenceConstraints);
@@ -119,7 +136,10 @@ bool LNS::computeRegret() {
     if (runtimeBudgetExhausted()) {
       return false;
     }
-    bool enoughSpace = computeRegretForTask(task, fullPrecedenceConstraints);
+    bool enoughSpace = computeRegretForTask(task, fullPrecedenceConstraints,
+                                            fullAncestors,
+                                            &previousLookup.owner,
+                                            &previousLookup.pos);
     if (!enoughSpace) {
       return false;
     }
@@ -137,6 +157,10 @@ bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
   incrementalRegretStatsTotal_.recomputeCalls++;
   buildFullPrecedenceConstraints(fullPrecedenceConstraintsScratch_);
   const auto& fullPrecedenceConstraints = fullPrecedenceConstraintsScratch_;
+  const vector<vector<int>> fullAncestors = buildAncestorsGraph(
+      instance_.getTasksNum(), fullPrecedenceConstraints);
+  const AssignmentLookup previousLookup =
+      buildAssignmentLookup(previousSolution_, instance_.getTasksNum());
   const vector<int> orderedTasks =
       orderTasksTopologically(tasks, fullPrecedenceConstraints);
   for (int task : orderedTasks) {
@@ -149,8 +173,9 @@ bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
     regretStamp_[task]++;
     incrementalRegretStatsCurrent_.recomputedTasks++;
     incrementalRegretStatsTotal_.recomputedTasks++;
-    const bool enoughSpace =
-        computeRegretForTask(task, fullPrecedenceConstraints);
+    const bool enoughSpace = computeRegretForTask(
+        task, fullPrecedenceConstraints, fullAncestors,
+        &previousLookup.owner, &previousLookup.pos);
     if (!enoughSpace) {
       return false;
     }
@@ -161,11 +186,23 @@ bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
 bool LNS::computeRegretForTask(int task) {
   buildFullPrecedenceConstraints(fullPrecedenceConstraintsScratch_);
   const auto& fullPrecedenceConstraints = fullPrecedenceConstraintsScratch_;
-  return computeRegretForTask(task, fullPrecedenceConstraints);
+  const vector<vector<int>> fullAncestors = buildAncestorsGraph(
+      instance_.getTasksNum(), fullPrecedenceConstraints);
+  return computeRegretForTask(task, fullPrecedenceConstraints, fullAncestors);
 }
 
 bool LNS::computeRegretForTask(
     int task, const vector<pair<int, int>>& fullPrecedenceConstraints) {
+  const vector<vector<int>> fullAncestors = buildAncestorsGraph(
+      instance_.getTasksNum(), fullPrecedenceConstraints);
+  return computeRegretForTask(task, fullPrecedenceConstraints, fullAncestors);
+}
+
+bool LNS::computeRegretForTask(
+    int task, const vector<pair<int, int>>& fullPrecedenceConstraints,
+    const vector<vector<int>>& fullAncestors,
+    const vector<int>* previousAssignmentOwnerLookup,
+    const vector<int>* previousAssignmentPosLookup) {
   if (runtimeBudgetExhausted()) {
     return false;
   }
@@ -194,8 +231,22 @@ bool LNS::computeRegretForTask(
     }
   } workspaceCloneStats{regretEvalStatsCurrent_, regretEvalStatsTotal_, workspace};
   vector<char> workspaceTouchedAgents(instance_.getAgentNum(), 0);
+  vector<char> ancestorsOfTask;
+  AssignmentLookup previousLookupStorage;
+  const vector<int>* previousOwnerLookup = previousAssignmentOwnerLookup;
+  const vector<int>* previousPosLookup = previousAssignmentPosLookup;
+  if (previousOwnerLookup == nullptr || previousPosLookup == nullptr ||
+      (int)previousOwnerLookup->size() != instance_.getTasksNum() ||
+      (int)previousPosLookup->size() != instance_.getTasksNum()) {
+    previousLookupStorage =
+        buildAssignmentLookup(previousSolution_, instance_.getTasksNum());
+    previousOwnerLookup = &previousLookupStorage.owner;
+    previousPosLookup = &previousLookupStorage.pos;
+  }
   if (!injectPendingAncestors(workspace, task, fullPrecedenceConstraints,
-                              workspaceTouchedAgents, nullptr)) {
+                              workspaceTouchedAgents, &ancestorsOfTask,
+                              &fullAncestors, previousOwnerLookup,
+                              previousPosLookup)) {
     return false;
   }
 
@@ -205,7 +256,8 @@ bool LNS::computeRegretForTask(
   if (!prepareRegretWorkspaceForTask(task, workspace, workspaceTouchedAgents,
                                      precedenceConstraints,
                                      assignmentOwnerLookup,
-                                     assignmentPosLookup, earliestTimestep)) {
+                                     assignmentPosLookup, earliestTimestep,
+                                     &ancestorsOfTask)) {
     return false;
   }
 
@@ -227,7 +279,9 @@ bool LNS::computeRegretForTask(
                                    &precedenceConstraints, baselineMetrics,
                                    &serviceTimes, &candidateAgents,
                                    &assignmentOwnerLookup,
-                                   &assignmentPosLookup);
+                                   &assignmentPosLookup,
+                                   previousOwnerLookup,
+                                   previousPosLookup);
   }
   if (task >= 0 && task < (int)regretCandidateAgents_.size()) {
     regretCandidateAgents_[task] = std::move(candidateAgents);

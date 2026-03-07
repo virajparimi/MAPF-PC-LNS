@@ -1,5 +1,6 @@
 #include "instance.hpp"
 #include <boost/tokenizer.hpp>
+#include <cctype>
 #include <limits>
 #include <fstream>
 #include <sstream>
@@ -87,6 +88,9 @@ bool Instance::loadMap() {
   }
   mapSize = numOfCols * numOfRows;
   map_.resize(mapSize, false);
+  int unknownMapCellCount = 0;
+  int loggedUnknownMapCellCount = 0;
+  constexpr int kMaxUnknownMapCellLogs = 8;
   for (int i = 0; i < numOfRows; i++) {
     if (!getline(file, line)) {
       PLOGE << "Failed to read map row " << i << ".\n";
@@ -101,8 +105,48 @@ bool Instance::loadMap() {
       return false;
     }
     for (int j = 0; j < numOfCols; j++) {
-      map_[linearizeCoordinate(i, j)] = (line[j] != '.');
+      const char cell = line[j];
+      bool isObstacle = true;
+      switch (cell) {
+        // Traversable cells in MAPF benchmark maps.
+        case '.':
+        case 'G':
+          isObstacle = false;
+          break;
+        // Common obstacle cells in MAPF benchmark maps.
+        case '@':
+        case 'O':
+        case 'T':
+        case 'S':
+        case 'W':
+          isObstacle = true;
+          break;
+        default:
+          unknownMapCellCount++;
+          if (loggedUnknownMapCellCount < kMaxUnknownMapCellLogs) {
+            if (std::isprint(static_cast<unsigned char>(cell)) != 0) {
+              PLOGW << "Unrecognized map cell character '" << cell
+                    << "' at row=" << i << ", col=" << j
+                    << "; treating as obstacle.\n";
+            } else {
+              PLOGW << "Unrecognized non-printable map cell character code "
+                    << static_cast<int>(static_cast<unsigned char>(cell))
+                    << " at row=" << i << ", col=" << j
+                    << "; treating as obstacle.\n";
+            }
+            loggedUnknownMapCellCount++;
+          }
+          isObstacle = true;
+          break;
+      }
+      map_[linearizeCoordinate(i, j)] = isObstacle;
     }
+  }
+  if (unknownMapCellCount > loggedUnknownMapCellCount) {
+    PLOGW << "Encountered "
+          << (unknownMapCellCount - loggedUnknownMapCellCount)
+          << " additional unrecognized map cell characters; all were treated "
+             "as obstacles.\n";
   }
   return true;
 }

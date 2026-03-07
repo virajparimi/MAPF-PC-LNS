@@ -115,7 +115,7 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
   }
   result.timeJoinPathsSec += elapsedSecSince(joinStart);
 
-  if (lns.goalOccupationMode_ == "reposition_true") {
+  if (lns.isGoalOccupationRepositionTrue()) {
     const std::vector<int> terminalReplanAgents =
         lns.selectTerminalReplanAgents(agentsToCompute);
     if (!terminalReplanAgents.empty()) {
@@ -167,7 +167,7 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
   potentialNeighborhood.clear();
   LNS::ValidationStats candidateValidationStats;
   std::vector<std::pair<int, int>> candidateCollisionPairs;
-  lns.useTerminalPathsInValidation_ = (lns.goalOccupationMode_ == "reposition_true");
+  lns.useTerminalPathsInValidation_ = lns.isGoalOccupationRepositionTrue();
   result.candidateValid =
       lns.validateSolution(&potentialNeighborhood, &candidateValidationStats,
                            &candidateCollisionPairs);

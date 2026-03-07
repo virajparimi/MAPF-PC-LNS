@@ -432,8 +432,7 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
             goalConflictsLL > std::numeric_limits<int>::max()
                 ? std::numeric_limits<int>::max()
                 : (int)goalConflictsLL;
-        SIPPSNode* goalParent =
-            (goalArrival == current->timestep) ? current->parent : current;
+        SIPPSNode* goalParent = current;
         SIPPSNode* goalNode = emplaceNode(
             goalParent, goal, current->intervalId, goalArrival, goalGVal,
             goalConflicts, current->highGeneration, current->highExpansion,

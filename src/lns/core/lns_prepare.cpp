@@ -6,6 +6,7 @@
 
 bool LNS::prepareNextIteration() {
   PLOGI << "Preparing the solution object for the next iteration\n";
+  invalidateCurrentTaskAssignmentIndexCache();
   lastPrepareAbortedByCascade_ = false;
   lastPrepareSeedTasks_ = 0;
   lastPrepareClosureTasks_ = 0;

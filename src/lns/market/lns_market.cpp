@@ -9,6 +9,18 @@
 #include "common.hpp"
 #include "lns_internal_helpers.hpp"
 
+namespace {
+inline int findTaskPositionInAssignments(const std::vector<int>& assignments,
+                                         int task) {
+  for (int i = 0; i < static_cast<int>(assignments.size()); i++) {
+    if (assignments[i] == task) {
+      return i;
+    }
+  }
+  return -1;
+}
+}  // namespace
+
 int LNS::marketTimeBucket(int timestep) const {
   if (market_.bucketDt <= 1) {
     return timestep;
@@ -120,9 +132,8 @@ void LNS::computeTaskScheduleMetricsFromIndex(
 
 void LNS::computeTaskScheduleMetrics(vector<TaskScheduleMetrics>& perTask,
                                      vector<double>* blockedWaitSum) const {
-  const TaskAssignmentIndex currentIndex =
-      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
-  computeTaskScheduleMetricsFromIndex(currentIndex.pos, perTask, blockedWaitSum);
+  const vector<int>& taskPosByTask = getCurrentTaskPositionIndexByTask();
+  computeTaskScheduleMetricsFromIndex(taskPosByTask, perTask, blockedWaitSum);
 }
 
 double LNS::computeTaskMarketExposure(int task, bool normalized) const {
@@ -304,14 +315,47 @@ int LNS::computeTaskPrecedenceWaitFromState(
     return 0;
   }
 
-  const TaskAssignmentIndex stateIndex =
-      buildTaskAssignmentIndex(agentTaskAssignments, instance_.getTasksNum());
-  const int taskAgent =
-      (task >= 0 && task < (int)stateIndex.owner.size()) ? stateIndex.owner[task]
-                                                          : UNASSIGNED;
-  const int taskPos =
-      (task >= 0 && task < (int)stateIndex.pos.size()) ? stateIndex.pos[task] : -1;
-  if (taskAgent == UNASSIGNED || taskPos < 0 ||
+  const auto& baseAncestors = instance_.getAncestorsRef();
+  vector<int> relevantTasks;
+  relevantTasks.reserve(8);
+  relevantTasks.push_back(task);
+  if (task >= 0 && task < (int)baseAncestors.size()) {
+    for (int pred : baseAncestors[task]) {
+      if (pred >= 0 && pred < instance_.getTasksNum()) {
+        relevantTasks.push_back(pred);
+      }
+    }
+  }
+  std::sort(relevantTasks.begin(), relevantTasks.end());
+  relevantTasks.erase(std::unique(relevantTasks.begin(), relevantTasks.end()),
+                      relevantTasks.end());
+
+  struct TaskStatePos {
+    int agent = UNASSIGNED;
+    int pos = -1;
+  };
+  unordered_map<int, TaskStatePos> relevantLookup;
+  relevantLookup.reserve(relevantTasks.size() * 2 + 1);
+  for (int currentAgent = 0; currentAgent < (int)agentTaskAssignments.size();
+       currentAgent++) {
+    const auto& assignments = agentTaskAssignments[currentAgent];
+    for (int currentPos = 0; currentPos < (int)assignments.size(); currentPos++) {
+      const int assignedTask = assignments[currentPos];
+      if (!std::binary_search(relevantTasks.begin(), relevantTasks.end(),
+                              assignedTask)) {
+        continue;
+      }
+      relevantLookup[assignedTask] = {currentAgent, currentPos};
+    }
+  }
+
+  const auto taskIt = relevantLookup.find(task);
+  if (taskIt == relevantLookup.end()) {
+    return 0;
+  }
+  const int taskAgent = taskIt->second.agent;
+  const int taskPos = taskIt->second.pos;
+  if (taskAgent < 0 || taskAgent >= (int)agentTaskPaths.size() || taskPos < 0 ||
       taskPos >= (int)agentTaskPaths[taskAgent].size()) {
     return 0;
   }
@@ -333,35 +377,30 @@ int LNS::computeTaskPrecedenceWaitFromState(
   const int taskCount = instance_.getTasksNum();
   vector<char> seenPredecessor(taskCount, 0);
   auto consumePredecessor = [&](int pred) {
-    if (pred < 0 || pred >= taskCount) {
-      return;
-    }
-    if (seenPredecessor[pred]) {
+    if (pred < 0 || pred >= taskCount || seenPredecessor[pred]) {
       return;
     }
     seenPredecessor[pred] = 1;
-    const int predAgent = (pred >= 0 && pred < (int)stateIndex.owner.size())
-                              ? stateIndex.owner[pred]
-                              : UNASSIGNED;
-    const int predPos = (pred >= 0 && pred < (int)stateIndex.pos.size())
-                            ? stateIndex.pos[pred]
-                            : -1;
-    if (predAgent != UNASSIGNED && predPos >= 0 &&
+    const auto predIt = relevantLookup.find(pred);
+    if (predIt == relevantLookup.end()) {
+      return;
+    }
+    const int predAgent = predIt->second.agent;
+    const int predPos = predIt->second.pos;
+    if (predAgent != UNASSIGNED && predAgent >= 0 &&
+        predAgent < (int)agentTaskPaths.size() && predPos >= 0 &&
         predPos < (int)agentTaskPaths[predAgent].size() &&
         !agentTaskPaths[predAgent][predPos].empty()) {
       release = max(release, agentTaskPaths[predAgent][predPos].endTime());
     }
   };
 
-  // Base input precedence predecessors can be queried in O(in-degree(task)).
-  const auto& baseAncestors = instance_.getAncestorsRef();
   if (task >= 0 && task < (int)baseAncestors.size()) {
     for (int pred : baseAncestors[task]) {
       consumePredecessor(pred);
     }
   }
 
-  // Dynamic intra-agent predecessor in the current assignment state.
   if (taskPos > 0 && taskAgent >= 0 &&
       taskAgent < (int)agentTaskAssignments.size() &&
       taskPos - 1 < (int)agentTaskAssignments[taskAgent].size()) {
@@ -409,12 +448,12 @@ int LNS::computeTaskPrecedenceWaitInCurrentSolution(int task) const {
     return 0;
   }
 
-  const TaskAssignmentIndex currentIndex =
-      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
   const int agent = taskAgent;
-  const int taskPos =
-      (task >= 0 && task < (int)currentIndex.pos.size()) ? currentIndex.pos[task]
-                                                          : -1;
+  if (agent < 0 || agent >= static_cast<int>(solution_.agents.size())) {
+    return 0;
+  }
+  const int taskPos = findTaskPositionInAssignments(
+      solution_.agents[agent].taskAssignments, task);
   if (taskPos < 0) {
     return 0;
   }
@@ -446,9 +485,11 @@ int LNS::computeTaskPrecedenceWaitInCurrentSolution(int task) const {
     const int predAgent = (pred >= 0 && pred < (int)solution_.taskAgentMap.size())
                               ? solution_.taskAgentMap[pred]
                               : UNASSIGNED;
-    const int predPos = (pred >= 0 && pred < (int)currentIndex.pos.size())
-                            ? currentIndex.pos[pred]
-                            : -1;
+    if (predAgent < 0 || predAgent >= static_cast<int>(solution_.agents.size())) {
+      return;
+    }
+    const int predPos = findTaskPositionInAssignments(
+        solution_.agents[predAgent].taskAssignments, pred);
     if (predAgent != UNASSIGNED && predPos >= 0 &&
         predPos < (int)solution_.agents[predAgent].taskPaths.size() &&
         !solution_.agents[predAgent].taskPaths[predPos].empty()) {
@@ -529,9 +570,8 @@ double LNS::computeSolutionPrecedenceWaitFromIndex(
 }
 
 double LNS::computeSolutionPrecedenceWait() const {
-  const TaskAssignmentIndex currentIndex =
-      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
-  return computeSolutionPrecedenceWaitFromIndex(currentIndex.pos);
+  const vector<int>& taskPosByTask = getCurrentTaskPositionIndexByTask();
+  return computeSolutionPrecedenceWaitFromIndex(taskPosByTask);
 }
 
 bool LNS::passMarketAcceptanceGuards(double previousPressure,
@@ -751,10 +791,9 @@ void LNS::updateMarketStateFromCurrentSolution() {
   const double contendedJaccardEma =
       emaUpdate(market_.stats.contendedJaccardEma, contendedJaccard);
 
-  const TaskAssignmentIndex currentIndex =
-      buildCurrentTaskAssignmentIndex(solution_, instance_.getTasksNum());
+  const vector<int>& taskPosByTask = getCurrentTaskPositionIndexByTask();
   vector<TaskScheduleMetrics> perTask;
-  computeTaskScheduleMetricsFromIndex(currentIndex.pos, perTask, nullptr);
+  computeTaskScheduleMetricsFromIndex(taskPosByTask, perTask, nullptr);
   double totalWait = 0.0;
   double maxWait = 0.0;
   for (const TaskScheduleMetrics& metric : perTask) {
@@ -820,5 +859,3 @@ void LNS::maybeUpdateMarketState(bool accepted, bool candidateStateUpdate) {
   }
   updateMarketStateFromCurrentSolution();
 }
-
-

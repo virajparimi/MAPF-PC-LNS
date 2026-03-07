@@ -133,7 +133,12 @@ struct Path {
   }
 
   Path() = default;
-  explicit Path(int size) : path(vector<PathEntry>(size)) {}
+  explicit Path(int size) {
+    if (size < 0) {
+      throw std::invalid_argument("Path size must be non-negative");
+    }
+    path = vector<PathEntry>(static_cast<size_t>(size));
+  }
   ~Path() = default;
 };
 

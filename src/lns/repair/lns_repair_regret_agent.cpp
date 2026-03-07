@@ -14,7 +14,9 @@ void LNS::computeRegretForTaskWithAgent(
     const TaskBaselineMetrics& baselineMetrics,
     pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes,
     const vector<int>* assignmentOwnerLookup,
-    const vector<int>* assignmentPosLookup) {
+    const vector<int>* assignmentPosLookup,
+    const vector<int>* previousAssignmentOwnerLookup,
+    const vector<int>* previousAssignmentPosLookup) {
   if (runtimeBudgetExhausted()) {
     return;
   }
@@ -59,14 +61,12 @@ void LNS::computeRegretForTaskWithAgent(
     allCandidatePositions.push_back(pos);
   }
 
-  const bool useMarketShortlist =
-      (repairHeuristic == "market_shortlist_regret");
-  const bool useNormalizedWaitProxyInRegretShortlist =
-      (repairHeuristic == "regret");
+  const bool useMarketShortlist = isRepairHeuristicMarketShortlistRegret();
+  const bool useNormalizedWaitProxyInRegretShortlist = isRepairHeuristicRegret();
   const bool useNormalizedSuccessorPressureInRegretShortlist =
-      (repairHeuristic == "regret");
+      isRepairHeuristicRegret();
   const bool collectShortlistDiagnostics =
-      (repairHeuristic == "regret") && regretShortlistDiagnostics_;
+      isRepairHeuristicRegret() && regretShortlistDiagnostics_;
   const int candidateCount = (int)allCandidatePositions.size();
   const int shortlistTopK = regretCandidateTopK_;
   const bool shortlistActive =
@@ -139,8 +139,16 @@ void LNS::computeRegretForTaskWithAgent(
         ownerLookup = &builtWorkspaceIndex.owner;
         posLookup = &builtWorkspaceIndex.pos;
       }
-      const AssignmentLookup previousLookup =
-          buildAssignmentLookup(previousSolution_, taskCount);
+      AssignmentLookup previousLookup;
+      const vector<int>* previousOwnerLookup = previousAssignmentOwnerLookup;
+      const vector<int>* previousPosLookup = previousAssignmentPosLookup;
+      if (previousOwnerLookup == nullptr || previousPosLookup == nullptr ||
+          (int)previousOwnerLookup->size() != taskCount ||
+          (int)previousPosLookup->size() != taskCount) {
+        previousLookup = buildAssignmentLookup(previousSolution_, taskCount);
+        previousOwnerLookup = &previousLookup.owner;
+        previousPosLookup = &previousLookup.pos;
+      }
       successorSignals.reserve(successorPressureStaticSignalsByTask_[task].size());
       int64_t successorBeginFromPreviousCount = 0;
       int64_t successorPrecedenceClampCount = 0;
@@ -182,7 +190,7 @@ void LNS::computeRegretForTaskWithAgent(
             const int predecessorEnd = resolveTaskEndTimeFromMixedState(
                 predecessorTask, workspace, *ownerLookup, *posLookup,
                 previousSolution_, lnsNeighborhood_, &usedPreviousFallback,
-                &previousLookup.owner, &previousLookup.pos);
+                previousOwnerLookup, previousPosLookup);
             if (predecessorEnd >= 0) {
               if (usedPreviousFallback) {
                 successorBeginFromPreviousCount++;
@@ -673,7 +681,10 @@ void LNS::computeRegretForTaskWithAgent(
 
       std::variant<bool, Utility> insertCulmination =
           insertTask(regretPacket, workspace, precedenceConstraints,
-                     &baselineMetrics, &candidatePlanner, true);
+                     &baselineMetrics, &candidatePlanner, true,
+                     assignmentOwnerLookup, assignmentPosLookup,
+                     previousAssignmentOwnerLookup,
+                     previousAssignmentPosLookup);
       if (std::holds_alternative<Utility>(insertCulmination)) {
         regretEvalStatsCurrent_.candidateInsertionsFeasible++;
         regretEvalStatsTotal_.candidateInsertionsFeasible++;

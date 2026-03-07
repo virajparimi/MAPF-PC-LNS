@@ -10,6 +10,7 @@
 
 #include "lns_internal_helpers.hpp"
 #include "lns_mapfpc_internal.hpp"
+#include "lns_temp_file_guard.hpp"
 
 using lns_mapfpc_internal::hashAssignments;
 
@@ -238,19 +239,16 @@ bool LNS::runNeighborhoodFixedMapfpcRepair() {
       tempDir / ("mapfpc_neigh_mutable_" + token + ".txt");
   const fs::path initialPathsPath =
       tempDir / ("mapfpc_neigh_paths_" + token + ".txt");
-  auto cleanupTemp = [&]() {
-    std::error_code rmEc;
-    fs::remove(assignmentPath, rmEc);
-    fs::remove(mutableAgentsPath, rmEc);
-    fs::remove(initialPathsPath, rmEc);
-  };
+  lns_temp_file::ScopedPathCleanup tempCleanup;
+  tempCleanup.add(assignmentPath);
+  tempCleanup.add(mutableAgentsPath);
+  tempCleanup.add(initialPathsPath);
 
   string assignmentError;
   if (!writeMAPFPCAssignmentFile(assignments, assignmentPath.string(),
                                  assignmentError)) {
     PLOGE << "mapfpc_neighborhood_fixed: failed to write assignment file: "
           << assignmentError << "\n";
-    cleanupTemp();
     return false;
   }
 
@@ -258,7 +256,6 @@ bool LNS::runNeighborhoodFixedMapfpcRepair() {
     std::ofstream outMutable(mutableAgentsPath);
     if (!outMutable.is_open()) {
       PLOGE << "mapfpc_neighborhood_fixed: failed to open mutable agents file\n";
-      cleanupTemp();
       return false;
     }
     outMutable << "MUTABLE_AGENTS\n";
@@ -272,7 +269,6 @@ bool LNS::runNeighborhoodFixedMapfpcRepair() {
     outMutable.flush();
     if (!outMutable.good()) {
       PLOGE << "mapfpc_neighborhood_fixed: failed writing mutable agents file\n";
-      cleanupTemp();
       return false;
     }
   }
@@ -281,7 +277,6 @@ bool LNS::runNeighborhoodFixedMapfpcRepair() {
     std::ofstream outPaths(initialPathsPath);
     if (!outPaths.is_open()) {
       PLOGE << "mapfpc_neighborhood_fixed: failed to open initial paths file\n";
-      cleanupTemp();
       return false;
     }
     outPaths << "AGENT_PATHS\n";
@@ -301,7 +296,6 @@ bool LNS::runNeighborhoodFixedMapfpcRepair() {
     outPaths.flush();
     if (!outPaths.good()) {
       PLOGE << "mapfpc_neighborhood_fixed: failed writing initial paths file\n";
-      cleanupTemp();
       return false;
     }
   }
@@ -315,7 +309,6 @@ bool LNS::runNeighborhoodFixedMapfpcRepair() {
       instance_.getAgentTaskFName(), repairMapfpcSolver_, repairMapfpcTimeoutSec_,
       sourceLabel, assignmentPath.string(), mutableAgentsPath.string(),
       initialPathsPath.string());
-  cleanupTemp();
   return success;
 }
 
@@ -512,7 +505,15 @@ bool LNS::runNeighborhoodReassignGreedyMapfpcRepair() {
       return runNeighborhoodFixedMapfpcRepair();
     }
     assignments[bestAgent].insert(assignments[bestAgent].begin() + bestPos, task);
-    assignmentIndex = buildTaskAssignmentIndex(assignments, numTasks);
+    auto& updatedQueue = assignments[bestAgent];
+    for (int pos = bestPos; pos < (int)updatedQueue.size(); pos++) {
+      const int queuedTask = updatedQueue[pos];
+      if (queuedTask < 0 || queuedTask >= numTasks) {
+        continue;
+      }
+      assignmentIndex.owner[queuedTask] = bestAgent;
+      assignmentIndex.pos[queuedTask] = pos;
+    }
   }
 
   vector<char> finalSeen(numTasks, 0);
@@ -721,16 +722,18 @@ bool LNS::runPostMAPFPCRefinement() {
   if (!runMAPFPCOnAssignments(assignments, solverVariant, postRefineTimeoutSec_,
                               sourceLabel)) {
     solution_ = previousSolution;
+    invalidateCurrentTaskAssignmentIndexCache();
     incumbentSolution_ = previousIncumbent;
     return false;
   }
 
-  if (goalOccupationMode_ == "reposition_true") {
+  if (isGoalOccupationRepositionTrue()) {
     vector<int> allAgents(instance_.getAgentNum());
     std::iota(allAgents.begin(), allAgents.end(), 0);
     if (!planTerminalReposition(allAgents, true)) {
       PLOGE << "post_refine_mapfpc: terminal reposition planning failed\n";
       solution_ = previousSolution;
+      invalidateCurrentTaskAssignmentIndexCache();
       incumbentSolution_ = previousIncumbent;
       return false;
     }
@@ -739,12 +742,13 @@ bool LNS::runPostMAPFPCRefinement() {
   ConflictMap potentialNeighborhood;
   ValidationStats validationStats;
   const bool previousTerminalValidationFlag = useTerminalPathsInValidation_;
-  useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
+  useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
   const bool valid = validateSolution(&potentialNeighborhood, &validationStats);
   useTerminalPathsInValidation_ = previousTerminalValidationFlag;
   if (!valid) {
     PLOGE << "post_refine_mapfpc: refined solution failed validation\n";
     solution_ = previousSolution;
+    invalidateCurrentTaskAssignmentIndexCache();
     incumbentSolution_ = previousIncumbent;
     return false;
   }
@@ -758,6 +762,7 @@ bool LNS::runPostMAPFPCRefinement() {
           << baselineObjective << ", refined=" << refinedObjective
           << ", objective=" << optimizationObjective_ << ")\n";
     solution_ = previousSolution;
+    invalidateCurrentTaskAssignmentIndexCache();
     incumbentSolution_ = previousIncumbent;
     return false;
   }

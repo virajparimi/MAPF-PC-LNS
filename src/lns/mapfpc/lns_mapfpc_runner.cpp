@@ -14,11 +14,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <optional>
-#include <thread>
 #include <vector>
 
 #include "lns_mapfpc_internal.hpp"
+#include "lns_temp_file_guard.hpp"
 
 using lns_mapfpc_internal::normalizeMapfpcSolverVariant;
 using lns_mapfpc_internal::parsePositiveEnvInt;
@@ -91,14 +92,9 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
       ("mapf_pc_task_assignment_err_" + std::to_string(seed_) + "_" +
        std::to_string((long long)Time::now().time_since_epoch().count()) +
        ".log");
-  auto cleanupStdoutCapture = [&stdoutCapturePath]() {
-    std::error_code removeEc;
-    fs::remove(stdoutCapturePath, removeEc);
-  };
-  auto cleanupStderrCapture = [&stderrCapturePath]() {
-    std::error_code removeEc;
-    fs::remove(stderrCapturePath, removeEc);
-  };
+  lns_temp_file::ScopedPathCleanup captureCleanup;
+  captureCleanup.add(stdoutCapturePath);
+  captureCleanup.add(stderrCapturePath);
   auto logCapturedStderr = [&stderrCapturePath]() {
     std::ifstream errStream(stderrCapturePath);
     if (!errStream.is_open()) {
@@ -213,10 +209,8 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
   } catch (const bp::process_error& e) {
     PLOGE << "Failed to launch MAPF-PC task_assignment at '"
           << taskAssignmentExe->string() << "': " << e.what() << "\n";
-    if (!keepCaptureOnFailure) {
-      cleanupStdoutCapture();
-      cleanupStderrCapture();
-    } else {
+    if (keepCaptureOnFailure) {
+      captureCleanup.release();
       PLOGE << "Keeping MAPF-PC captures after launch failure: stdout='"
             << stdoutCapturePath.string() << "', stderr='"
             << stderrCapturePath.string() << "'\n";
@@ -249,37 +243,47 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
           << ", source=" << sourceLabel << "\n";
   }
   bp::child& child = *childProcess;
-  const auto wallClockDeadline =
-      std::chrono::steady_clock::now() +
-      std::chrono::seconds(wallClockTimeoutSec);
-  while (child.running() && std::chrono::steady_clock::now() < wallClockDeadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-  if (child.running()) {
+  auto waitTask = std::async(std::launch::async, [&child]() {
+    std::error_code ec;
+    child.wait(ec);
+    return ec;
+  });
+  const bool completedWithinTimeout =
+      (waitTask.wait_for(std::chrono::seconds(wallClockTimeoutSec)) ==
+       std::future_status::ready);
+  if (!completedWithinTimeout) {
     PLOGE << "MAPF-PC task_assignment exceeded wall-clock timeout ("
           << wallClockTimeoutSec << "s); terminating process\n";
     child.terminate();
-    child.wait();
+    waitTask.wait();
+    (void)waitTask.get();
     logCapturedStderr();
-    if (!keepCaptureOnFailure) {
-      cleanupStdoutCapture();
-      cleanupStderrCapture();
-    } else {
+    if (keepCaptureOnFailure) {
+      captureCleanup.release();
       PLOGE << "Keeping MAPF-PC captures after timeout: stdout='"
             << stdoutCapturePath.string() << "', stderr='"
             << stderrCapturePath.string() << "'\n";
     }
     return false;
   }
-  child.wait();
+  const std::error_code waitEc = waitTask.get();
+  if (waitEc) {
+    PLOGE << "MAPF-PC task_assignment wait failed: " << waitEc.message() << "\n";
+    logCapturedStderr();
+    if (keepCaptureOnFailure) {
+      captureCleanup.release();
+      PLOGE << "Keeping MAPF-PC captures after wait error: stdout='"
+            << stdoutCapturePath.string() << "', stderr='"
+            << stderrCapturePath.string() << "'\n";
+    }
+    return false;
+  }
   if (child.exit_code() != 0) {
     PLOGE << "MAPF-PC task_assignment exited with code " << child.exit_code()
           << "\n";
     logCapturedStderr();
-    if (!keepCaptureOnFailure) {
-      cleanupStdoutCapture();
-      cleanupStderrCapture();
-    } else {
+    if (keepCaptureOnFailure) {
+      captureCleanup.release();
       PLOGE << "Keeping MAPF-PC captures after nonzero exit: stdout='"
             << stdoutCapturePath.string() << "', stderr='"
             << stderrCapturePath.string() << "'\n";
@@ -290,8 +294,6 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
   if (!inputStream.is_open()) {
     PLOGE << "Failed to open captured MAPF-PC stdout at '"
           << stdoutCapturePath.string() << "'\n";
-    cleanupStdoutCapture();
-    cleanupStderrCapture();
     return false;
   }
   {
@@ -310,10 +312,8 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
     inputStream.seekg(0, std::ios::beg);
     if (reportedNoSolution) {
       PLOGE << "MAPF-PC task_assignment reported no solution in stdout capture\n";
-      if (!keepCaptureOnFailure) {
-        cleanupStdoutCapture();
-        cleanupStderrCapture();
-      } else {
+      if (keepCaptureOnFailure) {
+        captureCleanup.release();
         PLOGE << "Keeping MAPF-PC captures after reported no-solution: stdout='"
               << stdoutCapturePath.string() << "', stderr='"
               << stderrCapturePath.string() << "'\n";
@@ -328,13 +328,12 @@ bool LNS::runMAPFPCForAgentFile(const string& agentFilePath,
       parseMAPFPCStreamIntoSolution(inputStream, parseSourceLabel);
   inputStream.close();
   if (!parsed && keepCaptureOnFailure) {
+    captureCleanup.release();
     PLOGE << "Keeping MAPF-PC captures after parse failure: stdout='"
           << stdoutCapturePath.string() << "', stderr='"
           << stderrCapturePath.string() << "'\n";
     return false;
   }
-  cleanupStdoutCapture();
-  cleanupStderrCapture();
   return parsed;
 }
 
@@ -359,22 +358,19 @@ bool LNS::runMAPFPCOnAssignments(const vector<vector<int>>& assignments,
       ("mapf_pc_assignment_" + std::to_string(seed_) + "_" +
        std::to_string((long long)Time::now().time_since_epoch().count()) +
        ".txt");
+  lns_temp_file::ScopedPathCleanup assignmentCleanup;
+  assignmentCleanup.add(assignmentPath);
 
   string assignmentError;
   if (!writeMAPFPCAssignmentFile(assignments, assignmentPath.string(),
                                  assignmentError)) {
     PLOGE << "Failed to write MAPF-PC assignment file: " << assignmentError
           << "\n";
-    std::error_code removeEc;
-    fs::remove(assignmentPath, removeEc);
     return false;
   }
 
-  const bool success = runMAPFPCForAgentFile(
+  return runMAPFPCForAgentFile(
       instance_.getAgentTaskFName(), solverVariant, solverTimeoutSec,
       sourceLabel.empty() ? assignmentPath.string() : sourceLabel,
       assignmentPath.string());
-  std::error_code removeEc;
-  fs::remove(assignmentPath, removeEc);
-  return success;
 }

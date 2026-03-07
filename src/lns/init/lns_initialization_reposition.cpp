@@ -27,7 +27,7 @@
 
 bool LNS::planTerminalReposition(const vector<int>& agentsToPlan,
                                  bool fullRebuild) {
-  if (goalOccupationMode_ != "reposition_true") {
+  if (!isGoalOccupationRepositionTrue()) {
     return true;
   }
   terminalRepositionStats_.replansRequested++;

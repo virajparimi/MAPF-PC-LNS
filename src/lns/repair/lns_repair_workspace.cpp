@@ -6,19 +6,37 @@
 bool LNS::injectPendingAncestors(
     RegretWorkspace& workspace, int task,
     const vector<pair<int, int>>& precedenceConstraints,
-    vector<char>& workspaceTouchedAgents, vector<char>* outAncestorsOfTask) {
-  const AssignmentLookup previousLookup =
-      buildAssignmentLookup(previousSolution_, instance_.getTasksNum());
-  vector<vector<int>> ancestors(instance_.getTasksNum());
-  for (const auto& precConstraint : precedenceConstraints) {
-    if (precConstraint.first < 0 || precConstraint.second < 0 ||
-        precConstraint.first >= instance_.getTasksNum() ||
-        precConstraint.second >= instance_.getTasksNum()) {
-      continue;
-    }
-    ancestors[precConstraint.second].push_back(precConstraint.first);
+    vector<char>& workspaceTouchedAgents, vector<char>* outAncestorsOfTask,
+    const vector<vector<int>>* prebuiltAncestors,
+    const vector<int>* previousAssignmentOwnerLookup,
+    const vector<int>* previousAssignmentPosLookup) {
+  AssignmentLookup previousLookup;
+  const vector<int>* previousOwnerLookup = previousAssignmentOwnerLookup;
+  const vector<int>* previousPosLookup = previousAssignmentPosLookup;
+  if (previousOwnerLookup == nullptr || previousPosLookup == nullptr ||
+      (int)previousOwnerLookup->size() != instance_.getTasksNum() ||
+      (int)previousPosLookup->size() != instance_.getTasksNum()) {
+    previousLookup =
+        buildAssignmentLookup(previousSolution_, instance_.getTasksNum());
+    previousOwnerLookup = &previousLookup.owner;
+    previousPosLookup = &previousLookup.pos;
   }
-  vector<char> ancestorsOfTask = reachableSet(task, ancestors);
+  vector<vector<int>> localAncestors;
+  const vector<vector<int>>* ancestors = prebuiltAncestors;
+  if (ancestors == nullptr ||
+      (int)ancestors->size() != instance_.getTasksNum()) {
+    localAncestors.assign(instance_.getTasksNum(), {});
+    for (const auto& precConstraint : precedenceConstraints) {
+      if (precConstraint.first < 0 || precConstraint.second < 0 ||
+          precConstraint.first >= instance_.getTasksNum() ||
+          precConstraint.second >= instance_.getTasksNum()) {
+        continue;
+      }
+      localAncestors[precConstraint.second].push_back(precConstraint.first);
+    }
+    ancestors = &localAncestors;
+  }
+  vector<char> ancestorsOfTask = reachableSet(task, *ancestors);
   if (task >= 0 && task < (int)ancestorsOfTask.size()) {
     ancestorsOfTask[task] = 0;
   }
@@ -45,9 +63,10 @@ bool LNS::injectPendingAncestors(
       }
       assert(ancestorTaskAgent != UNASSIGNED);
       const int ancestorTaskLocalIndex =
-          (ancestorTask >= 0 && ancestorTask < (int)previousLookup.pos.size() &&
-           previousLookup.owner[ancestorTask] == ancestorTaskAgent)
-              ? previousLookup.pos[ancestorTask]
+          (ancestorTask >= 0 &&
+           ancestorTask < (int)previousPosLookup->size() &&
+           (*previousOwnerLookup)[ancestorTask] == ancestorTaskAgent)
+              ? (*previousPosLookup)[ancestorTask]
               : UNASSIGNED;
       if (ancestorTaskLocalIndex == UNASSIGNED ||
           ancestorTaskLocalIndex >=
@@ -86,12 +105,16 @@ void LNS::evaluateAgentPositionCandidate(
     const TaskBaselineMetrics& baselineMetrics,
     pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes,
     vector<int>* candidateAgents, const vector<int>* assignmentOwnerLookup,
-    const vector<int>* assignmentPosLookup) {
+    const vector<int>* assignmentPosLookup,
+    const vector<int>* previousAssignmentOwnerLookup,
+    const vector<int>* previousAssignmentPosLookup) {
   TaskRegretPacket regretPacket = {task, agent, -1, earliestTimestep};
   const auto beforeOptions = serviceTimes->size();
   computeRegretForTaskWithAgent(regretPacket, workspace, precedenceConstraints,
                                 baselineMetrics, serviceTimes,
-                                assignmentOwnerLookup, assignmentPosLookup);
+                                assignmentOwnerLookup, assignmentPosLookup,
+                                previousAssignmentOwnerLookup,
+                                previousAssignmentPosLookup);
   if (candidateAgents != nullptr && serviceTimes->size() > beforeOptions) {
     candidateAgents->push_back(agent);
   }
@@ -127,7 +150,7 @@ bool LNS::buildRegretEntry(
                                    secondBestUtility.taskPosition};
 
   double value = 0;
-  if (regretType == "absolute") {
+  if (isRegretTypeAbsolute()) {
     value = secondBestUtility.value - bestUtility.value;
   } else {
     value = (secondBestUtility.value + 1) / (bestUtility.value + 1);
@@ -144,7 +167,7 @@ bool LNS::prepareRegretWorkspaceForTask(
     const vector<char>& workspaceTouchedAgents,
     vector<pair<int, int>>& precedenceConstraints,
     vector<int>& assignmentOwnerLookup, vector<int>& assignmentPosLookup,
-    int& earliestTimestep) {
+    int& earliestTimestep, const vector<char>* precomputedAncestorsOfTask) {
   earliestTimestep = 0;
 
   const auto& inputPrecedenceConstraints =
@@ -281,18 +304,27 @@ bool LNS::prepareRegretWorkspaceForTask(
     }
   }
 
-  vector<vector<int>> ancestors(instance_.getTasksNum());
-  for (const auto& precConstraint : precedenceConstraints) {
-    if (precConstraint.first < 0 || precConstraint.second < 0 ||
-        precConstraint.first >= instance_.getTasksNum() ||
-        precConstraint.second >= instance_.getTasksNum()) {
-      continue;
+  vector<char> ancestorsOfTask;
+  if (precomputedAncestorsOfTask != nullptr &&
+      (int)precomputedAncestorsOfTask->size() == instance_.getTasksNum()) {
+    ancestorsOfTask = *precomputedAncestorsOfTask;
+    if (task >= 0 && task < (int)ancestorsOfTask.size()) {
+      ancestorsOfTask[task] = 0;
     }
-    ancestors[precConstraint.second].push_back(precConstraint.first);
-  }
-  vector<char> ancestorsOfTask = reachableSet(task, ancestors);
-  if (task >= 0 && task < (int)ancestorsOfTask.size()) {
-    ancestorsOfTask[task] = 0;
+  } else {
+    vector<vector<int>> ancestors(instance_.getTasksNum());
+    for (const auto& precConstraint : precedenceConstraints) {
+      if (precConstraint.first < 0 || precConstraint.second < 0 ||
+          precConstraint.first >= instance_.getTasksNum() ||
+          precConstraint.second >= instance_.getTasksNum()) {
+        continue;
+      }
+      ancestors[precConstraint.second].push_back(precConstraint.first);
+    }
+    ancestorsOfTask = reachableSet(task, ancestors);
+    if (task >= 0 && task < (int)ancestorsOfTask.size()) {
+      ancestorsOfTask[task] = 0;
+    }
   }
 
   for (int ancestorTask = 0; ancestorTask < (int)ancestorsOfTask.size();

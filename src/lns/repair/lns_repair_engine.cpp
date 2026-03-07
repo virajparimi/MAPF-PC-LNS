@@ -4,21 +4,27 @@
 RepairPlan RepairEngine::buildPlan(bool enableNrrRepair,
                                    bool nrrFallbackToStandard,
                                    bool incrementalRegret,
-                                   const std::string& repairHeuristic) {
+                                   int repairHeuristicMode) {
   RepairPlan plan;
   plan.tryNrr = enableNrrRepair;
   plan.allowFallbackToStandard = nrrFallbackToStandard;
 
-  if (repairHeuristic == "mapfpc_fixed") {
-    plan.strategy = RepairStrategy::mapfpc_fixed;
-  } else if (repairHeuristic == "mapfpc_neighborhood_fixed") {
-    plan.strategy = RepairStrategy::mapfpc_neighborhood_fixed;
-  } else if (repairHeuristic == "mapfpc_neighborhood_reassign_greedy") {
-    plan.strategy = RepairStrategy::mapfpc_neighborhood_reassign_greedy;
-  } else if (incrementalRegret) {
-    plan.strategy = RepairStrategy::incremental_regret;
-  } else {
-    plan.strategy = RepairStrategy::full_regret;
+  const auto mode =
+      static_cast<LNS::RepairHeuristicMode>(repairHeuristicMode);
+  switch (mode) {
+    case LNS::RepairHeuristicMode::mapfpc_fixed:
+      plan.strategy = RepairStrategy::mapfpc_fixed;
+      break;
+    case LNS::RepairHeuristicMode::mapfpc_neighborhood_fixed:
+      plan.strategy = RepairStrategy::mapfpc_neighborhood_fixed;
+      break;
+    case LNS::RepairHeuristicMode::mapfpc_neighborhood_reassign_greedy:
+      plan.strategy = RepairStrategy::mapfpc_neighborhood_reassign_greedy;
+      break;
+    default:
+      plan.strategy = incrementalRegret ? RepairStrategy::incremental_regret
+                                        : RepairStrategy::full_regret;
+      break;
   }
   return plan;
 }
@@ -57,7 +63,7 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
 
   const RepairPlan plan = RepairEngine::buildPlan(
       lns.enableNrrRepair_, lns.nrrFallbackToStandard_, lns.incrementalRegret_,
-      lns.repairHeuristic);
+      static_cast<int>(lns.getRepairHeuristicMode()));
 
   if (plan.tryNrr && !lns.lnsNeighborhood_.removedTasks.empty()) {
     if (lns.runtimeBudgetExhausted()) {

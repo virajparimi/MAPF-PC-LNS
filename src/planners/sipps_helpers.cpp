@@ -188,12 +188,26 @@ void reconstructPath(const SIPPSNode* goal, int goalArrivalTime,
     const SIPPSNode* parent = nodesReversed[i - 1];
     const SIPPSNode* child = nodesReversed[i];
     int delta = child->timestep - parent->timestep;
-    if (delta < 1) {
+    if (delta < 0) {
       PLOGE << "reconstructPath: non-positive timestep delta " << delta
             << " between parent t=" << parent->timestep
             << " and child t=" << child->timestep << "\n";
       outPath.path.clear();
       return;
+    }
+    if (delta == 0) {
+      // Allow zero-duration identity links used by terminal goal wrappers.
+      // These links carry conflict metadata but do not add path transitions.
+      if (parent->location != child->location ||
+          parent->gVal != child->gVal) {
+        PLOGE << "reconstructPath: invalid zero-duration transition between "
+              << "parent(loc=" << parent->location << ", g=" << parent->gVal
+              << ") and child(loc=" << child->location
+              << ", g=" << child->gVal << ")\n";
+        outPath.path.clear();
+        return;
+      }
+      continue;
     }
     assert(delta >= 1);
 

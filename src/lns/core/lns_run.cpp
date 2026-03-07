@@ -199,6 +199,7 @@ bool LNS::run() {
   constexpr double kAdaptivePortfolioMinFraction = 0.05;
   constexpr double kAdaptivePortfolioMaxFraction = 0.35;
 
+  invalidateCurrentTaskAssignmentIndexCache();
   invalidCandidateRejections = 0;
   marketGuardRejections = 0;
   improvementDiagnosticsStats_.reset();
@@ -597,7 +598,7 @@ bool LNS::run() {
           continue;
         }
         bool candidateFeasible = false;
-        if (goalOccupationMode_ == "reposition_true") {
+        if (isGoalOccupationRepositionTrue()) {
           vector<int> allAgents(instance_.getAgentNum());
           std::iota(allAgents.begin(), allAgents.end(), 0);
           if (!planTerminalReposition(allAgents, true)) {
@@ -610,7 +611,7 @@ bool LNS::run() {
         ConflictMap potentialNeighborhood;
         const bool previousTerminalValidationFlag =
             useTerminalPathsInValidation_;
-        useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
+        useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
         candidateFeasible =
             validateSolution(&potentialNeighborhood, &validationStats);
         useTerminalPathsInValidation_ = previousTerminalValidationFlag;
@@ -626,6 +627,7 @@ bool LNS::run() {
 
     if (haveBestPortfolioSolution) {
       solution_ = bestPortfolioSolution;
+      invalidateCurrentTaskAssignmentIndexCache();
       initialSolutionEffective_ = "portfolio(" + bestPortfolioArm + ")";
       initialSolutionFallbackReason_ = "none";
       success = true;
@@ -668,7 +670,7 @@ bool LNS::run() {
         << ", Runtime(reported) = " << initialSolutionRuntimeReported_
         << "\n";
 
-  if (goalOccupationMode_ == "reposition_true" &&
+  if (isGoalOccupationRepositionTrue() &&
       !terminalPreparedDuringPortfolio) {
     vector<int> allAgents(instance_.getAgentNum());
     std::iota(allAgents.begin(), allAgents.end(), 0);
@@ -683,7 +685,7 @@ bool LNS::run() {
   ConflictMap potentialNeighborhood;  // Need for the conflict removal case
   ValidationStats currentValidationStats;
   vector<pair<int, int>> initialCollisionPairs;
-  useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
+  useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
   bool currentSolutionValid =
       validateSolution(&potentialNeighborhood, &currentValidationStats,
                        &initialCollisionPairs);

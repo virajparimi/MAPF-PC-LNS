@@ -371,6 +371,20 @@ double MovingMetrics::computeMovingMetrics(int numberOfConflicts,
   // Compute the new sum based on the adding the new sample and removing the oldest sample
   sumOfNumConflicts += numberOfConflicts - oldestNumConflicts;
   sumOfNumCosts += sumOfCosts - oldestNumCost;
+  updatesSinceResync_++;
+  if (updatesSinceResync_ >= resyncPeriod_) {
+    long double exactConflictSum = 0.0L;
+    long double exactCostSum = 0.0L;
+    for (double value : conflictNum) {
+      exactConflictSum += static_cast<long double>(value);
+    }
+    for (double value : costNum) {
+      exactCostSum += static_cast<long double>(value);
+    }
+    sumOfNumConflicts = static_cast<double>(exactConflictSum);
+    sumOfNumCosts = static_cast<double>(exactCostSum);
+    updatesSinceResync_ = 0;
+  }
 
   // Compute the moving average and variance of the number of conflicts and sum of costs variables
   const double windowSize = (double)size;

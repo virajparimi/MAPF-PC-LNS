@@ -33,6 +33,7 @@ class MultiLabelAStarNode : public LLNode {
   MlAStarFocalHeap::handle_type focalHandle;
   bool inFocal = false;
   int indexedFVal = std::numeric_limits<int>::min();
+  int indexedFSlot = -1;
 
   MultiLabelAStarNode() = default;
 
@@ -143,6 +144,7 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
   void releaseNodes();
   void updateFocalList();
   void registerOpenNodeByF(MultiLabelAStarNode* node);
+  void unregisterOpenNodeByF(MultiLabelAStarNode* node);
   inline MultiLabelAStarNode* popNode();
   inline void pushNode(MultiLabelAStarNode* node);
   void updatePath(const LLNode* goal, Path& path);

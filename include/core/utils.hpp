@@ -21,6 +21,8 @@ ConflictMap extractNConflicts(int size, const ConflictMap& conflicts);
 struct MovingMetrics {
  private:
   int size{}, oldestValue = 0;
+  int updatesSinceResync_ = 0;
+  int resyncPeriod_ = 0;
   vector<double> conflictNum{}, costNum{};
   double lnsConflictWeight{}, lnsCostWeight{}, sumOfNumConflicts{},
       sumOfNumCosts{};
@@ -43,6 +45,9 @@ struct MovingMetrics {
     costNum.assign(windowSize, costs);
     sumOfNumConflicts = conflicts * static_cast<double>(windowSize);
     sumOfNumCosts = costs * static_cast<double>(windowSize);
+    // Periodically resync running sums from the full window to prevent
+    // long-horizon floating-point drift from incremental +/- updates.
+    resyncPeriod_ = std::max(32, windowSize);
   }
   double computeMovingMetrics(int numberOfConflicts, int sumOfCosts);
 };

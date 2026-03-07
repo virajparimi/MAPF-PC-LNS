@@ -18,7 +18,11 @@ std::variant<bool, Utility> LNS::insertTask(
     vector<pair<int, int>>* precedenceConstraints,
     const TaskBaselineMetrics* baselineMetrics,
     SingleAgentSolver* reusablePlanner,
-    bool rollbackAfter) {
+    bool rollbackAfter,
+    const vector<int>* assignmentOwnerLookupArg,
+    const vector<int>* assignmentPosLookupArg,
+    const vector<int>* previousAssignmentOwnerLookupArg,
+    const vector<int>* previousAssignmentPosLookupArg) {
   if (runtimeBudgetExhausted()) {
     return false;
   }
@@ -37,9 +41,26 @@ std::variant<bool, Utility> LNS::insertTask(
           << " (agent_count=" << workspace.numAgents() << ")\n";
     return false;
   }
-  const AssignmentLookup previousLookup =
-      buildAssignmentLookup(previousSolution_, taskCount);
-  AssignmentLookup assignmentLookup = buildAssignmentLookup(workspace, taskCount);
+  AssignmentLookup previousLookupStorage;
+  const vector<int>* previousOwnerLookup = previousAssignmentOwnerLookupArg;
+  const vector<int>* previousPosLookup = previousAssignmentPosLookupArg;
+  if (previousOwnerLookup == nullptr || previousPosLookup == nullptr ||
+      (int)previousOwnerLookup->size() != taskCount ||
+      (int)previousPosLookup->size() != taskCount) {
+    previousLookupStorage = buildAssignmentLookup(previousSolution_, taskCount);
+    previousOwnerLookup = &previousLookupStorage.owner;
+    previousPosLookup = &previousLookupStorage.pos;
+  }
+
+  AssignmentLookup assignmentLookup;
+  if (assignmentOwnerLookupArg != nullptr && assignmentPosLookupArg != nullptr &&
+      (int)assignmentOwnerLookupArg->size() == taskCount &&
+      (int)assignmentPosLookupArg->size() == taskCount) {
+    assignmentLookup.owner = *assignmentOwnerLookupArg;
+    assignmentLookup.pos = *assignmentPosLookupArg;
+  } else {
+    assignmentLookup = buildAssignmentLookup(workspace, taskCount);
+  }
   const vector<int>* assignmentOwnerLookup = &assignmentLookup.owner;
   const vector<int>* assignmentPosLookup = &assignmentLookup.pos;
   vector<pair<int, int>> adjustedPrecedenceConstraints;
@@ -584,10 +605,10 @@ std::variant<bool, Utility> LNS::insertTask(
 
           const int ancestorTaskLocalIndex =
               (nextTaskAncestor >= 0 &&
-               nextTaskAncestor < (int)previousLookup.pos.size() &&
-               previousLookup.owner[nextTaskAncestor] ==
+               nextTaskAncestor < (int)previousPosLookup->size() &&
+               (*previousOwnerLookup)[nextTaskAncestor] ==
                    nextTaskAncestorAgent)
-                  ? previousLookup.pos[nextTaskAncestor]
+                  ? (*previousPosLookup)[nextTaskAncestor]
                   : UNASSIGNED;
           if (ancestorTaskLocalIndex == UNASSIGNED ||
               ancestorTaskLocalIndex >=
@@ -718,8 +739,8 @@ std::variant<bool, Utility> LNS::insertTask(
           if (!buildConstraintTable(constraintTable, taskPacket,
                                     goalLocations[localTask], workspace,
                                     activePrecedenceConstraints, false,
-                                    assignmentOwnerLookup,
-                                    assignmentPosLookup)) {
+                                    assignmentOwnerLookup, assignmentPosLookup,
+                                    previousOwnerLookup, previousPosLookup)) {
             PLOGE << "insertTask: failed to build constraint table for agent "
                   << agent << ", task " << assignmentsFor(agent)[localTask]
                   << " at position " << localTask << "\n";
@@ -819,8 +840,8 @@ std::variant<bool, Utility> LNS::insertTask(
     if (!buildConstraintTable(constraintTable, nextTaskPacket,
                               goalLocations[nextTaskPosition], workspace,
                               activePrecedenceConstraints, true,
-                              assignmentOwnerLookup,
-                              assignmentPosLookup)) {
+                              assignmentOwnerLookup, assignmentPosLookup,
+                              previousOwnerLookup, previousPosLookup)) {
       PLOGE << "insertTask: failed to build constraint table for next task "
             << nextTask << " (agent " << regretPacket.agent << ", position "
             << nextTaskPosition << ")\n";
@@ -888,8 +909,8 @@ std::variant<bool, Utility> LNS::insertTask(
     if (!buildConstraintTable(constraintTable, regretPacket,
                               goalLocations[regretPacket.taskPosition],
                               workspace, activePrecedenceConstraints, false,
-                              assignmentOwnerLookup,
-                              assignmentPosLookup)) {
+                              assignmentOwnerLookup, assignmentPosLookup,
+                              previousOwnerLookup, previousPosLookup)) {
       PLOGE << "insertTask: failed to build constraint table for task "
             << regretPacket.task << " (agent " << regretPacket.agent
             << ", position " << regretPacket.taskPosition << ")\n";

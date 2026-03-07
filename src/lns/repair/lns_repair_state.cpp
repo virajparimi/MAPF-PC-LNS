@@ -209,7 +209,7 @@ vector<int> LNS::computeDirtyTasksAfterCommit(
     }
   }
 
-  const bool precedencePressureActive = (repairHeuristic == "regret");
+  const bool precedencePressureActive = isRepairHeuristicRegret();
   if (precedencePressureActive) {
     const auto& ancestors = instance_.getAncestorsRef();
     stack.clear();

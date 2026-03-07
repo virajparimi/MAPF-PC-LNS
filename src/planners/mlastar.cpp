@@ -3,6 +3,10 @@
 #include "astar.hpp"
 #include "common.hpp"
 
+namespace {
+constexpr int kUnindexedFVal = std::numeric_limits<int>::min();
+}
+
 void MultiLabelSpaceTimeAStar::releaseNodes() {
   // d_ary_heap uses an array-backed structure; pop() and clear() are both
   // iterative (no recursion), so large frontiers do not overflow the stack.
@@ -20,9 +24,85 @@ void MultiLabelSpaceTimeAStar::registerOpenNodeByF(MultiLabelAStarNode* node) {
   if (!incrementalFocalRefresh_) {
     return;
   }
+  if (node == nullptr) {
+    return;
+  }
   const int fVal = node->getFVal();
+  if (node->indexedFVal == fVal && node->indexedFSlot >= 0) {
+    const auto it = openByF_.find(fVal);
+    if (it != openByF_.end() && node->indexedFSlot < (int)it->second.size() &&
+        it->second[node->indexedFSlot] == node) {
+      return;
+    }
+  }
+  unregisterOpenNodeByF(node);
+  auto& bucket = openByF_[fVal];
   node->indexedFVal = fVal;
-  openByF_[fVal].push_back(node);
+  node->indexedFSlot = (int)bucket.size();
+  bucket.push_back(node);
+}
+
+void MultiLabelSpaceTimeAStar::unregisterOpenNodeByF(
+    MultiLabelAStarNode* node) {
+  if (!incrementalFocalRefresh_) {
+    return;
+  }
+  if (node == nullptr) {
+    return;
+  }
+  if (node->indexedFVal == kUnindexedFVal || node->indexedFSlot < 0) {
+    node->indexedFVal = kUnindexedFVal;
+    node->indexedFSlot = -1;
+    return;
+  }
+
+  const int bucketFVal = node->indexedFVal;
+  const int slot = node->indexedFSlot;
+  auto it = openByF_.find(bucketFVal);
+  if (it == openByF_.end()) {
+    node->indexedFVal = kUnindexedFVal;
+    node->indexedFSlot = -1;
+    return;
+  }
+
+  auto& bucket = it->second;
+  bool removed = false;
+  if (slot < (int)bucket.size() && bucket[slot] == node) {
+    const int last = (int)bucket.size() - 1;
+    if (slot != last) {
+      bucket[slot] = bucket[last];
+      if (bucket[slot] != nullptr) {
+        bucket[slot]->indexedFSlot = slot;
+      }
+    }
+    bucket.pop_back();
+    removed = true;
+  } else {
+    for (int i = 0; i < (int)bucket.size(); i++) {
+      if (bucket[i] == node) {
+        const int last = (int)bucket.size() - 1;
+        if (i != last) {
+          bucket[i] = bucket[last];
+          if (bucket[i] != nullptr) {
+            bucket[i]->indexedFSlot = i;
+          }
+        }
+        bucket.pop_back();
+        removed = true;
+        break;
+      }
+    }
+  }
+
+  if (!removed) {
+    PLOGD << "MLA*: openByF unregister fallback miss for f=" << bucketFVal
+          << "\n";
+  }
+  if (bucket.empty()) {
+    openByF_.erase(it);
+  }
+  node->indexedFVal = kUnindexedFVal;
+  node->indexedFSlot = -1;
 }
 
 void MultiLabelSpaceTimeAStar::pushNode(MultiLabelAStarNode* node) {
@@ -44,11 +124,13 @@ MultiLabelAStarNode* MultiLabelSpaceTimeAStar::popNode() {
     focalList_.pop();
     node->inFocal = false;
     if (!node->inOpenlist) {
+      unregisterOpenNodeByF(node);
       continue;
     }
     numExpanded++;
-    node->inOpenlist = false;
     openList_.erase(node->openHandle);
+    unregisterOpenNodeByF(node);
+    node->inOpenlist = false;
     return node;
   }
   return nullptr;

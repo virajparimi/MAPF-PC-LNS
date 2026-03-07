@@ -132,7 +132,9 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
                                vector<pair<int, int>>* precedenceConstraints,
                                bool findingNextTask,
                                const vector<int>* assignmentOwnerLookup,
-                               const vector<int>* assignmentPosLookup) {
+                               const vector<int>* assignmentPosLookup,
+                               const vector<int>* previousAssignmentOwnerLookup,
+                               const vector<int>* previousAssignmentPosLookup) {
   const bool traceCtTask = shouldTraceConstraintDebugTask(taskPacket.task);
 
   const int taskCount = instance_.getTasksNum();
@@ -196,8 +198,16 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
       }
     }
   }
-  const AssignmentLookup previousLookup =
-      buildAssignmentLookup(previousSolution_, taskCount);
+  AssignmentLookup previousLookupStorage;
+  const vector<int>* previousOwnerLookup = previousAssignmentOwnerLookup;
+  const vector<int>* previousPosLookup = previousAssignmentPosLookup;
+  if (previousOwnerLookup == nullptr || previousPosLookup == nullptr ||
+      (int)previousOwnerLookup->size() != taskCount ||
+      (int)previousPosLookup->size() != taskCount) {
+    previousLookupStorage = buildAssignmentLookup(previousSolution_, taskCount);
+    previousOwnerLookup = &previousLookupStorage.owner;
+    previousPosLookup = &previousLookupStorage.pos;
+  }
 
   const auto resolveAncestorReservation =
       [&](int ancestorTask, bool pendingAncestor,
@@ -286,8 +296,8 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
 
     if (pendingAncestor) {
       int prevAssignedAgent =
-          (ancestorTask >= 0 && ancestorTask < (int)previousLookup.owner.size())
-              ? previousLookup.owner[ancestorTask]
+          (ancestorTask >= 0 && ancestorTask < (int)previousOwnerLookup->size())
+              ? (*previousOwnerLookup)[ancestorTask]
               : UNASSIGNED;
       if (prevAssignedAgent == UNASSIGNED) {
         prevAssignedAgent =
@@ -303,9 +313,9 @@ bool LNS::buildConstraintTable(ConstraintTable& constraintTable,
         return false;
       }
       const int prevLocalIndex =
-          (ancestorTask >= 0 && ancestorTask < (int)previousLookup.pos.size() &&
-           previousLookup.owner[ancestorTask] == prevAssignedAgent)
-              ? previousLookup.pos[ancestorTask]
+          (ancestorTask >= 0 && ancestorTask < (int)previousPosLookup->size() &&
+           (*previousOwnerLookup)[ancestorTask] == prevAssignedAgent)
+              ? (*previousPosLookup)[ancestorTask]
               : UNASSIGNED;
       if (prevLocalIndex == UNASSIGNED ||
           prevLocalIndex < 0 ||

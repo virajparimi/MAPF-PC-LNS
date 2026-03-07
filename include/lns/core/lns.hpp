@@ -26,6 +26,18 @@ class DestroyOrchestrator;
 
 class LNS {
  public:
+  enum class OptimizationObjectiveMode { soc, makespan };
+  enum class GoalOccupationMode { stay, reposition_true };
+  enum class RepairHeuristicMode {
+    regret,
+    market_shortlist_regret,
+    mapfpc_fixed,
+    mapfpc_neighborhood_fixed,
+    mapfpc_neighborhood_reassign_greedy
+  };
+  enum class NrrMiniSolverMode { pbs, cbs, auto_mode };
+  enum class RegretTypeMode { absolute, relative };
+
   struct RegretWorkspace;
   using LowLevelSearchStats = lns_stats::LowLevelSearchStats;
   using RegretEvalStats = lns_stats::RegretEvalStats;
@@ -172,14 +184,19 @@ class LNS {
       RegretWorkspace& workspace, int task,
       const vector<pair<int, int>>& precedenceConstraints,
       vector<char>& workspaceTouchedAgents,
-      vector<char>* outAncestorsOfTask = nullptr);
+      vector<char>* outAncestorsOfTask = nullptr,
+      const vector<vector<int>>* prebuiltAncestors = nullptr,
+      const vector<int>* previousAssignmentOwnerLookup = nullptr,
+      const vector<int>* previousAssignmentPosLookup = nullptr);
   void evaluateAgentPositionCandidate(
       int task, int agent, int earliestTimestep, RegretWorkspace& workspace,
       vector<pair<int, int>>* precedenceConstraints,
       const TaskBaselineMetrics& baselineMetrics,
       pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes,
       vector<int>* candidateAgents, const vector<int>* assignmentOwnerLookup,
-      const vector<int>* assignmentPosLookup);
+      const vector<int>* assignmentPosLookup,
+      const vector<int>* previousAssignmentOwnerLookup = nullptr,
+      const vector<int>* previousAssignmentPosLookup = nullptr);
   bool buildRegretEntry(
       int task,
       pairing_heap<Utility, compare<Utility::CompareUtilities>>& serviceTimes);
@@ -188,7 +205,8 @@ class LNS {
       const vector<char>& workspaceTouchedAgents,
       vector<pair<int, int>>& precedenceConstraints,
       vector<int>& assignmentOwnerLookup, vector<int>& assignmentPosLookup,
-      int& earliestTimestep);
+      int& earliestTimestep,
+      const vector<char>* precomputedAncestorsOfTask = nullptr);
   void reservePathWithGoalPolicy(ConstraintTable& constraintTable,
                                  const AgentTaskPath& path,
                                  bool isFinalTask,
@@ -259,7 +277,9 @@ class LNS {
                             vector<pair<int, int>>* precedenceConstraints,
                             bool findingNextTask = false,
                             const vector<int>* assignmentOwnerLookup = nullptr,
-                            const vector<int>* assignmentPosLookup = nullptr);
+                            const vector<int>* assignmentPosLookup = nullptr,
+                            const vector<int>* previousAssignmentOwnerLookup = nullptr,
+                            const vector<int>* previousAssignmentPosLookup = nullptr);
 
   int extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue);
   int extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue,
@@ -271,13 +291,20 @@ class LNS {
   bool computeRegretForTask(
       int task,
       const vector<pair<int, int>>& fullPrecedenceConstraints);
+  bool computeRegretForTask(
+      int task, const vector<pair<int, int>>& fullPrecedenceConstraints,
+      const vector<vector<int>>& fullAncestors,
+      const vector<int>* previousAssignmentOwnerLookup = nullptr,
+      const vector<int>* previousAssignmentPosLookup = nullptr);
   void computeRegretForTaskWithAgent(
       TaskRegretPacket regretPacket, RegretWorkspace& workspace,
       vector<pair<int, int>>* precedenceConstraints,
       const TaskBaselineMetrics& baselineMetrics,
       pairing_heap<Utility, compare<Utility::CompareUtilities>>* serviceTimes,
       const vector<int>* assignmentOwnerLookup = nullptr,
-      const vector<int>* assignmentPosLookup = nullptr);
+      const vector<int>* assignmentPosLookup = nullptr,
+      const vector<int>* previousAssignmentOwnerLookup = nullptr,
+      const vector<int>* previousAssignmentPosLookup = nullptr);
 
   bool recomputeRegretsForTasks(const vector<int>& tasks);
   std::optional<Regret> popNextValidRegret();
@@ -303,7 +330,11 @@ class LNS {
       vector<pair<int, int>>* precedenceConstraints,
       const TaskBaselineMetrics* baselineMetrics = nullptr,
       SingleAgentSolver* reusablePlanner = nullptr,
-      bool rollbackAfter = false);
+      bool rollbackAfter = false,
+      const vector<int>* assignmentOwnerLookup = nullptr,
+      const vector<int>* assignmentPosLookup = nullptr,
+      const vector<int>* previousAssignmentOwnerLookup = nullptr,
+      const vector<int>* previousAssignmentPosLookup = nullptr);
   bool insertBestRegretTask(TaskRegretPacket bestRegretPacket);
 
  public:
@@ -391,6 +422,43 @@ class LNS {
   }
   const string& getOptimizationObjective() const {
     return optimizationObjective_;
+  }
+  OptimizationObjectiveMode getOptimizationObjectiveMode() const {
+    return optimizationObjectiveMode_;
+  }
+  GoalOccupationMode getGoalOccupationMode() const {
+    return goalOccupationModeMode_;
+  }
+  RepairHeuristicMode getRepairHeuristicMode() const {
+    return repairHeuristicMode_;
+  }
+  NrrMiniSolverMode getNrrMiniSolverMode() const {
+    return nrrMiniSolverMode_;
+  }
+  RegretTypeMode getRegretTypeMode() const {
+    return regretTypeMode_;
+  }
+  bool isOptimizationObjectiveSoc() const {
+    return optimizationObjectiveMode_ == OptimizationObjectiveMode::soc;
+  }
+  bool isGoalOccupationStay() const {
+    return goalOccupationModeMode_ == GoalOccupationMode::stay;
+  }
+  bool isGoalOccupationRepositionTrue() const {
+    return goalOccupationModeMode_ == GoalOccupationMode::reposition_true;
+  }
+  bool isRepairHeuristicRegret() const {
+    return repairHeuristicMode_ == RepairHeuristicMode::regret;
+  }
+  bool isRepairHeuristicMarketShortlistRegret() const {
+    return repairHeuristicMode_ ==
+           RepairHeuristicMode::market_shortlist_regret;
+  }
+  bool isNrrMiniSolverPbs() const {
+    return nrrMiniSolverMode_ == NrrMiniSolverMode::pbs;
+  }
+  bool isRegretTypeAbsolute() const {
+    return regretTypeMode_ == RegretTypeMode::absolute;
   }
   int evaluateObjective(const FeasibleSolution& solution) const {
     return computeObjectiveValue(solution);
@@ -487,6 +555,9 @@ class LNS {
   bool thresholdAcceptance();
   bool oldBachelorsAcceptance();
   bool greatDelugeAlgorithm();
+
+  void invalidateCurrentTaskAssignmentIndexCache();
+  const vector<int>& getCurrentTaskPositionIndexByTask() const;
 
   int marketTimeBucket(int timestep) const;
   uint64_t makeMarketVertexKey(int location, int bucket) const;

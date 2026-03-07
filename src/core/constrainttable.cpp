@@ -69,11 +69,9 @@ void ConstraintTable::incrementSoftConflictCount(uint64_t key, int timestep) {
     return;
   }
   auto& bucket = softConflictTable_[key];
-  if ((int)bucket.counts.size() <= timestep) {
-    bucket.counts.resize(timestep + 1, 0);
-  }
-  if (bucket.counts[timestep] < INT_MAX) {
-    bucket.counts[timestep]++;
+  int& count = bucket.counts[timestep];
+  if (count < INT_MAX) {
+    count++;
   }
 }
 
@@ -85,10 +83,11 @@ int ConstraintTable::lookupSoftConflictCount(uint64_t key, int timestep) const {
   if (it == softConflictTable_.end()) {
     return 0;
   }
-  if (timestep >= (int)it->second.counts.size()) {
+  const auto countIt = it->second.counts.find(timestep);
+  if (countIt == it->second.counts.end()) {
     return 0;
   }
-  return it->second.counts[timestep];
+  return countIt->second;
 }
 
 void ConstraintTable::insertSoftGoalStart(int location, int startTime) {
@@ -248,13 +247,13 @@ int ConstraintTable::getEarliestSoftConflictFreeTimestep(size_t currentLocation,
     return -1;
   }
 
-  const vector<int>* vertexCounts = nullptr;
+  const map<int, int>* vertexCounts = nullptr;
   const auto vertexIt = softConflictTable_.find((uint64_t)nextLocation);
   if (vertexIt != softConflictTable_.end()) {
     vertexCounts = &vertexIt->second.counts;
   }
 
-  const vector<int>* edgeCounts = nullptr;
+  const map<int, int>* edgeCounts = nullptr;
   if (currentLocation != nextLocation) {
     const auto edgeIt =
         softConflictTable_.find(getEdgeIndex(currentLocation, nextLocation));
@@ -277,10 +276,12 @@ int ConstraintTable::getEarliestSoftConflictFreeTimestep(size_t currentLocation,
     return -1;
   }
 
-  const int vertexHorizon =
-      vertexCounts == nullptr ? -1 : (int)vertexCounts->size() - 1;
-  const int edgeHorizon =
-      edgeCounts == nullptr ? -1 : (int)edgeCounts->size() - 1;
+  const int vertexHorizon = (vertexCounts == nullptr || vertexCounts->empty())
+                                ? -1
+                                : vertexCounts->rbegin()->first;
+  const int edgeHorizon = (edgeCounts == nullptr || edgeCounts->empty())
+                              ? -1
+                              : edgeCounts->rbegin()->first;
   const int finiteConflictHorizon = max(vertexHorizon, edgeHorizon);
 
   if (finiteConflictHorizon < tMin) {
@@ -288,14 +289,49 @@ int ConstraintTable::getEarliestSoftConflictFreeTimestep(size_t currentLocation,
   }
 
   const int scanEnd = min(maxGoalConflictFreeTime, finiteConflictHorizon);
-  for (int t = tMin; t <= scanEnd; t++) {
-    const int vertexConflicts =
-        (vertexCounts != nullptr && t <= vertexHorizon) ? (*vertexCounts)[t] : 0;
-    const int edgeConflicts =
-        (edgeCounts != nullptr && t <= edgeHorizon) ? (*edgeCounts)[t] : 0;
-    if (vertexConflicts == 0 && edgeConflicts == 0) {
+  int t = tMin;
+  auto vertexPos =
+      (vertexCounts == nullptr) ? map<int, int>::const_iterator{}
+                                : vertexCounts->lower_bound(tMin);
+  auto edgePos = (edgeCounts == nullptr) ? map<int, int>::const_iterator{}
+                                         : edgeCounts->lower_bound(tMin);
+
+  while (t <= scanEnd) {
+    if (vertexCounts != nullptr) {
+      while (vertexPos != vertexCounts->end() && vertexPos->first < t) {
+        ++vertexPos;
+      }
+    }
+    if (edgeCounts != nullptr) {
+      while (edgePos != edgeCounts->end() && edgePos->first < t) {
+        ++edgePos;
+      }
+    }
+
+    int nextBlocked = scanEnd + 1;
+    if (vertexCounts != nullptr && vertexPos != vertexCounts->end()) {
+      nextBlocked = min(nextBlocked, vertexPos->first);
+    }
+    if (edgeCounts != nullptr && edgePos != edgeCounts->end()) {
+      nextBlocked = min(nextBlocked, edgePos->first);
+    }
+
+    if (nextBlocked > scanEnd) {
       return t;
     }
+    if (t < nextBlocked) {
+      return t;
+    }
+
+    while (vertexCounts != nullptr && vertexPos != vertexCounts->end() &&
+           vertexPos->first == nextBlocked) {
+      ++vertexPos;
+    }
+    while (edgeCounts != nullptr && edgePos != edgeCounts->end() &&
+           edgePos->first == nextBlocked) {
+      ++edgePos;
+    }
+    t = nextBlocked + 1;
   }
 
   if (scanEnd < maxGoalConflictFreeTime) {
@@ -314,9 +350,10 @@ int ConstraintTable::getFutureSoftConflicts(size_t location, int timestep) const
   const auto vertexIt = softConflictTable_.find((uint64_t)location);
   if (vertexIt != softConflictTable_.end()) {
     const int begin = max(0, timestep + 1);
-    const int end = min(horizon, (int)vertexIt->second.counts.size() - 1);
-    for (int t = begin; t <= end; t++) {
-      conflicts += vertexIt->second.counts[t];
+    auto pos = vertexIt->second.counts.lower_bound(begin);
+    while (pos != vertexIt->second.counts.end() && pos->first <= horizon) {
+      conflicts += pos->second;
+      ++pos;
     }
   }
 

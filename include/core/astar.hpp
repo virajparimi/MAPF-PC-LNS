@@ -42,7 +42,9 @@ class LLNode {
 
   struct OpenCompareNode {
     bool operator()(const LLNode* lhs, const LLNode* rhs) const {
-      if (lhs->gVal + lhs->hVal == rhs->gVal + rhs->hVal) {
+      const int lhsF = lhs->getFVal();
+      const int rhsF = rhs->getFVal();
+      if (lhsF == rhsF) {
         if (lhs->hVal == rhs->hVal) {
           if (lhs->tieBreaker == rhs->tieBreaker) {
             return false;
@@ -51,7 +53,7 @@ class LLNode {
         }
         return lhs->hVal > rhs->hVal;
       }
-      return lhs->gVal + lhs->hVal > rhs->gVal + rhs->hVal;
+      return lhsF > rhsF;
     }
   };
 
@@ -61,7 +63,9 @@ class LLNode {
         return lhs->secondaryKey > rhs->secondaryKey;
       }
       if (lhs->numOfConflicts == rhs->numOfConflicts) {
-        if (lhs->gVal + lhs->hVal == rhs->gVal + rhs->hVal) {
+        const int lhsF = lhs->getFVal();
+        const int rhsF = rhs->getFVal();
+        if (lhsF == rhsF) {
           if (lhs->hVal == rhs->hVal) {
             if (lhs->tieBreaker == rhs->tieBreaker) {
               return false;
@@ -70,7 +74,7 @@ class LLNode {
           }
           return lhs->hVal > rhs->hVal;
         }
-        return lhs->gVal + lhs->hVal > rhs->gVal + rhs->hVal;
+        return lhsF > rhsF;
       }
       return lhs->numOfConflicts > rhs->numOfConflicts;
     }

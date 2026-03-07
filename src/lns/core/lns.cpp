@@ -343,7 +343,7 @@ void LNS::reservePathWithGoalPolicy(ConstraintTable& constraintTable,
   if (path.empty()) {
     return;
   }
-  if (!isFinalTask || goalOccupationMode_ == "stay") {
+  if (!isFinalTask || isGoalOccupationStay()) {
     if (softOnly) {
       constraintTable.addSoftPath(path, isFinalTask);
     } else {
@@ -364,7 +364,7 @@ void LNS::reservePathWithGoalPolicy(ConstraintTable& constraintTable,
 void LNS::reserveTerminalPathIfActive(ConstraintTable& constraintTable,
                                       int agent,
                                       bool softOnly) const {
-  if (goalOccupationMode_ != "reposition_true") {
+  if (!isGoalOccupationRepositionTrue()) {
     return;
   }
   if (agent < 0 || agent >= instance_.getAgentNum()) {
@@ -411,7 +411,7 @@ bool LNS::didAgentServicePathChange(int agent) const {
 vector<int> LNS::selectTerminalReplanAgents(
     const vector<int>& candidateAgents) const {
   vector<int> replanAgents;
-  if (goalOccupationMode_ != "reposition_true") {
+  if (!isGoalOccupationRepositionTrue()) {
     return replanAgents;
   }
 
@@ -547,14 +547,56 @@ int LNS::cascadeTaskBudget() const {
   return max(factorBudget, offsetBudget);
 }
 
+void LNS::invalidateCurrentTaskAssignmentIndexCache() {
+  currentTaskAssignmentIndexCacheValid_ = false;
+}
+
+const vector<int>& LNS::getCurrentTaskPositionIndexByTask() const {
+  const int numTasks = instance_.getTasksNum();
+  if (!currentTaskAssignmentIndexCacheValid_ ||
+      (int)currentTaskPosByTaskCache_.size() != numTasks ||
+      (int)currentTaskOwnerByTaskCache_.size() != numTasks) {
+    currentTaskOwnerByTaskCache_.assign(numTasks, UNASSIGNED);
+    currentTaskPosByTaskCache_.assign(numTasks, -1);
+    int duplicateTaskOwners = 0;
+    for (int agent = 0; agent < solution_.numOfAgents; agent++) {
+      const auto& assignments = solution_.agents[agent].taskAssignments;
+      for (int p = 0; p < (int)assignments.size(); p++) {
+        const int task = assignments[p];
+        if (task < 0 || task >= numTasks) {
+          continue;
+        }
+        if (currentTaskOwnerByTaskCache_[task] != UNASSIGNED) {
+          duplicateTaskOwners++;
+          if (duplicateTaskOwners <= 5) {
+            PLOGE << "Duplicate task ownership detected in current solution for task "
+                  << task << " (existing agent="
+                  << currentTaskOwnerByTaskCache_[task]
+                  << ", new agent=" << agent << ")\n";
+          }
+        }
+        currentTaskOwnerByTaskCache_[task] = agent;
+        currentTaskPosByTaskCache_[task] = p;
+      }
+    }
+    if (duplicateTaskOwners > 5) {
+      PLOGE << "Duplicate task ownership detected for " << duplicateTaskOwners
+            << " tasks in current solution assignment index.\n";
+    }
+    currentTaskAssignmentIndexCacheValid_ = true;
+  }
+  return currentTaskPosByTaskCache_;
+}
+
 void LNS::restoreSolutionFromPrevious() {
   solutionRestoreStats_.restoreCalls++;
   solution_ = previousSolution_;
+  invalidateCurrentTaskAssignmentIndexCache();
   solutionRestoreStats_.fullRestores++;
 }
 
 int LNS::computeObjectiveValue(const Solution& solution) const {
-  if (optimizationObjective_ == "soc") {
+  if (isOptimizationObjectiveSoc()) {
     return solution.sumOfCosts;
   }
   long long makespan = 0;
@@ -569,7 +611,7 @@ int LNS::computeObjectiveValue(const Solution& solution) const {
 }
 
 int LNS::computeObjectiveValue(const FeasibleSolution& solution) const {
-  if (optimizationObjective_ == "soc") {
+  if (isOptimizationObjectiveSoc()) {
     return solution.sumOfCosts;
   }
   long long makespan = 0;
@@ -663,6 +705,10 @@ LNS::LNS(int numOfIterations, const Instance& instance,
           << "'; defaulting to 'soc'\n";
     optimizationObjective_ = "soc";
   }
+  optimizationObjectiveMode_ =
+      (optimizationObjective_ == "makespan")
+          ? OptimizationObjectiveMode::makespan
+          : OptimizationObjectiveMode::soc;
   goalOccupationMode_ = parameters.core.goalOccupationMode;
   terminalRepositionStats_.reset();
   improvementDiagnosticsStats_.reset();
@@ -675,6 +721,9 @@ LNS::LNS(int numOfIterations, const Instance& instance,
           << "'; defaulting to 'reposition_true'\n";
     goalOccupationMode_ = "reposition_true";
   }
+  goalOccupationModeMode_ =
+      (goalOccupationMode_ == "stay") ? GoalOccupationMode::stay
+                                      : GoalOccupationMode::reposition_true;
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
   acceptOnlyValidCandidates_ = parameters.core.acceptOnlyValidCandidates;
@@ -688,6 +737,18 @@ LNS::LNS(int numOfIterations, const Instance& instance,
           << "'; defaulting to 'regret'\n";
     repairHeuristic = "regret";
   }
+  if (repairHeuristic == "market_shortlist_regret") {
+    repairHeuristicMode_ = RepairHeuristicMode::market_shortlist_regret;
+  } else if (repairHeuristic == "mapfpc_fixed") {
+    repairHeuristicMode_ = RepairHeuristicMode::mapfpc_fixed;
+  } else if (repairHeuristic == "mapfpc_neighborhood_fixed") {
+    repairHeuristicMode_ = RepairHeuristicMode::mapfpc_neighborhood_fixed;
+  } else if (repairHeuristic == "mapfpc_neighborhood_reassign_greedy") {
+    repairHeuristicMode_ =
+        RepairHeuristicMode::mapfpc_neighborhood_reassign_greedy;
+  } else {
+    repairHeuristicMode_ = RepairHeuristicMode::regret;
+  }
   enableNrrRepair_ = parameters.core.enableNrrRepair;
   nrrFallbackToStandard_ = parameters.core.nrrFallbackToStandard;
   nrrGlobalReassign_ = parameters.core.nrrGlobalReassign;
@@ -699,6 +760,13 @@ LNS::LNS(int numOfIterations, const Instance& instance,
     PLOGW << "Unknown nrrMiniSolver '" << nrrMiniSolver_
           << "'; defaulting to 'cbs'\n";
     nrrMiniSolver_ = "cbs";
+  }
+  if (nrrMiniSolver_ == "pbs") {
+    nrrMiniSolverMode_ = NrrMiniSolverMode::pbs;
+  } else if (nrrMiniSolver_ == "auto") {
+    nrrMiniSolverMode_ = NrrMiniSolverMode::auto_mode;
+  } else {
+    nrrMiniSolverMode_ = NrrMiniSolverMode::cbs;
   }
   nrrCatBackend_ = parameters.core.nrrCatBackend;
   if (nrrCatBackend_ != "legacy" && nrrCatBackend_ != "pathtablewc") {
@@ -725,6 +793,16 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   }
   repairMapfpcTimeoutSec_ = std::max(1, parameters.core.repairMapfpcTimeoutSec);
   regretType = parameters.core.regretType;
+  if (regretType == "relative") {
+    regretTypeMode_ = RegretTypeMode::relative;
+  } else {
+    if (regretType != "absolute") {
+      PLOGW << "Unknown regretType '" << regretType
+            << "'; defaulting to 'absolute'\n";
+      regretType = "absolute";
+    }
+    regretTypeMode_ = RegretTypeMode::absolute;
+  }
   regretCandidateTopK_ = std::max(0, parameters.core.regretCandidateTopK);
   regretShortlistDiagnostics_ = parameters.core.regretShortlistDiagnostics;
   buildSuccessorPressureStaticSignals();

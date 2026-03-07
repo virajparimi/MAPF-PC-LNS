@@ -14,6 +14,7 @@
 #include "lns_internal_helpers.hpp"
 #include "nrr_boundary_windows.hpp"
 #include "lns_repair_nrr_helpers.hpp"
+#include "lns_temp_file_guard.hpp"
 
 bool LNS::runNeighborhoodReoptimizationRepair() {
   // Design reference: docs/mini_solver_repair_NRR_TAPFPC.md
@@ -305,7 +306,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
         return fail("frozen_agent_missing_path");
       }
       reservePathWithGoalPolicy(frozenCt, path, true, false);
-      if (goalOccupationMode_ == "reposition_true" &&
+      if (isGoalOccupationRepositionTrue() &&
           previousSolution_.agents[agent].terminalPathActive &&
           !previousSolution_.agents[agent].terminalPath.empty()) {
         frozenCt.addPath(previousSolution_.agents[agent].terminalPath, true);
@@ -371,7 +372,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
       }
       lns_nrr_helpers::NrrFrozenOccupancyIndex frozenOccupancy;
       frozenOccupancy.buildFromPreviousSolution(
-          instance_, previousSolution_, goalOccupationMode_ == "stay");
+          instance_, previousSolution_, isGoalOccupationStay());
       if (!lns_nrr_helpers::buildIterativeProposalGlobal(
               instance_, numAgents, numTasks, destroyedTasks, destroyedMask,
               candidateAgents, mutableAgents, incumbentTaskOwnerByTask,
@@ -496,7 +497,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
 
   beginPhase(NrrPhase::inputBuild);
   string miniSolver = "cbs";
-  if (nrrMiniSolver_ == "pbs") {
+  if (isNrrMiniSolverPbs()) {
     miniSolver = "pbs";
   }
   if (miniSolver == "pbs") {
@@ -534,29 +535,22 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
       tempDir / ("mapfpc_nrr_paths_" + token + ".txt");
   const fs::path manifestPath =
       tempDir / ("mapfpc_nrr_manifest_" + token + ".txt");
-  auto cleanupTemp = [&]() {
-    if (keepNrrInputs) {
-      return;
-    }
-    std::error_code rmEc;
-    fs::remove(assignmentPath, rmEc);
-    fs::remove(mutableAgentsPath, rmEc);
-    fs::remove(mutableTasksPath, rmEc);
-    fs::remove(initialPathsPath, rmEc);
-    fs::remove(manifestPath, rmEc);
-  };
+  lns_temp_file::ScopedPathCleanup tempCleanup(!keepNrrInputs);
+  tempCleanup.add(assignmentPath);
+  tempCleanup.add(mutableAgentsPath);
+  tempCleanup.add(mutableTasksPath);
+  tempCleanup.add(initialPathsPath);
+  tempCleanup.add(manifestPath);
 
   string assignmentError;
   if (!writeMAPFPCAssignmentFile(proposedAssignments, assignmentPath.string(),
                                  assignmentError)) {
-    cleanupTemp();
     return fail("assignment_file_write_failed:" + assignmentError);
   }
 
   {
     std::ofstream outMutable(mutableAgentsPath);
     if (!outMutable.is_open()) {
-      cleanupTemp();
       return fail("mutable_agents_file_open_failed");
     }
     outMutable << "MUTABLE_AGENTS\n";
@@ -569,7 +563,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     outMutable << "\n";
     outMutable.flush();
     if (!outMutable.good()) {
-      cleanupTemp();
       return fail("mutable_agents_file_write_failed");
     }
   }
@@ -577,7 +570,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   {
     std::ofstream outMutableTasks(mutableTasksPath);
     if (!outMutableTasks.is_open()) {
-      cleanupTemp();
       return fail("mutable_tasks_file_open_failed");
     }
     outMutableTasks << "MUTABLE_GLOBAL_TASKS\n";
@@ -590,7 +582,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     outMutableTasks << "\n";
     outMutableTasks.flush();
     if (!outMutableTasks.good()) {
-      cleanupTemp();
       return fail("mutable_tasks_file_write_failed");
     }
   }
@@ -600,7 +591,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   for (int agent = 0; agent < numAgents; agent++) {
     const auto& joined = previousSolution_.agents[agent].path;
     if (joined.empty()) {
-      cleanupTemp();
       return fail("seed_initial_paths_missing_joined_path");
     }
     pathLocations[agent].reserve(joined.path.size());
@@ -614,7 +604,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
       pathTimestamps[agent].reserve(taskPaths.size());
       for (const auto& segment : taskPaths) {
         if (segment.empty()) {
-          cleanupTemp();
           return fail("seed_initial_paths_empty_task_segment");
         }
         pathTimestamps[agent].push_back(segment.endTime());
@@ -622,7 +611,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     } else if ((int)joined.timeStamps.size() == (int)previousTasks.size()) {
       pathTimestamps[agent] = joined.timeStamps;
     } else {
-      cleanupTemp();
       return fail("seed_initial_paths_timestamp_mismatch");
     }
 
@@ -632,7 +620,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     int prevTs = -1;
     for (int ts : pathTimestamps[agent]) {
       if (ts < 0 || ts >= (int)pathLocations[agent].size() || ts < prevTs) {
-        cleanupTemp();
         return fail("seed_initial_paths_invalid_timestamp");
       }
       prevTs = ts;
@@ -642,7 +629,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   {
     std::ofstream outPaths(initialPathsPath);
     if (!outPaths.is_open()) {
-      cleanupTemp();
       return fail("seed_initial_paths_open_failed");
     }
     outPaths << "AGENT_PATHS\n";
@@ -661,7 +647,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     }
     outPaths.flush();
     if (!outPaths.good()) {
-      cleanupTemp();
       return fail("seed_initial_paths_write_failed");
     }
   }
@@ -669,7 +654,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   {
     std::ofstream manifest(manifestPath);
     if (!manifest.is_open()) {
-      cleanupTemp();
       return fail("nrr_manifest_open_failed");
     }
     manifest << "seed=" << seed_ << "\n";
@@ -744,7 +728,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     manifest << "initial_paths_file=" << initialPathsPath.string() << "\n";
     manifest.flush();
     if (!manifest.good()) {
-      cleanupTemp();
       return fail("nrr_manifest_write_failed");
     }
   }
@@ -780,9 +763,9 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   if (!collectNrrDetailedTiming) {
     attemptTimeMiniSolverSec += elapsedSecSince(miniSolverStart);
   }
-  cleanupTemp();
   if (!miniSolved) {
     solution_ = backupSolution;
+    invalidateCurrentTaskAssignmentIndexCache();
     return fail("mini_solver_failed");
   }
 
@@ -833,7 +816,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     return conflicts;
   };
   const bool includeTerminalForSoftCheck =
-      (goalOccupationMode_ == "reposition_true");
+      isGoalOccupationRepositionTrue();
   const int64_t softConflicts = countCrossSetConflicts(
       mutableAgents, frozenAgents, includeTerminalForSoftCheck);
 
@@ -843,10 +826,12 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     for (int task : solution_.agents[agent].taskAssignments) {
       if (task < 0 || task >= numTasks) {
         solution_ = backupSolution;
+        invalidateCurrentTaskAssignmentIndexCache();
         return fail("stitched_assignment_out_of_range");
       }
       if (solution_.taskAgentMap[task] != UNASSIGNED) {
         solution_ = backupSolution;
+        invalidateCurrentTaskAssignmentIndexCache();
         return fail("stitched_assignment_duplicate");
       }
       solution_.taskAgentMap[task] = agent;
@@ -855,16 +840,18 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   for (int task = 0; task < numTasks; task++) {
     if (solution_.taskAgentMap[task] == UNASSIGNED) {
       solution_ = backupSolution;
+      invalidateCurrentTaskAssignmentIndexCache();
       return fail("stitched_assignment_incomplete");
     }
   }
 
-  if (goalOccupationMode_ == "reposition_true") {
+  if (isGoalOccupationRepositionTrue()) {
     beginPhase(NrrPhase::terminalReplan);
     vector<int> terminalReplanAgents = selectTerminalReplanAgents(mutableAgents);
     if (!terminalReplanAgents.empty() &&
         !planTerminalReposition(terminalReplanAgents, false)) {
       solution_ = backupSolution;
+      invalidateCurrentTaskAssignmentIndexCache();
       return fail("terminal_replan_failed_after_stitch");
     }
   }
@@ -881,7 +868,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   const Time::time_point validationStart = Time::now();
   beginPhase(NrrPhase::validation);
   const bool previousTerminalValidationFlag = useTerminalPathsInValidation_;
-  useTerminalPathsInValidation_ = (goalOccupationMode_ == "reposition_true");
+  useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
   ValidationStats stitchedStats;
   const bool stitchedValid = validateSolution(nullptr, &stitchedStats);
   if (!collectNrrDetailedTiming) {
@@ -904,6 +891,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     nrrStats_.stitchedInvalidStructuralViolations +=
         stitchedStats.structuralViolations;
     solution_ = backupSolution;
+    invalidateCurrentTaskAssignmentIndexCache();
     if (softConflicts > 0) {
       if (stitchedValid) {
         return fail("soft_conflicts_nonzero_validated:" +

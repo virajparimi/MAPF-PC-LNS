@@ -43,7 +43,7 @@ int LNS::getServiceOccupancyEndExclusive(int agent) const {
   if (servicePath.empty()) {
     return 0;
   }
-  if (goalOccupationMode_ == "stay") {
+  if (isGoalOccupationStay()) {
     return MAX_TIMESTEP;
   }
   return (int)servicePath.size();
@@ -116,7 +116,7 @@ int LNS::getAgentOccupancyHorizon(int agent, bool includeTerminal) const {
   if (servicePath.empty()) {
     return 0;
   }
-  int horizon = (goalOccupationMode_ == "stay")
+  int horizon = isGoalOccupationStay()
                     ? (int)servicePath.size()
                     : getServiceOccupancyEndExclusive(agent);
   if (includeTerminal && solution_.agents[agent].terminalPathActive) {

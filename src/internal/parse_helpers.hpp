@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -7,7 +8,7 @@ namespace parse_helpers {
 
 inline bool parseIntStrict(const std::string& token, int& out) {
   std::istringstream iss(token);
-  int value = 0;
+  long long value = 0;
   char extra = '\0';
   if (!(iss >> value)) {
     return false;
@@ -15,7 +16,11 @@ inline bool parseIntStrict(const std::string& token, int& out) {
   if (iss >> extra) {
     return false;
   }
-  out = value;
+  if (value < std::numeric_limits<int>::min() ||
+      value > std::numeric_limits<int>::max()) {
+    return false;
+  }
+  out = static_cast<int>(value);
   return true;
 }
 

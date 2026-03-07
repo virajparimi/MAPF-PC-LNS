@@ -7,13 +7,12 @@
 #include "common.hpp"
 #include "utils.hpp"
 
-namespace {
 struct TaskAssignmentIndex {
   vector<int> owner;
   vector<int> pos;
 };
 
-[[maybe_unused]] int clampSocToInt(long long soc, const char* context) {
+[[maybe_unused]] inline int clampSocToInt(long long soc, const char* context) {
   if (soc > std::numeric_limits<int>::max()) {
     PLOGW << context << ": sum of costs overflowed int; clamping to INT_MAX\n";
     return std::numeric_limits<int>::max();
@@ -25,7 +24,7 @@ struct TaskAssignmentIndex {
   return static_cast<int>(soc);
 }
 
-[[maybe_unused]] TaskAssignmentIndex buildTaskAssignmentIndex(
+[[maybe_unused]] inline TaskAssignmentIndex buildTaskAssignmentIndex(
     const vector<vector<int>>& assignments, int numTasks) {
   TaskAssignmentIndex index;
   index.owner.assign(numTasks, UNASSIGNED);
@@ -56,7 +55,7 @@ struct TaskAssignmentIndex {
   return index;
 }
 
-[[maybe_unused]] TaskAssignmentIndex buildCurrentTaskAssignmentIndex(
+[[maybe_unused]] inline TaskAssignmentIndex buildCurrentTaskAssignmentIndex(
     const Solution& solution, int numTasks) {
   TaskAssignmentIndex index;
   index.owner.assign(numTasks, UNASSIGNED);
@@ -88,7 +87,7 @@ struct TaskAssignmentIndex {
   return index;
 }
 
-[[maybe_unused]] string summarizeIntervals(
+[[maybe_unused]] inline string summarizeIntervals(
     const vector<pair<int, int>>* intervals, int maxIntervals = 6) {
   if (intervals == nullptr || intervals->empty()) {
     return "(none)";
@@ -113,7 +112,7 @@ struct TaskAssignmentIndex {
   return oss.str();
 }
 
-[[maybe_unused]] int permanentOccupancyStart(
+[[maybe_unused]] inline int permanentOccupancyStart(
     const vector<pair<int, int>>* intervals) {
   if (intervals == nullptr) {
     return MAX_TIMESTEP;
@@ -127,7 +126,7 @@ struct TaskAssignmentIndex {
   return start;
 }
 
-[[maybe_unused]] int firstFreeTimeAtOrAfter(
+[[maybe_unused]] inline int firstFreeTimeAtOrAfter(
     const vector<pair<int, int>>* intervals, int timestep) {
   if (intervals == nullptr) {
     return timestep;
@@ -147,7 +146,7 @@ struct TaskAssignmentIndex {
   return t;
 }
 
-[[maybe_unused]] bool reachableWithPermanentBlocksByTime(
+[[maybe_unused]] inline bool reachableWithPermanentBlocksByTime(
     const Instance& instance, const ConstraintTable& constraintTable, int start,
     int goal, int byTime) {
   if (start < 0 || goal < 0 || start >= instance.mapSize ||
@@ -188,7 +187,7 @@ struct TaskAssignmentIndex {
   }
   return false;
 }
-[[maybe_unused]] void logInitialSegmentFailureDiagnostics(
+[[maybe_unused]] inline void logInitialSegmentFailureDiagnostics(
     const Instance& instance, const Solution& solution,
     const ConstraintTable& constraintTable, int agent, int task, int taskPosition,
     int startTime, SingleAgentSolver& solver, double remainingBudgetSec,
@@ -281,4 +280,3 @@ struct TaskAssignmentIndex {
         << sippsCrossCheck.getLastSearchOutcomeName()
         << ", sipps_path_size=" << sippsPath.size() << "\n";
 }
-}  // namespace
