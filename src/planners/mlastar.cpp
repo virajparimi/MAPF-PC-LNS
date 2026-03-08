@@ -332,6 +332,9 @@ AgentTaskPath MultiLabelSpaceTimeAStar::findPathSegment(
       }
 
       auto* existing = it->second;
+      // Comparison-only stack node: never store pointers/references to this
+      // object or thread it into parent-chain reconstruction. Only copy its
+      // scalar state into an existing/persisted node.
       LLNode candidate(current, successor, successorGVal, successorHVal,
                        nextTimestep, successorInternalConflicts, currentStage);
       candidate.secondaryKey = -successorGVal;

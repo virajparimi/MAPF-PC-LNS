@@ -5,6 +5,12 @@
 void IterationCandidatePostprocessOrchestrator::process(
     LNS& lns, const CandidatePhaseResult& candidatePhase,
     IterationExecutionContext& context) {
+  lns.processCandidatePhasePost(candidatePhase, context);
+}
+
+void LNS::processCandidatePhasePost(
+    const CandidatePhaseResult& candidatePhase,
+    IterationExecutionContext& context) {
   const int removedTasksChangedAgent = candidatePhase.removedTasksChangedAgent;
   const int removedTasksChangedOrder = candidatePhase.removedTasksChangedOrder;
   const int removedTasksUnchanged = candidatePhase.removedTasksUnchanged;
@@ -12,19 +18,19 @@ void IterationCandidatePostprocessOrchestrator::process(
   context.debugRow.removedTasksChangedOrder = removedTasksChangedOrder;
   context.debugRow.removedTasksUnchanged = removedTasksUnchanged;
   const int changedRemovedTasks = removedTasksChangedAgent + removedTasksChangedOrder;
-  lns.improvementDiagnosticsStats_.removedTasksChangedAgentTotal +=
+  improvementDiagnosticsStats_.removedTasksChangedAgentTotal +=
       removedTasksChangedAgent;
-  lns.improvementDiagnosticsStats_.removedTasksChangedOrderTotal +=
+  improvementDiagnosticsStats_.removedTasksChangedOrderTotal +=
       removedTasksChangedOrder;
-  lns.improvementDiagnosticsStats_.removedTasksUnchangedTotal +=
+  improvementDiagnosticsStats_.removedTasksUnchangedTotal +=
       removedTasksUnchanged;
-  lns.improvementDiagnosticsStats_.changedTasksPerNeighborhoodMax = std::max(
-      lns.improvementDiagnosticsStats_.changedTasksPerNeighborhoodMax,
+  improvementDiagnosticsStats_.changedTasksPerNeighborhoodMax = std::max(
+      improvementDiagnosticsStats_.changedTasksPerNeighborhoodMax,
       (int64_t)changedRemovedTasks);
   if (changedRemovedTasks > 0) {
-    lns.improvementDiagnosticsStats_.neighborhoodsWithChanges++;
+    improvementDiagnosticsStats_.neighborhoodsWithChanges++;
   } else {
-    lns.improvementDiagnosticsStats_.neighborhoodsWithoutChanges++;
+    improvementDiagnosticsStats_.neighborhoodsWithoutChanges++;
   }
 
   context.previousConflictSignalForIter =
@@ -46,11 +52,11 @@ void IterationCandidatePostprocessOrchestrator::process(
       candidatePhase.precedencePairsChecked;
   context.candidateValid = candidatePhase.candidateValid;
   context.candidateConflictSignal = candidatePhase.candidateConflictSignal;
-  context.candidateNrrSoftCandidate = lns.lastNrrSoftCandidate_;
-  context.candidateNrrSoftOnlyInvalid = lns.lastNrrSoftOnlyInvalid_;
-  context.candidateNrrSoftConflictCount = lns.lastNrrSoftConflictCount_;
-  context.softRecoveryModeBefore = lns.softRecoveryActive_;
-  context.softRecoveryModeAfter = lns.softRecoveryActive_;
+  context.candidateNrrSoftCandidate = lastNrrSoftCandidate_;
+  context.candidateNrrSoftOnlyInvalid = lastNrrSoftOnlyInvalid_;
+  context.candidateNrrSoftConflictCount = lastNrrSoftConflictCount_;
+  context.softRecoveryModeBefore = acceptanceState_.softRecoveryActive;
+  context.softRecoveryModeAfter = acceptanceState_.softRecoveryActive;
   context.softRecoveryDecisionReason = "none";
   context.debugRow.candidateConflictSignal = context.candidateConflictSignal;
   context.debugRow.nrrSoftCandidate = context.candidateNrrSoftCandidate;
@@ -61,10 +67,10 @@ void IterationCandidatePostprocessOrchestrator::process(
   context.debugRow.softRecoveryDecisionReason = context.softRecoveryDecisionReason;
   if (context.candidateNrrSoftCandidate &&
       context.candidateNrrSoftConflictCount >= 0) {
-    lns.improvementDiagnosticsStats_.softCandidateProduced++;
-    lns.improvementDiagnosticsStats_.softCandidateConflictSum +=
+    improvementDiagnosticsStats_.softCandidateProduced++;
+    improvementDiagnosticsStats_.softCandidateConflictSum +=
         static_cast<double>(context.candidateNrrSoftConflictCount);
-    lns.improvementDiagnosticsStats_.softCandidateConflictSamples++;
+    improvementDiagnosticsStats_.softCandidateConflictSamples++;
   }
 
   if (!context.candidateValid) {
@@ -83,30 +89,30 @@ void IterationCandidatePostprocessOrchestrator::process(
 
   context.proposedSocForIter = candidatePhase.proposedSoc;
   context.debugRow.candidateSoc = context.proposedSocForIter;
-  lns.improvementDiagnosticsStats_.sumCandidateSoc +=
+  improvementDiagnosticsStats_.sumCandidateSoc +=
       static_cast<double>(context.proposedSocForIter);
-  lns.improvementDiagnosticsStats_.sumPreviousConflictSignal +=
+  improvementDiagnosticsStats_.sumPreviousConflictSignal +=
       static_cast<double>(context.previousConflictSignalForIter);
-  lns.improvementDiagnosticsStats_.sumCandidateConflictSignal +=
+  improvementDiagnosticsStats_.sumCandidateConflictSignal +=
       static_cast<double>(context.candidateConflictSignal);
   if (context.candidateConflictSignal < context.previousConflictSignalForIter) {
-    lns.improvementDiagnosticsStats_.conflictSignalBetter++;
+    improvementDiagnosticsStats_.conflictSignalBetter++;
   } else if (context.candidateConflictSignal >
              context.previousConflictSignalForIter) {
-    lns.improvementDiagnosticsStats_.conflictSignalWorse++;
+    improvementDiagnosticsStats_.conflictSignalWorse++;
   } else {
-    lns.improvementDiagnosticsStats_.conflictSignalEqual++;
+    improvementDiagnosticsStats_.conflictSignalEqual++;
   }
   if (context.candidateValid) {
     context.debugRow.candidateValid = true;
-    lns.improvementDiagnosticsStats_.candidateValid++;
+    improvementDiagnosticsStats_.candidateValid++;
     if (context.feasibleSolutionUpdated) {
-      lns.improvementDiagnosticsStats_.feasibleBestUpdates++;
+      improvementDiagnosticsStats_.feasibleBestUpdates++;
     } else {
-      lns.improvementDiagnosticsStats_.feasibleNoBestUpdate++;
+      improvementDiagnosticsStats_.feasibleNoBestUpdate++;
     }
   } else {
     context.debugRow.candidateValid = false;
-    lns.improvementDiagnosticsStats_.candidateInvalid++;
+    improvementDiagnosticsStats_.candidateInvalid++;
   }
 }

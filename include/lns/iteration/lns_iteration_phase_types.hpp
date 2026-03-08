@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class CandidatePhaseStatus { success, join_failed, terminal_failed };
 
@@ -24,6 +25,7 @@ struct CandidatePhaseResult {
   int structuralViolations = 0;
   int64_t precedenceDebt = 0;
   int64_t precedencePairsChecked = 0;
+  std::vector<int> candidateTouchedAgents;
 };
 
 struct AcceptanceDecisionResult {

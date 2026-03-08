@@ -1,10 +1,12 @@
   int numOfIterations_;
   bool debugImprovementDiagnostics_ = false;
   string debugIterationTsvPath_;
-  unordered_set<uint64_t> acceptedSolutionFingerprints_;
-  unordered_set<uint64_t> seenNeighborhoodFingerprints_;
-  vector<int> previousNeighborhoodTasksSorted_;
-  int currentNeighborhoodRepeatStreak_ = 0;
+  struct NeighborhoodDiagnosticsState {
+    unordered_set<uint64_t> seenFingerprints;
+    vector<int> previousTasksSorted;
+    int repeatStreak = 0;
+  };
+  NeighborhoodDiagnosticsState neighborhoodDiagnosticsState_;
   vector<IterationDebugRecord> iterationDebugRecords_;
   bool incrementalRegret_ = false;
   LowLevelPlannerType lowLevelPlannerType_ = LowLevelPlannerType::mlastar;

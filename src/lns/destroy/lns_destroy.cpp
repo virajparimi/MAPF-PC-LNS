@@ -15,33 +15,38 @@ void LNS::clearNeighborhood() {
 bool DestroyOrchestrator::executeHeuristic(
     LNS& lns, int destroyHeuristicId,
     const ConflictMap* potentialNeighborhood) {
+  return lns.executeDestroyHeuristic(destroyHeuristicId, potentialNeighborhood);
+}
+
+bool LNS::executeDestroyHeuristic(
+    int destroyHeuristicId, const ConflictMap* potentialNeighborhood) {
   switch (destroyHeuristicId) {
     case DestroyHeuristic::randomRemoval:
-      lns.randomRemoval();
+      randomRemoval();
       return true;
     case DestroyHeuristic::worstRemoval:
-      lns.worstRemoval();
+      worstRemoval();
       return true;
     case DestroyHeuristic::conflictRemoval:
-      lns.conflictRemoval(potentialNeighborhood);
+      conflictRemoval(potentialNeighborhood);
       return true;
     case DestroyHeuristic::shawRemoval:
-      lns.shawRemoval(lns.neighborSize_ * 3);
+      shawRemoval(neighborSize_ * 3);
       return true;
     case DestroyHeuristic::precedenceWaitRemoval:
-      lns.precedenceWaitRemoval(potentialNeighborhood);
+      precedenceWaitRemoval(potentialNeighborhood);
       return true;
     case DestroyHeuristic::lowSlackRemoval:
-      lns.lowSlackRemoval(potentialNeighborhood);
+      lowSlackRemoval(potentialNeighborhood);
       return true;
     case DestroyHeuristic::marketTatonnementRemoval:
-      lns.marketTatonnementRemoval(potentialNeighborhood);
+      marketTatonnementRemoval(potentialNeighborhood);
       return true;
     case DestroyHeuristic::collisionSoftRemoval:
-      lns.collisionSoftRemoval(potentialNeighborhood);
+      collisionSoftRemoval(potentialNeighborhood);
       return true;
     case DestroyHeuristic::failureSoftRemoval:
-      lns.failureSoftRemoval(potentialNeighborhood);
+      failureSoftRemoval(potentialNeighborhood);
       return true;
     default:
       PLOGE << "Sampled a non-existent destroy heuristic: "
@@ -54,40 +59,47 @@ bool DestroyOrchestrator::runPhase(LNS& lns,
                                    const ConflictMap* potentialNeighborhood,
                                    int& alnsHeuristicForIter,
                                    std::string& errorMessage) {
+  return lns.runDestroyPhase(potentialNeighborhood, alnsHeuristicForIter,
+                             errorMessage);
+}
+
+bool LNS::runDestroyPhase(const ConflictMap* potentialNeighborhood,
+                          int& alnsHeuristicForIter,
+                          std::string& errorMessage) {
   alnsHeuristicForIter = -1;
   errorMessage.clear();
-  if (lns.destroyHeuristic == "alns") {
-    if (!lns.alnsRemoval(potentialNeighborhood)) {
+  if (destroyHeuristic == "alns") {
+    if (!alnsRemoval(potentialNeighborhood)) {
       errorMessage = "ALNS sampling/execution failed";
       return false;
     }
-    alnsHeuristicForIter = lns.adaptiveLNS_.recentDestroyHeuristic;
+    alnsHeuristicForIter = adaptiveLNS_.recentDestroyHeuristic;
     if (alnsHeuristicForIter >= 0 &&
-        alnsHeuristicForIter < lns.adaptiveLNS_.numDestroyHeuristics) {
-      lns.adaptiveLNS_.selections[alnsHeuristicForIter]++;
+        alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
+      adaptiveLNS_.selections[alnsHeuristicForIter]++;
     }
     return true;
   }
 
   const std::optional<int> heuristicId =
-      DestroyOrchestrator::heuristicIdFromName(lns.destroyHeuristic);
+      DestroyOrchestrator::heuristicIdFromName(destroyHeuristic);
   if (!heuristicId.has_value()) {
-    errorMessage = "Unknown destroy heuristic: " + lns.destroyHeuristic;
+    errorMessage = "Unknown destroy heuristic: " + destroyHeuristic;
     return false;
   }
   if (*heuristicId == DestroyHeuristic::marketTatonnementRemoval &&
-      !lns.market_.heuristics) {
+      !market_.heuristics) {
     errorMessage =
         "destroyHeuristic='market_tatonnement' requires market heuristics to "
         "be enabled";
     return false;
   }
-  if (!executeHeuristic(lns, *heuristicId, potentialNeighborhood)) {
+  if (!executeDestroyHeuristic(*heuristicId, potentialNeighborhood)) {
     errorMessage = "Failed to execute destroy heuristic id " +
                    std::to_string(*heuristicId);
     return false;
   }
-  lns.lastDestroySampledInSoftMode_ = false;
+  softRecoveryState_.lastDestroySampledInSoftMode = false;
   return true;
 }
 
@@ -139,7 +151,7 @@ bool LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
     }
     adaptiveLNS_.alnsCounter = 0;
   }
-  lastDestroySampledInSoftMode_ = false;
+  softRecoveryState_.lastDestroySampledInSoftMode = false;
   const bool marketWarmupReady =
       !market_.heuristics || market_.destroyWarmupUpdates <= 0 ||
       market_.stats.updates >=
@@ -149,8 +161,8 @@ bool LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
       adaptiveLNS_,
       rng_,
       alnsEnablePrecedenceAwareDestroy_,
-      softRecoveryDestroyMode_,
-      softRecoveryActive_,
+      softRecoveryState_.destroyMode,
+      acceptanceState_.softRecoveryActive,
       market_.heuristics,
       market_.destroySoftGate,
       marketWarmupReady,
@@ -168,10 +180,9 @@ bool LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
   }
   const int sampledDestroyHeuristic = *sampledDestroyHeuristicOpt;
   adaptiveLNS_.recentDestroyHeuristic = sampledDestroyHeuristic;
-  lastDestroySampledInSoftMode_ =
-      softRecoveryDestroyMode_ && softRecoveryActive_;
-  if (!DestroyOrchestrator::executeHeuristic(*this, sampledDestroyHeuristic,
-                                             potentialNeighborhood)) {
+  softRecoveryState_.lastDestroySampledInSoftMode =
+      softRecoveryState_.destroyMode && acceptanceState_.softRecoveryActive;
+  if (!executeDestroyHeuristic(sampledDestroyHeuristic, potentialNeighborhood)) {
     return false;
   }
 

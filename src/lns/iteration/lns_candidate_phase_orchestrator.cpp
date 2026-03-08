@@ -96,7 +96,21 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
     LNS& lns, const std::vector<int>& initialAgentsToCompute,
     int /*alnsHeuristicForIter*/, ConflictMap& potentialNeighborhood,
     MovingMetrics& metrics) {
+  return lns.runCandidatePhase(initialAgentsToCompute, potentialNeighborhood,
+                               metrics);
+}
+
+CandidatePhaseResult LNS::runCandidatePhase(
+    const std::vector<int>& initialAgentsToCompute,
+    ConflictMap& potentialNeighborhood, MovingMetrics& metrics) {
   CandidatePhaseResult result;
+  const int agentCount = instance_.getAgentNum();
+  std::vector<char> touchedByAgent(agentCount, 0);
+  auto markTouched = [&](int agent) {
+    if (agent >= 0 && agent < agentCount) {
+      touchedByAgent[agent] = 1;
+    }
+  };
 
   auto elapsedSecSince = [](const Time::time_point& startTimePoint) -> double {
     return ((fsec)(Time::now() - startTimePoint)).count();
@@ -104,24 +118,30 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
 
   std::vector<int> agentsToCompute = initialAgentsToCompute;
   ValidationOrchestrator::refreshAgentsForJoin(
-      lns.solution_, lns.previousSolution_, lns.instance_.getTasksNum(),
+      solution_, previousSolution_, instance_.getTasksNum(),
       agentsToCompute);
+  for (int agent : agentsToCompute) {
+    markTouched(agent);
+  }
 
   const Time::time_point joinStart = Time::now();
-  if (!lns.solution_.joinPaths(agentsToCompute)) {
+  if (!solution_.joinPaths(agentsToCompute)) {
     result.timeJoinPathsSec += elapsedSecSince(joinStart);
     result.status = CandidatePhaseStatus::join_failed;
     return result;
   }
   result.timeJoinPathsSec += elapsedSecSince(joinStart);
 
-  if (lns.isGoalOccupationRepositionTrue()) {
+  if (isGoalOccupationRepositionTrue()) {
     const std::vector<int> terminalReplanAgents =
-        lns.selectTerminalReplanAgents(agentsToCompute);
+        selectTerminalReplanAgents(agentsToCompute);
     if (!terminalReplanAgents.empty()) {
+      for (int agent : terminalReplanAgents) {
+        markTouched(agent);
+      }
       const Time::time_point terminalStart = Time::now();
       const bool terminalOk =
-          lns.planTerminalReposition(terminalReplanAgents, false);
+          planTerminalReposition(terminalReplanAgents, false);
       result.timeTerminalReplanSec += elapsedSecSince(terminalStart);
       if (!terminalOk) {
         result.status = CandidatePhaseStatus::terminal_failed;
@@ -132,33 +152,33 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
 
   const Time::time_point recomputeSocStart = Time::now();
   long long recomputedSoc = 0;
-  for (int agent = 0; agent < lns.instance_.getAgentNum(); agent++) {
+  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     recomputedSoc +=
-        static_cast<long long>(lns.solution_.agents[agent].path.endTimeOrZero());
+        static_cast<long long>(solution_.agents[agent].path.endTimeOrZero());
   }
   if (recomputedSoc > std::numeric_limits<int>::max()) {
     PLOGW << "LNS::run: sum of costs overflowed int during recomputation;"
              " clamping to INT_MAX\n";
-    lns.solution_.sumOfCosts = std::numeric_limits<int>::max();
+    solution_.sumOfCosts = std::numeric_limits<int>::max();
   } else if (recomputedSoc < std::numeric_limits<int>::min()) {
     PLOGW << "LNS::run: sum of costs underflowed int during recomputation;"
              " clamping to INT_MIN\n";
-    lns.solution_.sumOfCosts = std::numeric_limits<int>::min();
+    solution_.sumOfCosts = std::numeric_limits<int>::min();
   } else {
-    lns.solution_.sumOfCosts = static_cast<int>(recomputedSoc);
+    solution_.sumOfCosts = static_cast<int>(recomputedSoc);
   }
-  PLOGD << "Old sum of costs = " << lns.previousSolution_.sumOfCosts << "\n";
-  PLOGD << "New sum of costs = " << lns.solution_.sumOfCosts << "\n";
-  PLOGD << "Old objective(" << lns.optimizationObjective_ << ") = "
-        << lns.previousObjectiveValue() << "\n";
-  PLOGD << "New objective(" << lns.optimizationObjective_ << ") = "
-        << lns.currentObjectiveValue() << "\n";
+  PLOGD << "Old sum of costs = " << previousSolution_.sumOfCosts << "\n";
+  PLOGD << "New sum of costs = " << solution_.sumOfCosts << "\n";
+  PLOGD << "Old objective(" << optimizationObjective_ << ") = "
+        << previousObjectiveValue() << "\n";
+  PLOGD << "New objective(" << optimizationObjective_ << ") = "
+        << currentObjectiveValue() << "\n";
   result.timeRecomputeSocSec += elapsedSecSince(recomputeSocStart);
 
   const RemovedTaskChangeStats removedTaskChanges =
       ValidationOrchestrator::computeRemovedTaskChangeStats(
-          lns.previousSolution_, lns.solution_,
-          lns.lnsNeighborhood_.immutableRemovedTasks, lns.instance_.getTasksNum());
+          previousSolution_, solution_, lnsNeighborhood_.immutableRemovedTasks,
+          instance_.getTasksNum());
   result.removedTasksChangedAgent = removedTaskChanges.changedAgent;
   result.removedTasksChangedOrder = removedTaskChanges.changedOrder;
   result.removedTasksUnchanged = removedTaskChanges.unchanged;
@@ -167,42 +187,42 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
   potentialNeighborhood.clear();
   LNS::ValidationStats candidateValidationStats;
   std::vector<std::pair<int, int>> candidateCollisionPairs;
-  lns.useTerminalPathsInValidation_ = lns.isGoalOccupationRepositionTrue();
+  useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
   result.candidateValid =
-      lns.validateSolution(&potentialNeighborhood, &candidateValidationStats,
+      validateSolution(&potentialNeighborhood, &candidateValidationStats,
                            &candidateCollisionPairs);
-  lns.useTerminalPathsInValidation_ = false;
+  useTerminalPathsInValidation_ = false;
   std::sort(candidateCollisionPairs.begin(), candidateCollisionPairs.end());
   candidateCollisionPairs.erase(
       std::unique(candidateCollisionPairs.begin(), candidateCollisionPairs.end()),
       candidateCollisionPairs.end());
-  lns.lastValidationCollisionPairs_ = candidateCollisionPairs;
-  lns.lastValidationConflictTasks_.clear();
-  lns.lastValidationConflictTasks_.reserve(potentialNeighborhood.size());
+  softRecoveryState_.lastValidationCollisionPairs = candidateCollisionPairs;
+  softRecoveryState_.lastValidationConflictTasks.clear();
+  softRecoveryState_.lastValidationConflictTasks.reserve(potentialNeighborhood.size());
   std::unordered_set<int> conflictAgentsSet;
   for (const auto& [task, conflict] : potentialNeighborhood) {
-    lns.lastValidationConflictTasks_.push_back(task);
-    if (conflict.agent >= 0 && conflict.agent < lns.instance_.getAgentNum()) {
+    softRecoveryState_.lastValidationConflictTasks.push_back(task);
+    if (conflict.agent >= 0 && conflict.agent < instance_.getAgentNum()) {
       conflictAgentsSet.insert(conflict.agent);
-    } else if (task >= 0 && task < (int)lns.solution_.taskAgentMap.size()) {
-      const int owner = lns.solution_.taskAgentMap[task];
-      if (owner >= 0 && owner < lns.instance_.getAgentNum()) {
+    } else if (task >= 0 && task < (int)solution_.taskAgentMap.size()) {
+      const int owner = solution_.taskAgentMap[task];
+      if (owner >= 0 && owner < instance_.getAgentNum()) {
         conflictAgentsSet.insert(owner);
       }
     }
   }
   for (const auto& [a, b] : candidateCollisionPairs) {
-    if (a >= 0 && a < lns.instance_.getAgentNum()) {
+    if (a >= 0 && a < instance_.getAgentNum()) {
       conflictAgentsSet.insert(a);
     }
-    if (b >= 0 && b < lns.instance_.getAgentNum()) {
+    if (b >= 0 && b < instance_.getAgentNum()) {
       conflictAgentsSet.insert(b);
     }
   }
-  lns.lastValidationConflictAgents_.assign(conflictAgentsSet.begin(),
-                                           conflictAgentsSet.end());
-  std::sort(lns.lastValidationConflictAgents_.begin(),
-            lns.lastValidationConflictAgents_.end());
+  softRecoveryState_.lastValidationConflictAgents.assign(conflictAgentsSet.begin(),
+                                       conflictAgentsSet.end());
+  std::sort(softRecoveryState_.lastValidationConflictAgents.begin(),
+            softRecoveryState_.lastValidationConflictAgents.end());
   result.precedenceViolations = candidateValidationStats.precedenceViolations;
   result.vertexCollisions = candidateValidationStats.vertexCollisions;
   result.edgeSwapCollisions = candidateValidationStats.edgeSwapCollisions;
@@ -213,16 +233,22 @@ CandidatePhaseResult CandidatePhaseOrchestrator::run(
   PLOGD << "Conflict signal in new solution: " << result.candidateConflictSignal
         << "\n";
 
-  lns.solution_.utility = metrics.computeMovingMetrics(
-      result.candidateConflictSignal, lns.currentObjectiveValue());
+  solution_.utility = metrics.computeMovingMetrics(
+      result.candidateConflictSignal, currentObjectiveValue());
   if (result.candidateValid) {
-    result.feasibleBestUpdate = lns.extractFeasibleSolution();
+    result.feasibleBestUpdate = extractFeasibleSolution();
   } else {
     result.feasibleBestUpdate = false;
     PLOGE << "The solution was not valid!\n";
   }
   result.timeValidationSec += elapsedSecSince(validationStart);
-  result.proposedSoc = lns.currentObjectiveValue();
+  result.proposedSoc = currentObjectiveValue();
+  result.candidateTouchedAgents.reserve(agentsToCompute.size());
+  for (int agent = 0; agent < agentCount; agent++) {
+    if (touchedByAgent[agent]) {
+      result.candidateTouchedAgents.push_back(agent);
+    }
+  }
 
   return result;
 }

@@ -376,8 +376,8 @@ void LNS::collisionSoftRemoval(const ConflictMap* potentialNeighborhood) {
   }
 
   std::vector<int> conflictAgents;
-  if (softPersistentConflictGraph_ && !persistentConflictAgents_.empty()) {
-    conflictAgents = persistentConflictAgents_;
+  if (softRecoveryState_.persistentConflictGraph && !softRecoveryState_.persistentConflictAgents.empty()) {
+    conflictAgents = softRecoveryState_.persistentConflictAgents;
   } else {
     conflictAgents =
         collectAgentsFromPotential(potentialNeighborhood, instance_.getAgentNum());
@@ -398,9 +398,9 @@ void LNS::collisionSoftRemoval(const ConflictMap* potentialNeighborhood) {
   PLOGD << "collisionSoftRemoval: targetAgentCount=" << targetAgentCount
         << ", cappedNeighborSize=" << cappedNeighborSize << "\n";
   const auto& collisionPairsForSampling =
-      (softPersistentConflictGraph_ && !persistentConflictPairs_.empty())
-          ? persistentConflictPairs_
-          : lastValidationCollisionPairs_;
+      (softRecoveryState_.persistentConflictGraph && !softRecoveryState_.persistentConflictPairs.empty())
+          ? softRecoveryState_.persistentConflictPairs
+          : softRecoveryState_.lastValidationCollisionPairs;
   const std::vector<int> selectedAgents =
       buildConflictAdjacencyAndSampleAgents(
           conflictAgents, collisionPairsForSampling, rng_,
@@ -444,10 +444,10 @@ void LNS::failureSoftRemoval(const ConflictMap* potentialNeighborhood) {
     return;
   }
 
-  std::vector<int> sourceAgents = lastSoftFailureConflictAgents_;
+  std::vector<int> sourceAgents = softRecoveryState_.lastSoftFailureConflictAgents;
   if (sourceAgents.empty()) {
-    if (softPersistentConflictGraph_ && !persistentConflictAgents_.empty()) {
-      sourceAgents = persistentConflictAgents_;
+    if (softRecoveryState_.persistentConflictGraph && !softRecoveryState_.persistentConflictAgents.empty()) {
+      sourceAgents = softRecoveryState_.persistentConflictAgents;
     } else {
       sourceAgents =
           collectAgentsFromPotential(potentialNeighborhood, instance_.getAgentNum());
@@ -471,9 +471,9 @@ void LNS::failureSoftRemoval(const ConflictMap* potentialNeighborhood) {
   }
 
   const auto& collisionPairsForSampling =
-      (softPersistentConflictGraph_ && !persistentConflictPairs_.empty())
-          ? persistentConflictPairs_
-          : lastValidationCollisionPairs_;
+      (softRecoveryState_.persistentConflictGraph && !softRecoveryState_.persistentConflictPairs.empty())
+          ? softRecoveryState_.persistentConflictPairs
+          : softRecoveryState_.lastValidationCollisionPairs;
   std::unordered_map<int, int> degree;
   for (int a : sourceAgents) {
     degree[a] = 0;

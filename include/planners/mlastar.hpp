@@ -9,6 +9,28 @@
 #include "common.hpp"
 #include "constrainttable.hpp"
 
+namespace mlastar_detail {
+inline size_t hashNodeIdentity(int location, int timestep, unsigned int stage,
+                               bool waitAtGoal) {
+  const uint64_t hLocation =
+      LLNode::mix64((uint64_t)(uint32_t)location ^ 0x9E3779B97F4A7C15ULL);
+  const uint64_t hTimestep =
+      LLNode::mix64((uint64_t)(uint32_t)timestep ^ 0xC2B2AE3D27D4EB4FULL);
+  const uint64_t hStage =
+      LLNode::mix64((uint64_t)(uint32_t)stage ^ 0x165667B19E3779F9ULL);
+  const uint64_t hWait =
+      waitAtGoal ? 0xD1B54A32D192ED03ULL : 0x94D049BB133111EBULL;
+  uint64_t combined = hLocation;
+  combined ^=
+      hTimestep + 0x9E3779B97F4A7C15ULL + (combined << 6) + (combined >> 2);
+  combined ^= hStage + 0x9E3779B97F4A7C15ULL + (combined << 6) +
+              (combined >> 2);
+  combined ^= hWait + 0x9E3779B97F4A7C15ULL + (combined << 6) +
+              (combined >> 2);
+  return (size_t)LLNode::mix64(combined);
+}
+}  // namespace mlastar_detail
+
 // Forward-declare so it can be used as the heap element type before the full
 // class definition.
 class MultiLabelAStarNode;
@@ -45,25 +67,8 @@ class MultiLabelAStarNode : public LLNode {
 
   struct NodeHasher {
     size_t operator()(const MultiLabelAStarNode* node) const {
-      const uint64_t hLocation =
-          LLNode::mix64((uint64_t)(uint32_t)node->location ^
-                        0x9E3779B97F4A7C15ULL);
-      const uint64_t hTimestep =
-          LLNode::mix64((uint64_t)(uint32_t)node->timestep ^
-                        0xC2B2AE3D27D4EB4FULL);
-      const uint64_t hStage =
-          LLNode::mix64((uint64_t)(uint32_t)node->stage ^
-                        0x165667B19E3779F9ULL);
-      const uint64_t hWait = node->waitAtGoal ? 0xD1B54A32D192ED03ULL
-                                              : 0x94D049BB133111EBULL;
-      uint64_t combined = hLocation;
-      combined ^= hTimestep + 0x9E3779B97F4A7C15ULL + (combined << 6) +
-                  (combined >> 2);
-      combined ^= hStage + 0x9E3779B97F4A7C15ULL + (combined << 6) +
-                  (combined >> 2);
-      combined ^= hWait + 0x9E3779B97F4A7C15ULL + (combined << 6) +
-                  (combined >> 2);
-      return (size_t)LLNode::mix64(combined);
+      return mlastar_detail::hashNodeIdentity(
+          node->location, node->timestep, node->stage, node->waitAtGoal);
     }
   };
 
@@ -95,25 +100,8 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
 
   struct NodeKeyHasher {
     size_t operator()(const NodeKey& key) const {
-      const uint64_t hLocation =
-          LLNode::mix64((uint64_t)(uint32_t)key.location ^
-                        0x9E3779B97F4A7C15ULL);
-      const uint64_t hTimestep =
-          LLNode::mix64((uint64_t)(uint32_t)key.timestep ^
-                        0xC2B2AE3D27D4EB4FULL);
-      const uint64_t hStage =
-          LLNode::mix64((uint64_t)(uint32_t)key.stage ^
-                        0x165667B19E3779F9ULL);
-      const uint64_t hWait = key.waitAtGoal ? 0xD1B54A32D192ED03ULL
-                                            : 0x94D049BB133111EBULL;
-      uint64_t combined = hLocation;
-      combined ^= hTimestep + 0x9E3779B97F4A7C15ULL + (combined << 6) +
-                  (combined >> 2);
-      combined ^= hStage + 0x9E3779B97F4A7C15ULL + (combined << 6) +
-                  (combined >> 2);
-      combined ^= hWait + 0x9E3779B97F4A7C15ULL + (combined << 6) +
-                  (combined >> 2);
-      return (size_t)LLNode::mix64(combined);
+      return mlastar_detail::hashNodeIdentity(
+          key.location, key.timestep, key.stage, key.waitAtGoal);
     }
   };
 

@@ -7,11 +7,11 @@
 bool LNS::prepareNextIteration() {
   PLOGI << "Preparing the solution object for the next iteration\n";
   invalidateCurrentTaskAssignmentIndexCache();
-  lastPrepareAbortedByCascade_ = false;
-  lastPrepareSeedTasks_ = 0;
-  lastPrepareClosureTasks_ = 0;
-  lastPrepareClosureAdded_ = 0;
-  lastPrepareAffectedAgents_.clear();
+  cascadeState_.lastPrepareAborted = false;
+  cascadeState_.lastPrepareSeedTasks = 0;
+  cascadeState_.lastPrepareClosureTasks = 0;
+  cascadeState_.lastPrepareClosureAdded = 0;
+  cascadeState_.lastPrepareAffectedAgents.clear();
 
   const int taskCount = instance_.getTasksNum();
   const vector<int> taskToPositionBefore =
@@ -74,63 +74,63 @@ bool LNS::prepareNextIteration() {
   const int closureTaskCount = (int)closureRemovedTasks.size();
   const int closureAddedCount =
       max(0, closureTaskCount - closureSeedCount);
-  lastPrepareSeedTasks_ = closureSeedCount;
-  lastPrepareClosureTasks_ = closureTaskCount;
-  lastPrepareClosureAdded_ = closureAddedCount;
-  cascadeStats_.prepareCalls++;
-  cascadeStats_.seedTasksSum += closureSeedCount;
-  cascadeStats_.closureTasksSum += closureTaskCount;
-  cascadeStats_.closureAddedSum += closureAddedCount;
-  cascadeStats_.closureTasksMax =
-      max(cascadeStats_.closureTasksMax, (int64_t)closureTaskCount);
-  cascadeStats_.closureAddedMax =
-      max(cascadeStats_.closureAddedMax, (int64_t)closureAddedCount);
+  cascadeState_.lastPrepareSeedTasks = closureSeedCount;
+  cascadeState_.lastPrepareClosureTasks = closureTaskCount;
+  cascadeState_.lastPrepareClosureAdded = closureAddedCount;
+  cascadeState_.stats.prepareCalls++;
+  cascadeState_.stats.seedTasksSum += closureSeedCount;
+  cascadeState_.stats.closureTasksSum += closureTaskCount;
+  cascadeState_.stats.closureAddedSum += closureAddedCount;
+  cascadeState_.stats.closureTasksMax =
+      max(cascadeState_.stats.closureTasksMax, (int64_t)closureTaskCount);
+  cascadeState_.stats.closureAddedMax =
+      max(cascadeState_.stats.closureAddedMax, (int64_t)closureAddedCount);
 
   const int staticCascadeBudget = cascadeTaskBudget();
   int cascadeBudget = staticCascadeBudget;
   int adaptiveBudgetLower = 1;
   int adaptiveBudgetUpper = staticCascadeBudget;
-  if (adaptiveCascadeBudget_) {
-    const bool explicitHardCap = (maxCascadeTasks_ > 0);
+  if (cascadeState_.adaptiveBudgetEnabled) {
+    const bool explicitHardCap = (cascadeState_.maxTasks > 0);
     adaptiveBudgetUpper =
         explicitHardCap ? staticCascadeBudget
                         : max(staticCascadeBudget, instance_.getTasksNum());
     adaptiveBudgetLower = max(1, min(staticCascadeBudget, closureSeedCount + 1));
-    if (adaptiveCascadeBudgetCurrent_ <= 0) {
-      adaptiveCascadeBudgetCurrent_ = staticCascadeBudget;
+    if (cascadeState_.adaptiveBudgetCurrent <= 0) {
+      cascadeState_.adaptiveBudgetCurrent = staticCascadeBudget;
     }
-    adaptiveCascadeBudgetCurrent_ =
+    cascadeState_.adaptiveBudgetCurrent =
         min(adaptiveBudgetUpper, max(adaptiveBudgetLower,
-                                     adaptiveCascadeBudgetCurrent_));
-    cascadeBudget = adaptiveCascadeBudgetCurrent_;
+                                     cascadeState_.adaptiveBudgetCurrent));
+    cascadeBudget = cascadeState_.adaptiveBudgetCurrent;
   }
 
-  cascadeStats_.budgetUsedSum += cascadeBudget;
-  if (cascadeStats_.prepareCalls == 1) {
-    cascadeStats_.budgetUsedMin = cascadeBudget;
-    cascadeStats_.budgetUsedMax = cascadeBudget;
+  cascadeState_.stats.budgetUsedSum += cascadeBudget;
+  if (cascadeState_.stats.prepareCalls == 1) {
+    cascadeState_.stats.budgetUsedMin = cascadeBudget;
+    cascadeState_.stats.budgetUsedMax = cascadeBudget;
   } else {
-    cascadeStats_.budgetUsedMin =
-        min(cascadeStats_.budgetUsedMin, (int64_t)cascadeBudget);
-    cascadeStats_.budgetUsedMax =
-        max(cascadeStats_.budgetUsedMax, (int64_t)cascadeBudget);
+    cascadeState_.stats.budgetUsedMin =
+        min(cascadeState_.stats.budgetUsedMin, (int64_t)cascadeBudget);
+    cascadeState_.stats.budgetUsedMax =
+        max(cascadeState_.stats.budgetUsedMax, (int64_t)cascadeBudget);
   }
-  adaptiveCascadeBudgetLastUsed_ = cascadeBudget;
+  cascadeState_.adaptiveBudgetLastUsed = cascadeBudget;
 
   if (closureAddedCount > cascadeBudget) {
-    if (adaptiveCascadeBudget_) {
-      const int growthStep = max(1, adaptiveCascadeBudgetCurrent_ / 4);
+    if (cascadeState_.adaptiveBudgetEnabled) {
+      const int growthStep = max(1, cascadeState_.adaptiveBudgetCurrent / 4);
       const int targetBudget =
-          max(closureSeedCount + 1, adaptiveCascadeBudgetCurrent_ + growthStep);
+          max(closureSeedCount + 1, cascadeState_.adaptiveBudgetCurrent + growthStep);
       const int nextBudget =
           min(adaptiveBudgetUpper, max(adaptiveBudgetLower, targetBudget));
-      if (nextBudget > adaptiveCascadeBudgetCurrent_) {
-        cascadeStats_.adaptiveBudgetIncreases++;
+      if (nextBudget > cascadeState_.adaptiveBudgetCurrent) {
+        cascadeState_.stats.adaptiveBudgetIncreases++;
       }
-      adaptiveCascadeBudgetCurrent_ = nextBudget;
+      cascadeState_.adaptiveBudgetCurrent = nextBudget;
     }
-    lastPrepareAbortedByCascade_ = true;
-    cascadeStats_.budgetAborts++;
+    cascadeState_.lastPrepareAborted = true;
+    cascadeState_.stats.budgetAborts++;
     PLOGW << "prepareNextIteration: cascade budget exceeded (seed="
           << closureSeedCount << ", closure_total=" << closureTaskCount
           << ", closure_added=" << closureAddedCount
@@ -139,31 +139,31 @@ bool LNS::prepareNextIteration() {
     return false;
   }
 
-  if (adaptiveCascadeBudget_) {
-    int nextBudget = adaptiveCascadeBudgetCurrent_;
+  if (cascadeState_.adaptiveBudgetEnabled) {
+    int nextBudget = cascadeState_.adaptiveBudgetCurrent;
     const double closurePressure =
         (cascadeBudget > 0) ? ((double)closureAddedCount / (double)cascadeBudget)
                             : 1.0;
     if (closurePressure < 0.35) {
-      nextBudget = max(adaptiveBudgetLower, adaptiveCascadeBudgetCurrent_ - 1);
+      nextBudget = max(adaptiveBudgetLower, cascadeState_.adaptiveBudgetCurrent - 1);
     } else if (closurePressure > 0.85) {
-      nextBudget = min(adaptiveBudgetUpper, adaptiveCascadeBudgetCurrent_ + 1);
+      nextBudget = min(adaptiveBudgetUpper, cascadeState_.adaptiveBudgetCurrent + 1);
     }
 
     // Avoid shrinking budget immediately after a productive iteration.
     if (!iterationStats.empty() &&
         (iterationStats.back().quality == IterationQuality::bestSolutionYet ||
          iterationStats.back().quality == IterationQuality::improvedSolution) &&
-        nextBudget < adaptiveCascadeBudgetCurrent_) {
-      nextBudget = adaptiveCascadeBudgetCurrent_;
+        nextBudget < cascadeState_.adaptiveBudgetCurrent) {
+      nextBudget = cascadeState_.adaptiveBudgetCurrent;
     }
 
-    if (nextBudget > adaptiveCascadeBudgetCurrent_) {
-      cascadeStats_.adaptiveBudgetIncreases++;
-    } else if (nextBudget < adaptiveCascadeBudgetCurrent_) {
-      cascadeStats_.adaptiveBudgetDecreases++;
+    if (nextBudget > cascadeState_.adaptiveBudgetCurrent) {
+      cascadeState_.stats.adaptiveBudgetIncreases++;
+    } else if (nextBudget < cascadeState_.adaptiveBudgetCurrent) {
+      cascadeState_.stats.adaptiveBudgetDecreases++;
     }
-    adaptiveCascadeBudgetCurrent_ = nextBudget;
+    cascadeState_.adaptiveBudgetCurrent = nextBudget;
   }
 
   lnsNeighborhood_.removedTasks = std::move(closureRemovedTasks);
@@ -220,7 +220,7 @@ bool LNS::prepareNextIteration() {
     }
     solution_.agents[agent].taskPaths[taskPosition] = AgentTaskPath();
   }
-  lastPrepareAffectedAgents_.assign(affectedAgents.begin(),
+  cascadeState_.lastPrepareAffectedAgents.assign(affectedAgents.begin(),
                                     affectedAgents.end());
 
   // Marking past information about conflicting tasks

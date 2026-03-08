@@ -23,6 +23,8 @@ class IterationCandidatePostprocessOrchestrator;
 class IterationAcceptanceBookkeepingOrchestrator;
 class RepairEngine;
 class DestroyOrchestrator;
+struct NeighborhoodDiagnosticsResult;
+struct IterationExecutionContext;
 
 class LNS {
  public:
@@ -51,18 +53,6 @@ class LNS {
   using ValidationStats = lns_stats::ValidationStats;
 
  private:
-  friend class CandidatePhaseOrchestrator;
-  friend class AcceptanceOrchestrator;
-  friend class MarketIterationOrchestrator;
-  friend class IterationDiagnosticsOrchestrator;
-  friend class IterationOutcomeOrchestrator;
-  friend class IterationLifecycleOrchestrator;
-  friend class IterationSetupOrchestrator;
-  friend class IterationCandidatePostprocessOrchestrator;
-  friend class IterationAcceptanceBookkeepingOrchestrator;
-  friend class RepairEngine;
-  friend class DestroyOrchestrator;
-
   #include "state/lns_state_private_members.inc"
 
   struct TaskScheduleMetrics {
@@ -99,6 +89,8 @@ class LNS {
   int cascadeTaskBudget() const;
   void clearNeighborhood();
   void restoreSolutionFromPrevious();
+  void restoreSolutionFromPrevious(const vector<int>& agentSubset);
+  void snapshotPreviousFromCurrent(const vector<int>& agentSubset);
   uint64_t computeSolutionFingerprint(const Solution& solution) const;
   uint64_t computeNeighborhoodFingerprint(
       const ConflictMap& removedTasks) const;
@@ -230,6 +222,59 @@ class LNS {
   inline const Instance& getInstance() const { return instance_; }
 
   bool run();
+  NeighborhoodDiagnosticsResult analyzeNeighborhoodDiagnostics();
+  bool finalizeCouldNotFindAbort(
+      const std::string& reason, bool restorePrevious,
+      ConflictMap& potentialNeighborhood, IterationExecutionContext& context);
+  IterationMarketContext beginIterationMarket();
+  MarketGuardDecision evaluateIterationMarketGuards(
+      double previousPressureForIter, double previousWaitForIter);
+  void updateIterationMarketBestOnAccepted(double candidatePressure,
+                                           double candidateWait);
+  void finalizeIterationMarket(bool accepted);
+  void initializeIterationContext(
+      const ValidationStats& currentValidationStats,
+      IterationExecutionContext& context);
+  void processCandidatePhasePost(
+      const CandidatePhaseResult& candidatePhase,
+      IterationExecutionContext& context);
+  bool runAcceptanceAndBookkeeping(
+      bool nrrRepairSucceeded, ConflictMap& potentialNeighborhood,
+      const ConflictMap& oldNeighborhood, bool& currentSolutionValid,
+      ValidationStats& currentValidationStats,
+      IterationExecutionContext& context);
+  void commitIterationTimingAndMaybeRecord(IterationExecutionContext& context);
+  CandidatePhaseResult runCandidatePhase(
+      const std::vector<int>& initialAgentsToCompute,
+      ConflictMap& potentialNeighborhood, MovingMetrics& metrics);
+  bool executeDestroyHeuristic(int destroyHeuristicId,
+                               const ConflictMap* potentialNeighborhood);
+  bool runDestroyPhase(const ConflictMap* potentialNeighborhood,
+                       int& alnsHeuristicForIter, std::string& errorMessage);
+  bool runRepairEngine(bool& repairFailed, bool& nrrRepairSucceeded);
+
+  AcceptanceDecisionResult runAcceptanceDecision(
+      bool candidateValid, double previousPressureForIter,
+      double previousWaitForIter, int previousConflictSignalForIter,
+      const std::vector<int>& candidateTouchedAgents,
+      IterationDebugRecord& debugRow);
+  void updateAcceptanceAlnsStats(int alnsHeuristicForIter,
+                                 int previousSocForIter, int proposedSocForIter,
+                                 bool candidateValid, bool accepted,
+                                 bool acceptedAsWorse,
+                                 bool feasibleSolutionUpdated);
+  void applyAcceptanceOutcome(
+      const AcceptanceDecisionResult& decisionResult, bool candidateValid,
+      bool feasibleSolutionUpdated, bool nrrRepairSucceeded,
+      int previousSocForIter, int proposedSocForIter,
+      int incumbentSocBeforeIter, int previousConflictSignalForIter,
+      int candidateConflictSignal,
+      const ValidationStats& candidateValidationStats,
+      ConflictMap& potentialNeighborhood, const ConflictMap& oldNeighborhood,
+      bool& currentSolutionValid, ValidationStats& currentValidationStats,
+      IterationQuality& quality,
+      const std::vector<int>& candidateTouchedAgents,
+      IterationDebugRecord& debugRow);
 
   bool buildGreedySolution();
   bool buildPrioritizedInitialSolution();
@@ -467,15 +512,18 @@ class LNS {
   const ALNS& getAdaptiveLNSRef() const { return adaptiveLNS_; }
   ALNS getAdaptiveLNS() const { return adaptiveLNS_; }
   bool lastPrepareAbortedByCascade() const {
-    return lastPrepareAbortedByCascade_;
+    return cascadeState_.lastPrepareAborted;
   }
-  int lastPrepareClosureAdded() const { return lastPrepareClosureAdded_; }
-  const CascadeStats& getCascadeStatsRef() const { return cascadeStats_; }
+  int lastPrepareClosureAdded() const { return cascadeState_.lastPrepareClosureAdded; }
+  const CascadeStats& getCascadeStatsRef() const { return cascadeState_.stats; }
   int getCascadeTaskBudget() const { return cascadeTaskBudget(); }
-  bool isAdaptiveCascadeBudgetEnabled() const { return adaptiveCascadeBudget_; }
+  bool isAdaptiveCascadeBudgetEnabled() const {
+    return cascadeState_.adaptiveBudgetEnabled;
+  }
   int getAdaptiveCascadeBudgetCurrent() const {
-    return adaptiveCascadeBudget_ ? adaptiveCascadeBudgetCurrent_
-                                  : cascadeTaskBudget();
+    return cascadeState_.adaptiveBudgetEnabled
+               ? cascadeState_.adaptiveBudgetCurrent
+               : cascadeTaskBudget();
   }
   const SolutionRestoreStats& getSolutionRestoreStats() const {
     return solutionRestoreStats_;
@@ -490,27 +538,16 @@ class LNS {
     return terminalRepositionStats_;
   }
   LowLevelSearchStats getLowLevelSearchStats() const {
-    return {lowLevelCalls_,         lowLevelExpanded_,      lowLevelGenerated_,
-            lowLevelFound_,         lowLevelTimeout_,       lowLevelSearchExhausted_,
-            lowLevelInvalidInput_,  lowLevelBudgetExhausted_,
-            lowLevelUnknown_,        lowLevelTimeoutGoalPermanentBeforeArrivalLb_,
-            lowLevelTimeoutStartTrappedAtTPlus1_,
-            lowLevelTimeoutStaticDisconnectedPermanent_, lowLevelTimeoutOther_,
-            lowLevelTimeoutReducedByGlobalBudget_,
-            lowLevelTimeoutMultiCertificate_, lowLevelStructuralPrePruned_,
-            lowLevelStructuralPrePrunedGoalPermanentBeforeArrivalLb_,
-            lowLevelStructuralPrePrunedStartTrappedAtTPlus1_,
-            lowLevelStructuralPrePrunedStaticDisconnectedPermanent_,
-            lowLevelStructuralPrePrunedMultiCertificate_};
+    return lowLevelState_.counters;
   }
   const char* getLastLowLevelOutcomeName() const {
-    return SingleAgentSolver::searchOutcomeName(lastLowLevelOutcome_);
+    return SingleAgentSolver::searchOutcomeName(lowLevelState_.lastOutcome);
   }
   double getLastLowLevelRemainingBudgetSec() const {
-    return lastLowLevelRemainingBudgetSec_;
+    return lowLevelState_.lastRemainingBudgetSec;
   }
   double getLastLowLevelEffectiveTimeoutSec() const {
-    return lastLowLevelEffectiveTimeoutSec_;
+    return lowLevelState_.lastEffectiveTimeoutSec;
   }
   std::optional<IncrementalRegretStats> getIncrementalRegretStats() const {
     if (!incrementalRegret_) {
@@ -551,10 +588,10 @@ class LNS {
   void failureSoftRemoval(const ConflictMap* potentialNeighborhood = nullptr);
   bool alnsRemoval(const ConflictMap* potentialNeighborhood);
 
-  bool simulatedAnnealing();
-  bool thresholdAcceptance();
-  bool oldBachelorsAcceptance();
-  bool greatDelugeAlgorithm();
+  bool simulatedAnnealing(const std::vector<int>& candidateTouchedAgents);
+  bool thresholdAcceptance(const std::vector<int>& candidateTouchedAgents);
+  bool oldBachelorsAcceptance(const std::vector<int>& candidateTouchedAgents);
+  bool greatDelugeAlgorithm(const std::vector<int>& candidateTouchedAgents);
 
   void invalidateCurrentTaskAssignmentIndexCache();
   const vector<int>& getCurrentTaskPositionIndexByTask() const;

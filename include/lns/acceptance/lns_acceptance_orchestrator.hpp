@@ -8,6 +8,7 @@ class AcceptanceOrchestrator {
   static AcceptanceDecisionResult runDecision(
       LNS& lns, bool candidateValid, double previousPressureForIter,
       double previousWaitForIter, int previousConflictSignalForIter,
+      const std::vector<int>& candidateTouchedAgents,
       LNS::IterationDebugRecord& debugRow);
 
   static void updateAlnsStats(LNS& lns, int alnsHeuristicForIter,
@@ -25,5 +26,7 @@ class AcceptanceOrchestrator {
       const LNS::ValidationStats& candidateValidationStats,
       ConflictMap& potentialNeighborhood, const ConflictMap& oldNeighborhood,
       bool& currentSolutionValid, LNS::ValidationStats& currentValidationStats,
-      IterationQuality& quality, LNS::IterationDebugRecord& debugRow);
+      IterationQuality& quality,
+      const std::vector<int>& candidateTouchedAgents,
+      LNS::IterationDebugRecord& debugRow);
 };

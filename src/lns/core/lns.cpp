@@ -164,47 +164,49 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
         ((fsec)(Time::now() - lowLevelStart)).count();
   };
   const double remainingBudget = remainingRuntimeBudgetSec();
-  lastLowLevelRemainingBudgetSec_ = remainingBudget;
+  lowLevelState_.lastRemainingBudgetSec = remainingBudget;
   if (remainingBudget <= 0.0) {
     solver.setLastSearchOutcome(
         SingleAgentSolver::SearchOutcome::budget_exhausted);
-    lastLowLevelOutcome_ = solver.getLastSearchOutcome();
-    lastLowLevelEffectiveTimeoutSec_ = 0.0;
-    lowLevelBudgetExhausted_++;
+    lowLevelState_.lastOutcome = solver.getLastSearchOutcome();
+    lowLevelState_.lastEffectiveTimeoutSec = 0.0;
+    lowLevelState_.counters.budgetExhausted++;
     accumulateLowLevelRuntime();
     return AgentTaskPath();
   }
 
   const double configuredTimeout = solver.getSegmentTimeout();
   const double effectiveTimeout = max(1e-6, min(configuredTimeout, remainingBudget));
-  lastLowLevelEffectiveTimeoutSec_ = effectiveTimeout;
+  lowLevelState_.lastEffectiveTimeoutSec = effectiveTimeout;
   solver.setSegmentTimeout(effectiveTimeout);
 
-  lowLevelCalls_++;
+  lowLevelState_.counters.calls++;
   if (lowLevelStructuralPrePrune_) {
     const auto diag = classifyLowLevelStructuralDiagnostics(
         solver, constraintTable, startTime, stage);
     if (diag.validStage && diag.certificateCount() > 0) {
-      lowLevelStructuralPrePruned_++;
+      lowLevelState_.counters.structuralPrePruned++;
       if (diag.certificateCount() > 1) {
-        lowLevelStructuralPrePrunedMultiCertificate_++;
+        lowLevelState_.counters.structuralPrePrunedMultiCertificate++;
       }
       if (diag.goalPermanentBeforeArrivalLb) {
-        lowLevelStructuralPrePrunedGoalPermanentBeforeArrivalLb_++;
+        lowLevelState_.counters
+            .structuralPrePrunedGoalPermanentBeforeArrivalLb++;
       }
       if (diag.startTrappedAtTPlus1) {
-        lowLevelStructuralPrePrunedStartTrappedAtTPlus1_++;
+        lowLevelState_.counters.structuralPrePrunedStartTrappedAtTPlus1++;
       }
       if (diag.staticDisconnectedPermanent) {
-        lowLevelStructuralPrePrunedStaticDisconnectedPermanent_++;
+        lowLevelState_.counters
+            .structuralPrePrunedStaticDisconnectedPermanent++;
       }
 
       solver.setLastSearchOutcome(
           SingleAgentSolver::SearchOutcome::search_exhausted);
-      lastLowLevelOutcome_ = solver.getLastSearchOutcome();
-      lowLevelSearchExhausted_++;
+      lowLevelState_.lastOutcome = solver.getLastSearchOutcome();
+      lowLevelState_.counters.searchExhausted++;
       if (debugImprovementDiagnostics_ &&
-          lowLevelTimeoutDiagnosticsLogsEmitted_ < 200) {
+          lowLevelState_.timeoutDiagnosticsLogsEmitted < 200) {
         PLOGW << "LL-structural-preprune: stage=" << stage
               << ", start_time=" << startTime << ", lower_bound=" << lowerBound
               << ", start_loc=" << diag.startLocation
@@ -226,7 +228,7 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
               << (diag.staticDisconnectedPermanent ? "true" : "false")
               << ", configured_timeout_sec=" << configuredTimeout
               << ", effective_timeout_sec=" << effectiveTimeout << "\n";
-        lowLevelTimeoutDiagnosticsLogsEmitted_++;
+        lowLevelState_.timeoutDiagnosticsLogsEmitted++;
       }
       solver.setSegmentTimeout(configuredTimeout);
       accumulateLowLevelRuntime();
@@ -238,31 +240,31 @@ AgentTaskPath LNS::runLowLevelSearch(SingleAgentSolver& solver,
   const uint64_t generatedBefore = solver.numGenerated;
   AgentTaskPath path =
       solver.findPathSegment(constraintTable, startTime, stage, lowerBound);
-  lowLevelExpanded_ += (solver.numExpanded - expandedBefore);
-  lowLevelGenerated_ += (solver.numGenerated - generatedBefore);
-  lastLowLevelOutcome_ = solver.getLastSearchOutcome();
-  switch (lastLowLevelOutcome_) {
+  lowLevelState_.counters.expanded += (solver.numExpanded - expandedBefore);
+  lowLevelState_.counters.generated += (solver.numGenerated - generatedBefore);
+  lowLevelState_.lastOutcome = solver.getLastSearchOutcome();
+  switch (lowLevelState_.lastOutcome) {
     case SingleAgentSolver::SearchOutcome::found:
-      lowLevelFound_++;
+      lowLevelState_.counters.found++;
       break;
     case SingleAgentSolver::SearchOutcome::timeout:
-      lowLevelTimeout_++;
+      lowLevelState_.counters.timeout++;
       recordLowLevelTimeoutDiagnostics(solver, constraintTable, startTime, stage,
                                        lowerBound, configuredTimeout,
                                        effectiveTimeout);
       break;
     case SingleAgentSolver::SearchOutcome::search_exhausted:
-      lowLevelSearchExhausted_++;
+      lowLevelState_.counters.searchExhausted++;
       break;
     case SingleAgentSolver::SearchOutcome::invalid_input:
-      lowLevelInvalidInput_++;
+      lowLevelState_.counters.invalidInput++;
       break;
     case SingleAgentSolver::SearchOutcome::budget_exhausted:
-      lowLevelBudgetExhausted_++;
+      lowLevelState_.counters.budgetExhausted++;
       break;
     case SingleAgentSolver::SearchOutcome::unknown:
     default:
-      lowLevelUnknown_++;
+      lowLevelState_.counters.unknown++;
       break;
   }
   solver.setSegmentTimeout(configuredTimeout);
@@ -276,36 +278,36 @@ void LNS::recordLowLevelTimeoutDiagnostics(
     double effectiveTimeout) {
   const bool reducedByGlobalBudget = effectiveTimeout + 1e-9 < configuredTimeout;
   if (reducedByGlobalBudget) {
-    lowLevelTimeoutReducedByGlobalBudget_++;
+    lowLevelState_.counters.timeoutReducedByGlobalBudget++;
   }
 
   const auto diag = classifyLowLevelStructuralDiagnostics(
       solver, constraintTable, startTime, stage);
   if (!diag.validStage) {
-    lowLevelTimeoutOther_++;
+    lowLevelState_.counters.timeoutOther++;
     return;
   }
 
   if (diag.certificateCount() > 1) {
-    lowLevelTimeoutMultiCertificate_++;
+    lowLevelState_.counters.timeoutMultiCertificate++;
   }
 
   const char* reason = "other";
   if (diag.goalPermanentBeforeArrivalLb) {
-    lowLevelTimeoutGoalPermanentBeforeArrivalLb_++;
+    lowLevelState_.counters.timeoutGoalPermanentBeforeArrivalLb++;
     reason = "goal_permanent_before_arrival_lb";
   } else if (diag.startTrappedAtTPlus1) {
-    lowLevelTimeoutStartTrappedAtTPlus1_++;
+    lowLevelState_.counters.timeoutStartTrappedAtTPlus1++;
     reason = "start_trapped_at_t+1";
   } else if (diag.staticDisconnectedPermanent) {
-    lowLevelTimeoutStaticDisconnectedPermanent_++;
+    lowLevelState_.counters.timeoutStaticDisconnectedPermanent++;
     reason = "static_disconnected_under_permanent_blocks";
   } else {
-    lowLevelTimeoutOther_++;
+    lowLevelState_.counters.timeoutOther++;
   }
 
   if (debugImprovementDiagnostics_ &&
-      lowLevelTimeoutDiagnosticsLogsEmitted_ < 200) {
+      lowLevelState_.timeoutDiagnosticsLogsEmitted < 200) {
     PLOGW << "LL-timeout diagnostics: reason=" << reason
           << ", stage=" << stage << ", start_time=" << startTime
           << ", lower_bound=" << lowerBound << ", start_loc="
@@ -322,7 +324,7 @@ void LNS::recordLowLevelTimeoutDiagnostics(
           << (reducedByGlobalBudget ? "true" : "false")
           << ", configured_timeout_sec=" << configuredTimeout
           << ", effective_timeout_sec=" << effectiveTimeout << "\n";
-    lowLevelTimeoutDiagnosticsLogsEmitted_++;
+    lowLevelState_.timeoutDiagnosticsLogsEmitted++;
   }
 }
 
@@ -531,14 +533,14 @@ const vector<int>& LNS::getParkingCandidatesForGoal(int finalGoal) {
 }
 
 int LNS::cascadeTaskBudget() const {
-  if (maxCascadeTasks_ > 0) {
-    return maxCascadeTasks_;
+  if (cascadeState_.maxTasks > 0) {
+    return cascadeState_.maxTasks;
   }
-  if (maxCascadeFactor_ <= 0.0) {
+  if (cascadeState_.maxFactor <= 0.0) {
     return std::numeric_limits<int>::max();
   }
   const int neighborhood = max(0, neighborSize_);
-  const double scaledBudget = maxCascadeFactor_ * (double)neighborhood;
+  const double scaledBudget = cascadeState_.maxFactor * (double)neighborhood;
   const int factorBudget =
       (scaledBudget >= (double)std::numeric_limits<int>::max())
           ? std::numeric_limits<int>::max()
@@ -593,6 +595,77 @@ void LNS::restoreSolutionFromPrevious() {
   solution_ = previousSolution_;
   invalidateCurrentTaskAssignmentIndexCache();
   solutionRestoreStats_.fullRestores++;
+}
+
+void LNS::restoreSolutionFromPrevious(const vector<int>& agentSubset) {
+  solutionRestoreStats_.restoreCalls++;
+  if (agentSubset.empty() ||
+      solution_.agents.size() != previousSolution_.agents.size()) {
+    solution_ = previousSolution_;
+    invalidateCurrentTaskAssignmentIndexCache();
+    solutionRestoreStats_.fullRestores++;
+    return;
+  }
+
+  solution_.numOfTasks = previousSolution_.numOfTasks;
+  solution_.numOfAgents = previousSolution_.numOfAgents;
+  solution_.sumOfCosts = previousSolution_.sumOfCosts;
+  solution_.utility = previousSolution_.utility;
+  solution_.taskAgentMap = previousSolution_.taskAgentMap;
+
+  const int agentCount = instance_.getAgentNum();
+  vector<char> selected(agentCount, 0);
+  int copiedAgents = 0;
+  for (int agent : agentSubset) {
+    if (agent < 0 || agent >= agentCount) {
+      continue;
+    }
+    if (selected[agent]) {
+      continue;
+    }
+    selected[agent] = 1;
+    solution_.agents[agent] = previousSolution_.agents[agent];
+    copiedAgents++;
+  }
+
+  if (copiedAgents == 0) {
+    solution_ = previousSolution_;
+    solutionRestoreStats_.fullRestores++;
+  }
+  invalidateCurrentTaskAssignmentIndexCache();
+}
+
+void LNS::snapshotPreviousFromCurrent(const vector<int>& agentSubset) {
+  if (agentSubset.empty() ||
+      solution_.agents.size() != previousSolution_.agents.size()) {
+    previousSolution_ = solution_;
+    return;
+  }
+
+  previousSolution_.numOfTasks = solution_.numOfTasks;
+  previousSolution_.numOfAgents = solution_.numOfAgents;
+  previousSolution_.sumOfCosts = solution_.sumOfCosts;
+  previousSolution_.utility = solution_.utility;
+  previousSolution_.taskAgentMap = solution_.taskAgentMap;
+
+  const int agentCount = instance_.getAgentNum();
+  vector<char> selected(agentCount, 0);
+  int copiedAgents = 0;
+  for (int agent : agentSubset) {
+    if (agent < 0 || agent >= agentCount) {
+      continue;
+    }
+    if (selected[agent]) {
+      continue;
+    }
+    selected[agent] = 1;
+    previousSolution_.agents[agent] = solution_.agents[agent];
+    copiedAgents++;
+  }
+
+  if (copiedAgents == 0) {
+    previousSolution_ = solution_;
+  }
 }
 
 int LNS::computeObjectiveValue(const Solution& solution) const {
@@ -653,9 +726,9 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   plannerStartTime_ = Time::now();
   neighborSize_ = parameters.core.neighborhoodSize;
   timeLimit_ = parameters.core.timeLimit;
-  temperature_ = parameters.core.temperature;
-  coolingCoefficient_ = parameters.core.coolingCoefficient;
-  heatingCoefficient_ = parameters.core.heatingCoefficient;
+  acceptanceState_.temperature = parameters.core.temperature;
+  acceptanceState_.coolingCoefficient = parameters.core.coolingCoefficient;
+  acceptanceState_.heatingCoefficient = parameters.core.heatingCoefficient;
   tolerance_ = parameters.core.tolerance;
   shawDistanceWeight_ = parameters.core.shawDistanceWeight;
   shawTemporalWeight_ = parameters.core.shawTemporalWeight;
@@ -712,7 +785,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   goalOccupationMode_ = parameters.core.goalOccupationMode;
   terminalRepositionStats_.reset();
   improvementDiagnosticsStats_.reset();
-  acceptedSolutionFingerprints_.clear();
+  acceptanceState_.acceptedSolutionFingerprints.clear();
   iterationDebugRecords_.clear();
   parkingCandidatesCache_.clear();
   if (goalOccupationMode_ != "stay" &&
@@ -726,7 +799,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
                                       : GoalOccupationMode::reposition_true;
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
-  acceptOnlyValidCandidates_ = parameters.core.acceptOnlyValidCandidates;
+  acceptanceState_.acceptOnlyValidCandidates = parameters.core.acceptOnlyValidCandidates;
   repairHeuristic = parameters.core.repairHeuristic;
   if (repairHeuristic != "regret" &&
       repairHeuristic != "market_shortlist_regret" &&
@@ -752,7 +825,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   enableNrrRepair_ = parameters.core.enableNrrRepair;
   nrrFallbackToStandard_ = parameters.core.nrrFallbackToStandard;
   nrrGlobalReassign_ = parameters.core.nrrGlobalReassign;
-  forceNeighborhoodChangeOnReject_ =
+  acceptanceState_.forceNeighborhoodChangeOnReject =
       parameters.core.forceNeighborhoodChangeOnReject;
   nrrMiniSolver_ = parameters.core.nrrMiniSolver;
   if (nrrMiniSolver_ != "pbs" && nrrMiniSolver_ != "cbs" &&
@@ -806,19 +879,19 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   regretCandidateTopK_ = std::max(0, parameters.core.regretCandidateTopK);
   regretShortlistDiagnostics_ = parameters.core.regretShortlistDiagnostics;
   buildSuccessorPressureStaticSignals();
-  maxCascadeFactor_ = parameters.core.maxCascadeFactor;
-  if (!std::isfinite(maxCascadeFactor_)) {
-    maxCascadeFactor_ = 0.0;
+  cascadeState_.maxFactor = parameters.core.maxCascadeFactor;
+  if (!std::isfinite(cascadeState_.maxFactor)) {
+    cascadeState_.maxFactor = 0.0;
   }
-  maxCascadeFactor_ = max(0.0, maxCascadeFactor_);
-  maxCascadeTasks_ = std::max(0, parameters.core.maxCascadeTasks);
-  adaptiveCascadeBudget_ = parameters.core.adaptiveCascadeBudget;
-  adaptiveCascadeBudgetCurrent_ = cascadeTaskBudget();
-  adaptiveCascadeBudgetLastUsed_ = adaptiveCascadeBudgetCurrent_;
+  cascadeState_.maxFactor = max(0.0, cascadeState_.maxFactor);
+  cascadeState_.maxTasks = std::max(0, parameters.core.maxCascadeTasks);
+  cascadeState_.adaptiveBudgetEnabled = parameters.core.adaptiveCascadeBudget;
+  cascadeState_.adaptiveBudgetCurrent = cascadeTaskBudget();
+  cascadeState_.adaptiveBudgetLastUsed = cascadeState_.adaptiveBudgetCurrent;
   alnsEnablePrecedenceAwareDestroy_ =
       parameters.core.alnsEnablePrecedenceAwareDestroy;
-  softRecoveryDestroyMode_ = parameters.core.softRecoveryDestroyMode;
-  softPersistentConflictGraph_ = parameters.core.softPersistentConflictGraph;
+  softRecoveryState_.destroyMode = parameters.core.softRecoveryDestroyMode;
+  softRecoveryState_.persistentConflictGraph = parameters.core.softPersistentConflictGraph;
   if (parameters.lowLevel.planner == "sipps") {
     lowLevelPlannerType_ = LowLevelPlannerType::sipps;
   } else {
@@ -1009,12 +1082,12 @@ SingleAgentSolver& LNS::getReusableLocalPlanner(int agent) {
   if (agent < 0 || agent >= instance_.getAgentNum()) {
     throw std::out_of_range("LNS::getReusableLocalPlanner: invalid agent");
   }
-  if (reusableLocalPlanners_.size() !=
+  if (lowLevelState_.reusableLocalPlanners.size() !=
       (size_t)instance_.getAgentNum()) {
-    reusableLocalPlanners_.resize(instance_.getAgentNum());
+    lowLevelState_.reusableLocalPlanners.resize(instance_.getAgentNum());
   }
-  if (reusableLocalPlanners_[agent] == nullptr) {
-    reusableLocalPlanners_[agent] = createLocalPlanner(agent);
+  if (lowLevelState_.reusableLocalPlanners[agent] == nullptr) {
+    lowLevelState_.reusableLocalPlanners[agent] = createLocalPlanner(agent);
   }
-  return *reusableLocalPlanners_[agent];
+  return *lowLevelState_.reusableLocalPlanners[agent];
 }

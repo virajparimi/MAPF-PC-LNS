@@ -2,34 +2,39 @@
 
 void IterationLifecycleOrchestrator::commitTimingAndMaybeRecord(
     LNS& lns, IterationExecutionContext& context) {
+  lns.commitIterationTimingAndMaybeRecord(context);
+}
+
+void LNS::commitIterationTimingAndMaybeRecord(
+    IterationExecutionContext& context) {
   if (context.iterationTimingCommitted) {
     return;
   }
-  lns.improvementDiagnosticsStats_.timeDestroyAndPrepareSec +=
+  improvementDiagnosticsStats_.timeDestroyAndPrepareSec +=
       context.timeDestroyAndPrepareSec;
-  lns.improvementDiagnosticsStats_.timeRepairAndCommitSec +=
+  improvementDiagnosticsStats_.timeRepairAndCommitSec +=
       context.timeRepairAndCommitSec;
-  lns.improvementDiagnosticsStats_.timeRegretCandidateEvalSec +=
+  improvementDiagnosticsStats_.timeRegretCandidateEvalSec +=
       context.timeRegretCandidateEvalSec;
-  lns.improvementDiagnosticsStats_.timeRegretCommitSec +=
+  improvementDiagnosticsStats_.timeRegretCommitSec +=
       context.timeRegretCommitSec;
-  lns.improvementDiagnosticsStats_.timeRegretLowLevelSec +=
+  improvementDiagnosticsStats_.timeRegretLowLevelSec +=
       context.timeRegretLowLevelSec;
-  lns.improvementDiagnosticsStats_.timeJoinPathsSec += context.timeJoinPathsSec;
-  lns.improvementDiagnosticsStats_.timeTerminalReplanSec +=
+  improvementDiagnosticsStats_.timeJoinPathsSec += context.timeJoinPathsSec;
+  improvementDiagnosticsStats_.timeTerminalReplanSec +=
       context.timeTerminalReplanSec;
-  lns.improvementDiagnosticsStats_.timeRecomputeSocSec +=
+  improvementDiagnosticsStats_.timeRecomputeSocSec +=
       context.timeRecomputeSocSec;
-  lns.improvementDiagnosticsStats_.timeValidationSec +=
+  improvementDiagnosticsStats_.timeValidationSec +=
       context.timeValidationSec;
-  lns.improvementDiagnosticsStats_.timeAcceptanceSec +=
+  improvementDiagnosticsStats_.timeAcceptanceSec +=
       context.timeAcceptanceSec;
-  lns.improvementDiagnosticsStats_.timeBookkeepingSec +=
+  improvementDiagnosticsStats_.timeBookkeepingSec +=
       context.timeBookkeepingSec;
   context.iterationTimingCommitted = true;
   if (context.collectIterationDebug && !context.iterationRowCommitted) {
-    context.debugRow.runtimeSec = lns.runtime;
-    context.debugRow.quality = lns.iterationQualityName(context.quality);
+    context.debugRow.runtimeSec = runtime;
+    context.debugRow.quality = iterationQualityName(context.quality);
     context.debugRow.timeDestroyAndPrepareSec = context.timeDestroyAndPrepareSec;
     context.debugRow.timeRepairAndCommitSec = context.timeRepairAndCommitSec;
     context.debugRow.timeRegretCandidateEvalSec =
@@ -42,7 +47,7 @@ void IterationLifecycleOrchestrator::commitTimingAndMaybeRecord(
     context.debugRow.timeValidationSec = context.timeValidationSec;
     context.debugRow.timeAcceptanceSec = context.timeAcceptanceSec;
     context.debugRow.timeBookkeepingSec = context.timeBookkeepingSec;
-    lns.iterationDebugRecords_.push_back(context.debugRow);
+    iterationDebugRecords_.push_back(context.debugRow);
     context.iterationRowCommitted = true;
   }
 }

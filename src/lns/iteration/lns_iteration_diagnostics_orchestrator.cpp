@@ -6,31 +6,36 @@
 
 NeighborhoodDiagnosticsResult IterationDiagnosticsOrchestrator::analyzeNeighborhood(
     LNS& lns) {
+  return lns.analyzeNeighborhoodDiagnostics();
+}
+
+NeighborhoodDiagnosticsResult LNS::analyzeNeighborhoodDiagnostics() {
   NeighborhoodDiagnosticsResult result;
-  result.removedTasks = (int)lns.lnsNeighborhood_.immutableRemovedTasks.size();
+  result.removedTasks = (int)lnsNeighborhood_.immutableRemovedTasks.size();
 
   result.neighborhoodFingerprint =
-      lns.computeNeighborhoodFingerprint(lns.lnsNeighborhood_.immutableRemovedTasks);
+      computeNeighborhoodFingerprint(lnsNeighborhood_.immutableRemovedTasks);
   const auto [_, neighborhoodInserted] =
-      lns.seenNeighborhoodFingerprints_.insert(result.neighborhoodFingerprint);
+      neighborhoodDiagnosticsState_.seenFingerprints.insert(
+          result.neighborhoodFingerprint);
   result.neighborhoodFingerprintSeenBefore = !neighborhoodInserted;
   if (result.neighborhoodFingerprintSeenBefore) {
-    lns.improvementDiagnosticsStats_.neighborhoodFingerprintRepeat++;
-    lns.currentNeighborhoodRepeatStreak_++;
-    result.neighborhoodRepeatStreak = lns.currentNeighborhoodRepeatStreak_;
-    lns.improvementDiagnosticsStats_.neighborhoodRepeatStreakMax = std::max(
-        lns.improvementDiagnosticsStats_.neighborhoodRepeatStreakMax,
-        (int64_t)lns.currentNeighborhoodRepeatStreak_);
+    improvementDiagnosticsStats_.neighborhoodFingerprintRepeat++;
+    neighborhoodDiagnosticsState_.repeatStreak++;
+    result.neighborhoodRepeatStreak = neighborhoodDiagnosticsState_.repeatStreak;
+    improvementDiagnosticsStats_.neighborhoodRepeatStreakMax = std::max(
+        improvementDiagnosticsStats_.neighborhoodRepeatStreakMax,
+        (int64_t)neighborhoodDiagnosticsState_.repeatStreak);
   } else {
-    lns.improvementDiagnosticsStats_.neighborhoodFingerprintUnique++;
-    lns.currentNeighborhoodRepeatStreak_ = 0;
+    improvementDiagnosticsStats_.neighborhoodFingerprintUnique++;
+    neighborhoodDiagnosticsState_.repeatStreak = 0;
     result.neighborhoodRepeatStreak = 0;
   }
 
   std::vector<int> currentNeighborhoodTasksSorted;
   currentNeighborhoodTasksSorted.reserve(
-      lns.lnsNeighborhood_.immutableRemovedTasks.size());
-  for (const auto& [task, _] : lns.lnsNeighborhood_.immutableRemovedTasks) {
+      lnsNeighborhood_.immutableRemovedTasks.size());
+  for (const auto& [task, _] : lnsNeighborhood_.immutableRemovedTasks) {
     currentNeighborhoodTasksSorted.push_back(task);
   }
   if (!currentNeighborhoodTasksSorted.empty()) {
@@ -47,44 +52,44 @@ NeighborhoodDiagnosticsResult IterationDiagnosticsOrchestrator::analyzeNeighborh
     result.removedTaskIdsCsv.clear();
   }
 
-  if (!lns.previousNeighborhoodTasksSorted_.empty()) {
+  if (!neighborhoodDiagnosticsState_.previousTasksSorted.empty()) {
     size_t i = 0;
     size_t j = 0;
     size_t intersection = 0;
     while (i < currentNeighborhoodTasksSorted.size() &&
-           j < lns.previousNeighborhoodTasksSorted_.size()) {
+           j < neighborhoodDiagnosticsState_.previousTasksSorted.size()) {
       if (currentNeighborhoodTasksSorted[i] ==
-          lns.previousNeighborhoodTasksSorted_[j]) {
+          neighborhoodDiagnosticsState_.previousTasksSorted[j]) {
         intersection++;
         i++;
         j++;
       } else if (currentNeighborhoodTasksSorted[i] <
-                 lns.previousNeighborhoodTasksSorted_[j]) {
+                 neighborhoodDiagnosticsState_.previousTasksSorted[j]) {
         i++;
       } else {
         j++;
       }
     }
     const size_t unionCount = currentNeighborhoodTasksSorted.size() +
-                              lns.previousNeighborhoodTasksSorted_.size() -
+                              neighborhoodDiagnosticsState_.previousTasksSorted.size() -
                               intersection;
     const double jaccardPrev =
         unionCount > 0 ? (double)intersection / (double)unionCount : 1.0;
     result.neighborhoodJaccardPrev = jaccardPrev;
-    lns.improvementDiagnosticsStats_.neighborhoodJaccardPrevSum += jaccardPrev;
-    lns.improvementDiagnosticsStats_.neighborhoodJaccardPrevSamples++;
+    improvementDiagnosticsStats_.neighborhoodJaccardPrevSum += jaccardPrev;
+    improvementDiagnosticsStats_.neighborhoodJaccardPrevSamples++;
     if (result.neighborhoodFingerprintSeenBefore) {
-      lns.improvementDiagnosticsStats_.neighborhoodJaccardPrevRepeatSum +=
+      improvementDiagnosticsStats_.neighborhoodJaccardPrevRepeatSum +=
           jaccardPrev;
-      lns.improvementDiagnosticsStats_.neighborhoodJaccardPrevRepeatSamples++;
+      improvementDiagnosticsStats_.neighborhoodJaccardPrevRepeatSamples++;
     }
   }
-  lns.previousNeighborhoodTasksSorted_.swap(currentNeighborhoodTasksSorted);
+  neighborhoodDiagnosticsState_.previousTasksSorted.swap(currentNeighborhoodTasksSorted);
 
-  lns.improvementDiagnosticsStats_.neighborhoodsCount++;
-  lns.improvementDiagnosticsStats_.removedTasksTotal += result.removedTasks;
-  lns.improvementDiagnosticsStats_.removedTasksMax = std::max(
-      lns.improvementDiagnosticsStats_.removedTasksMax,
+  improvementDiagnosticsStats_.neighborhoodsCount++;
+  improvementDiagnosticsStats_.removedTasksTotal += result.removedTasks;
+  improvementDiagnosticsStats_.removedTasksMax = std::max(
+      improvementDiagnosticsStats_.removedTasksMax,
       (int64_t)result.removedTasks);
 
   return result;

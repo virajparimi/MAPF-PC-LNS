@@ -7,6 +7,7 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <unordered_set>
 #include <utility>
 #include "common.hpp"
@@ -64,6 +65,8 @@ struct Agent {
   vector<pair<int, int>> intraPrecedenceConstraints;
   // Best-effort inverse lookup cache: global task -> local index in
   // taskAssignments. Entries are validated before use, so stale hints are safe.
+  // SINGLE-THREADED ONLY: mutable cache touched by const lookup helpers.
+  // Not safe for concurrent reads/writes without external synchronization.
   mutable vector<int> localTaskIndexCache;
   // True when assignment-order mutations happened without eagerly updating
   // intraPrecedenceConstraints. This keeps hot-path updates O(1) and treats
@@ -242,7 +245,7 @@ struct Utility {
         deltaPrecedenceWait(deltaPrecedenceWait) {}
 
   struct CompareUtilities {
-    static int64_t valueKey(double value) {
+    static int64_t quantizeValue(double value) {
       constexpr double kScale = 1e6;
       if (!std::isfinite(value)) {
         return value > 0 ? std::numeric_limits<int64_t>::max()
@@ -260,6 +263,7 @@ struct Utility {
       }
       return static_cast<int64_t>(std::llround(value * kScale));
     }
+    static int64_t valueKey(double value) { return quantizeValue(value); }
 
     bool operator()(const Utility& lhs, const Utility& rhs) const {
       const int64_t lhsValueKey = valueKey(lhs.value);
@@ -297,24 +301,10 @@ struct Regret {
         stamp(stamp) {}
 
   struct CompareRegrets {
-    static int64_t valueKey(double value) {
-      constexpr double kScale = 1e6;
-      if (!std::isfinite(value)) {
-        return value > 0 ? std::numeric_limits<int64_t>::max()
-                         : std::numeric_limits<int64_t>::min();
-      }
-      constexpr double kMaxSafe =
-          static_cast<double>(std::numeric_limits<int64_t>::max()) / kScale;
-      constexpr double kMinSafe =
-          static_cast<double>(std::numeric_limits<int64_t>::min()) / kScale;
-      if (value >= kMaxSafe) {
-        return std::numeric_limits<int64_t>::max();
-      }
-      if (value <= kMinSafe) {
-        return std::numeric_limits<int64_t>::min();
-      }
-      return static_cast<int64_t>(std::llround(value * kScale));
+    static int64_t quantizeValue(double value) {
+      return Utility::CompareUtilities::quantizeValue(value);
     }
+    static int64_t valueKey(double value) { return quantizeValue(value); }
 
     bool operator()(const Regret& lhs, const Regret& rhs) const {
       const int64_t lhsValueKey = valueKey(lhs.value);
@@ -385,50 +375,47 @@ struct FeasibleSolution {
   }
 
   string toString() const {
-    string result =
-        "Feasible Solution\n\tSum Of Costs = " + std::to_string(sumOfCosts) +
-        "\n";
+    std::ostringstream result;
+    result << "Feasible Solution\n\tSum Of Costs = " << sumOfCosts << "\n";
     for (int agent = 0; agent < (int)agentPaths.size(); agent++) {
-      result += "Agent " + std::to_string(agent) +
-                " (cost = " + std::to_string(agentPaths[agent].endTimeOrZero()) +
-                "): \n\tPaths:\n\t";
+      result << "Agent " << agent
+             << " (cost = " << agentPaths[agent].endTimeOrZero()
+             << "): \n\tPaths:\n\t";
       for (int t = 0; t < (int)agentPaths[agent].path.size(); t++) {
         pair<int, int> coord =
             getCoordinate(agentPaths[agent].path.at(t).location);
-        result += "(" + std::to_string(coord.first) + ", " +
-                  std::to_string(coord.second) + ")@" + std::to_string(t);
+        result << "(" << coord.first << ", " << coord.second << ")@" << t;
         if (agentPaths[agent].path.at(t).isGoal) {
-          result += "*";
+          result << "*";
         }
         if (t != (int)agentPaths[agent].path.size() - 1) {
-          result += " -> ";
+          result << " -> ";
         }
       }
-      result += "\n";
+      result << "\n";
     }
 
     if (!agentTaskAssignments.empty()) {
-      result += "TASK ASSIGNMENTS\n";
+      result << "TASK ASSIGNMENTS\n";
       for (int agent = 0; agent < (int)agentTaskAssignments.size(); agent++) {
-        result += "Agent " + std::to_string(agent) + "\n";
+        result << "Agent " << agent << "\n";
         const auto& assignments = agentTaskAssignments[agent];
         for (int i = 0; i < (int)assignments.size(); i++) {
           if (i > 0) {
-            result += ", ";
+            result << ", ";
           }
-          result += std::to_string(assignments[i]);
+          result << assignments[i];
         }
-        result += "\n";
+        result << "\n";
       }
     }
 
     if (!agentTaskPaths.empty()) {
-      result += "TASK PATHS\n";
+      result << "TASK PATHS\n";
       for (int agent = 0; agent < (int)agentTaskPaths.size(); agent++) {
-        result += "Agent " + std::to_string(agent) + "\n";
+        result << "Agent " << agent << "\n";
         const auto& taskPaths = agentTaskPaths[agent];
-        const bool hasAssignments =
-            agent < (int)agentTaskAssignments.size();
+        const bool hasAssignments = agent < (int)agentTaskAssignments.size();
         for (int localTask = 0; localTask < (int)taskPaths.size();
              localTask++) {
           int taskId = -1;
@@ -437,33 +424,32 @@ struct FeasibleSolution {
             taskId = agentTaskAssignments[agent][localTask];
           }
           if (taskId >= 0) {
-            result += "Task " + std::to_string(taskId) + ": ";
+            result << "Task " << taskId << ": ";
           } else {
-            result += "Task #" + std::to_string(localTask) + ": ";
+            result << "Task #" << localTask << ": ";
           }
 
           const AgentTaskPath& taskPath = taskPaths[localTask];
           if (taskPath.empty()) {
-            result += "(empty)\n";
+            result << "(empty)\n";
             continue;
           }
           for (int step = 0; step < (int)taskPath.path.size(); step++) {
             pair<int, int> coord = getCoordinate(taskPath.path[step].location);
-            result += "(" + std::to_string(coord.first) + ", " +
-                      std::to_string(coord.second) + ")@" +
-                      std::to_string(taskPath.beginTime + step);
+            result << "(" << coord.first << ", " << coord.second << ")@"
+                   << (taskPath.beginTime + step);
             if (taskPath.path[step].isGoal) {
-              result += "*";
+              result << "*";
             }
             if (step != (int)taskPath.path.size() - 1) {
-              result += " -> ";
+              result << " -> ";
             }
           }
-          result += "\n";
+          result << "\n";
         }
       }
     }
-    return result;
+    return result.str();
   }
 };
 
@@ -668,25 +654,32 @@ struct ALNS {
       proposedBetter, proposedEqual, proposedWorse, acceptedWorse;
   vector<double> deltaSocAll, deltaSocAccepted, bestUpdateDeltaSocSum;
 
+ private:
+  template <typename T>
+  void assignPerHeuristic(vector<T>& values, const T& value) {
+    values.assign(numDestroyHeuristics, value);
+  }
+
+  template <typename T>
+  void assignPerHeuristic(std::initializer_list<vector<T>*> groups,
+                          const T& value) {
+    for (auto* values : groups) {
+      values->assign(numDestroyHeuristics, value);
+    }
+  }
+
+ public:
   ALNS() {
-    weights.assign(numDestroyHeuristics, 1.0);
-    used.assign(numDestroyHeuristics, 0.0);
-    success.assign(numDestroyHeuristics, 0.0);
-    selections.assign(numDestroyHeuristics, 0);
-    accepted.assign(numDestroyHeuristics, 0);
-    rejected.assign(numDestroyHeuristics, 0);
-    feasible.assign(numDestroyHeuristics, 0);
-    bestUpdates.assign(numDestroyHeuristics, 0);
-    improvedAccepted.assign(numDestroyHeuristics, 0);
-    downgradedAccepted.assign(numDestroyHeuristics, 0);
-    couldNotFind.assign(numDestroyHeuristics, 0);
-    cascadeAborted.assign(numDestroyHeuristics, 0);
-    proposedBetter.assign(numDestroyHeuristics, 0);
-    proposedEqual.assign(numDestroyHeuristics, 0);
-    proposedWorse.assign(numDestroyHeuristics, 0);
-    acceptedWorse.assign(numDestroyHeuristics, 0);
-    deltaSocAll.assign(numDestroyHeuristics, 0.0);
-    deltaSocAccepted.assign(numDestroyHeuristics, 0.0);
-    bestUpdateDeltaSocSum.assign(numDestroyHeuristics, 0.0);
+    assignPerHeuristic(weights, 1.0);
+    assignPerHeuristic<double>(
+        {&used, &success, &deltaSocAll, &deltaSocAccepted,
+         &bestUpdateDeltaSocSum},
+        0.0);
+    assignPerHeuristic<int64_t>(
+        {&selections, &accepted, &rejected, &feasible, &bestUpdates,
+         &improvedAccepted, &downgradedAccepted, &couldNotFind,
+         &cascadeAborted, &proposedBetter, &proposedEqual, &proposedWorse,
+         &acceptedWorse},
+        0);
   }
 };

@@ -6,22 +6,29 @@
 bool IterationOutcomeOrchestrator::finalizeCouldNotFindAbort(
     LNS& lns, const std::string& reason, bool restorePrevious,
     ConflictMap& potentialNeighborhood, IterationExecutionContext& context) {
+  return lns.finalizeCouldNotFindAbort(
+      reason, restorePrevious, potentialNeighborhood, context);
+}
+
+bool LNS::finalizeCouldNotFindAbort(
+    const std::string& reason, bool restorePrevious,
+    ConflictMap& potentialNeighborhood, IterationExecutionContext& context) {
   if (restorePrevious) {
-    lns.restoreSolutionFromPrevious();
+    restoreSolutionFromPrevious();
   }
   context.debugRow.earlyAbortReason = reason;
   context.feasibleSolutionUpdated = false;
   context.quality = IterationQuality::couldNotFind;
   const Time::time_point bookkeepingStart = Time::now();
-  lns.runtime = ((fsec)(Time::now() - lns.plannerStartTime_)).count();
-  lns.appendIterationStatBounded(IterationStats(
-      lns.runtime, "LNS", lns.instance_.getAgentNum(), lns.instance_.getTasksNum(),
-      lns.currentObjectiveValue(), context.feasibleSolutionUpdated,
+  runtime = ((fsec)(Time::now() - plannerStartTime_)).count();
+  appendIterationStatBounded(IterationStats(
+      runtime, "LNS", instance_.getAgentNum(), instance_.getTasksNum(),
+      currentObjectiveValue(), context.feasibleSolutionUpdated,
       context.quality));
   context.timeBookkeepingSec += ((fsec)(Time::now() - bookkeepingStart)).count();
-  if (lns.forceNeighborhoodChangeOnReject_) {
+  if (acceptanceState_.forceNeighborhoodChangeOnReject) {
     potentialNeighborhood.clear();
   }
-  MarketIterationOrchestrator::finalize(lns, false);
+  MarketIterationOrchestrator::finalize(*this, false);
   return true;
 }

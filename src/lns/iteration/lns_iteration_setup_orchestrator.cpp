@@ -5,33 +5,38 @@
 void IterationSetupOrchestrator::initialize(
     LNS& lns, const LNS::ValidationStats& currentValidationStats,
     IterationExecutionContext& context) {
-  const IterationMarketContext marketContext =
-      MarketIterationOrchestrator::begin(lns);
+  lns.initializeIterationContext(currentValidationStats, context);
+}
 
-  context.previousSocForIter = lns.previousObjectiveValue();
+void LNS::initializeIterationContext(
+    const ValidationStats& currentValidationStats,
+    IterationExecutionContext& context) {
+  const IterationMarketContext marketContext = beginIterationMarket();
+
+  context.previousSocForIter = previousObjectiveValue();
   context.previousValidationStatsForIter = currentValidationStats;
   context.previousPressureForIter = marketContext.previousPressure;
   context.previousWaitForIter = marketContext.previousWait;
   const int64_t iterationIndex =
-      static_cast<int64_t>(lns.iterationDebugRecords_.size());
-  context.incumbentSocBeforeIter = lns.incumbentObjectiveValueOrMax();
+      static_cast<int64_t>(iterationDebugRecords_.size());
+  context.incumbentSocBeforeIter = incumbentObjectiveValueOrMax();
   context.collectIterationDebug =
-      lns.debugImprovementDiagnostics_ || !lns.debugIterationTsvPath_.empty();
+      debugImprovementDiagnostics_ || !debugIterationTsvPath_.empty();
   context.debugRow.iteration = iterationIndex;
   context.debugRow.previousSoc = context.previousSocForIter;
   context.debugRow.candidateSoc = context.previousSocForIter;
   context.debugRow.incumbentSocBefore = context.incumbentSocBeforeIter;
-  context.softRecoveryModeBefore = lns.softRecoveryActive_;
-  context.softRecoveryModeAfter = lns.softRecoveryActive_;
-  context.debugRow.softRecoveryModeBefore = lns.softRecoveryActive_;
-  context.debugRow.softRecoveryModeAfter = lns.softRecoveryActive_;
+  context.softRecoveryModeBefore = acceptanceState_.softRecoveryActive;
+  context.softRecoveryModeAfter = acceptanceState_.softRecoveryActive;
+  context.debugRow.softRecoveryModeBefore = acceptanceState_.softRecoveryActive;
+  context.debugRow.softRecoveryModeAfter = acceptanceState_.softRecoveryActive;
 
-  lns.improvementDiagnosticsStats_.iterationsStarted++;
-  lns.improvementDiagnosticsStats_.sumPreviousSoc +=
+  improvementDiagnosticsStats_.iterationsStarted++;
+  improvementDiagnosticsStats_.sumPreviousSoc +=
       static_cast<double>(context.previousSocForIter);
   if (context.incumbentSocBeforeIter != std::numeric_limits<int>::max()) {
-    lns.improvementDiagnosticsStats_.sumIncumbentSoc +=
+    improvementDiagnosticsStats_.sumIncumbentSoc +=
         static_cast<double>(context.incumbentSocBeforeIter);
-    lns.improvementDiagnosticsStats_.incumbentSocSamples++;
+    improvementDiagnosticsStats_.incumbentSocSamples++;
   }
 }

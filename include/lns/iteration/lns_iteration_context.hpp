@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // Mutable per-iteration state shared across phase orchestrators.
 struct IterationExecutionContext {
@@ -44,4 +45,5 @@ struct IterationExecutionContext {
   int candidateConflictSignal = 0;
   int previousConflictSignalForIter = 0;
   int proposedSocForIter = 0;
+  std::vector<int> candidateTouchedAgents;
 };

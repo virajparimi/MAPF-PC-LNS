@@ -3,35 +3,40 @@
 #include <algorithm>
 
 IterationMarketContext MarketIterationOrchestrator::begin(LNS& lns) {
-  lns.market_.candidateUpdateConsumed = false;
+  return lns.beginIterationMarket();
+}
+
+IterationMarketContext LNS::beginIterationMarket() {
+  market_.candidateUpdateConsumed = false;
   IterationMarketContext ctx;
-  ctx.previousPressure =
-      lns.market_.heuristics ? lns.computeSolutionMarketPressure() : 0.0;
-  ctx.previousWait =
-      lns.market_.heuristics ? lns.computeSolutionPrecedenceWait() : 0.0;
+  ctx.previousPressure = market_.heuristics ? computeSolutionMarketPressure() : 0.0;
+  ctx.previousWait = market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
   return ctx;
 }
 
 MarketGuardDecision MarketIterationOrchestrator::evaluateGuards(
     LNS& lns, double previousPressureForIter, double previousWaitForIter) {
+  return lns.evaluateIterationMarketGuards(previousPressureForIter,
+                                           previousWaitForIter);
+}
+
+MarketGuardDecision LNS::evaluateIterationMarketGuards(
+    double previousPressureForIter, double previousWaitForIter) {
   MarketGuardDecision decision;
   decision.candidatePressure =
-      lns.market_.heuristics ? lns.computeSolutionMarketPressure() : 0.0;
-  decision.candidateWait =
-      lns.market_.heuristics ? lns.computeSolutionPrecedenceWait() : 0.0;
+      market_.heuristics ? computeSolutionMarketPressure() : 0.0;
+  decision.candidateWait = market_.heuristics ? computeSolutionPrecedenceWait() : 0.0;
 
-  if (lns.market_.heuristics && !lns.market_.updateOnAcceptedOnly &&
-      lns.market_.updateFromCandidate) {
-    lns.maybeUpdateMarketState(false, true);
+  if (market_.heuristics && !market_.updateOnAcceptedOnly &&
+      market_.updateFromCandidate) {
+    maybeUpdateMarketState(false, true);
   }
-  if (lns.market_.heuristics && lns.market_.acceptanceGuards &&
-      !lns.passMarketAcceptanceGuards(previousPressureForIter,
-                                      decision.candidatePressure,
-                                      previousWaitForIter,
-                                      decision.candidateWait,
-                                      lns.previousSolution_.utility <
-                                          lns.solution_.utility)) {
-    lns.marketGuardRejections++;
+  if (market_.heuristics && market_.acceptanceGuards &&
+      !passMarketAcceptanceGuards(previousPressureForIter,
+                                  decision.candidatePressure,
+                                  previousWaitForIter, decision.candidateWait,
+                                  previousSolution_.utility < solution_.utility)) {
+    marketGuardRejections++;
     decision.allowed = false;
     decision.guardRejected = true;
   }
@@ -40,13 +45,22 @@ MarketGuardDecision MarketIterationOrchestrator::evaluateGuards(
 
 void MarketIterationOrchestrator::updateBestOnAccepted(
     LNS& lns, double candidatePressure, double candidateWait) {
-  if (!lns.market_.heuristics) {
+  lns.updateIterationMarketBestOnAccepted(candidatePressure, candidateWait);
+}
+
+void LNS::updateIterationMarketBestOnAccepted(double candidatePressure,
+                                              double candidateWait) {
+  if (!market_.heuristics) {
     return;
   }
-  lns.market_.bestPressure = std::min(lns.market_.bestPressure, candidatePressure);
-  lns.market_.bestWait = std::min(lns.market_.bestWait, candidateWait);
+  market_.bestPressure = std::min(market_.bestPressure, candidatePressure);
+  market_.bestWait = std::min(market_.bestWait, candidateWait);
 }
 
 void MarketIterationOrchestrator::finalize(LNS& lns, bool accepted) {
-  lns.maybeUpdateMarketState(accepted);
+  lns.finalizeIterationMarket(accepted);
+}
+
+void LNS::finalizeIterationMarket(bool accepted) {
+  maybeUpdateMarketState(accepted);
 }

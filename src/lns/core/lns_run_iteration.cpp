@@ -47,7 +47,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   context.debugRow.destroyHeuristicId = context.alnsHeuristicForIter;
   context.debugRow.destroyHeuristicName =
       DestroyOrchestrator::heuristicNameFromId(context.alnsHeuristicForIter);
-  context.debugRow.destroySelectedInSoftMode = lastDestroySampledInSoftMode_;
+  context.debugRow.destroySelectedInSoftMode = softRecoveryState_.lastDestroySampledInSoftMode;
   if (context.debugRow.destroySelectedInSoftMode &&
       context.alnsHeuristicForIter >= 0 &&
       context.alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
@@ -67,7 +67,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   if (!prepareNextIteration()) {
     context.timeDestroyAndPrepareSec += elapsedSecSince(phaseStart);
     improvementDiagnosticsStats_.earlyAbortPrepare++;
-    const bool cascadeAbort = lastPrepareAbortedByCascade_;
+    const bool cascadeAbort = cascadeState_.lastPrepareAborted;
     if (context.alnsHeuristicForIter >= 0 &&
         context.alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
       if (cascadeAbort) {
@@ -159,6 +159,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   context.timeTerminalReplanSec += candidatePhase.timeTerminalReplanSec;
   context.timeRecomputeSocSec += candidatePhase.timeRecomputeSocSec;
   context.timeValidationSec += candidatePhase.timeValidationSec;
+  context.candidateTouchedAgents = candidatePhase.candidateTouchedAgents;
   if (candidatePhase.status == CandidatePhaseStatus::join_failed) {
     improvementDiagnosticsStats_.earlyAbortJoin++;
     PLOGE << "run: failed to join agent paths for candidate solution\n";

@@ -120,15 +120,11 @@ struct Path {
   }
 
   PathEntry& operator[](int idx) {
-    if (idx < 0 || idx >= (int)path.size()) {
-      throw std::out_of_range("Path::operator[] index out of range");
-    }
+    assert(idx >= 0 && idx < (int)path.size());
     return path[idx];
   }
   const PathEntry& operator[](int idx) const {
-    if (idx < 0 || idx >= (int)path.size()) {
-      throw std::out_of_range("Path::operator[] index out of range");
-    }
+    assert(idx >= 0 && idx < (int)path.size());
     return path[idx];
   }
 

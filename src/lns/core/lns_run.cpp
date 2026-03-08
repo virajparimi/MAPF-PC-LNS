@@ -228,24 +228,24 @@ bool LNS::run() {
       adaptiveLNS_.numDestroyHeuristics, 0);
   improvementDiagnosticsStats_.softModeBestUpdatesByDestroy.assign(
       adaptiveLNS_.numDestroyHeuristics, 0);
-  acceptedSolutionFingerprints_.clear();
-  seenNeighborhoodFingerprints_.clear();
-  previousNeighborhoodTasksSorted_.clear();
-  currentNeighborhoodRepeatStreak_ = 0;
+  acceptanceState_.acceptedSolutionFingerprints.clear();
+  neighborhoodDiagnosticsState_.seenFingerprints.clear();
+  neighborhoodDiagnosticsState_.previousTasksSorted.clear();
+  neighborhoodDiagnosticsState_.repeatStreak = 0;
   iterationDebugRecords_.clear();
-  softRecoveryActive_ = false;
-  softRecoveryCurrentConflicts_ = -1;
+  acceptanceState_.softRecoveryActive = false;
+  acceptanceState_.softRecoveryCurrentConflicts = -1;
   lastNrrSoftCandidate_ = false;
   lastNrrSoftConflictCount_ = -1;
   lastNrrSoftOnlyInvalid_ = false;
-  lastDestroySampledInSoftMode_ = false;
-  persistentConflictPairs_.clear();
-  persistentConflictAgents_.clear();
-  lastValidationCollisionPairs_.clear();
-  lastValidationConflictAgents_.clear();
-  lastValidationConflictTasks_.clear();
-  lastSoftFailureConflictAgents_.clear();
-  lastSoftFailureConflictTasks_.clear();
+  softRecoveryState_.lastDestroySampledInSoftMode = false;
+  softRecoveryState_.persistentConflictPairs.clear();
+  softRecoveryState_.persistentConflictAgents.clear();
+  softRecoveryState_.lastValidationCollisionPairs.clear();
+  softRecoveryState_.lastValidationConflictAgents.clear();
+  softRecoveryState_.lastValidationConflictTasks.clear();
+  softRecoveryState_.lastSoftFailureConflictAgents.clear();
+  softRecoveryState_.lastSoftFailureConflictTasks.clear();
   auto flushDebugTsv = [&]() {
     if (debugIterationTsvPath_.empty()) {
       return;
@@ -694,12 +694,12 @@ bool LNS::run() {
   initialCollisionPairs.erase(
       std::unique(initialCollisionPairs.begin(), initialCollisionPairs.end()),
       initialCollisionPairs.end());
-  lastValidationCollisionPairs_ = initialCollisionPairs;
-  lastValidationConflictTasks_.clear();
-  lastValidationConflictTasks_.reserve(potentialNeighborhood.size());
+  softRecoveryState_.lastValidationCollisionPairs = initialCollisionPairs;
+  softRecoveryState_.lastValidationConflictTasks.clear();
+  softRecoveryState_.lastValidationConflictTasks.reserve(potentialNeighborhood.size());
   std::unordered_set<int> initialConflictAgents;
   for (const auto& [task, conflict] : potentialNeighborhood) {
-    lastValidationConflictTasks_.push_back(task);
+    softRecoveryState_.lastValidationConflictTasks.push_back(task);
     if (conflict.agent >= 0 && conflict.agent < instance_.getAgentNum()) {
       initialConflictAgents.insert(conflict.agent);
     } else if (task >= 0 && task < (int)solution_.taskAgentMap.size()) {
@@ -717,13 +717,13 @@ bool LNS::run() {
       initialConflictAgents.insert(b);
     }
   }
-  lastValidationConflictAgents_.assign(initialConflictAgents.begin(),
+  softRecoveryState_.lastValidationConflictAgents.assign(initialConflictAgents.begin(),
                                        initialConflictAgents.end());
-  std::sort(lastValidationConflictAgents_.begin(),
-            lastValidationConflictAgents_.end());
-  if (softPersistentConflictGraph_) {
-    persistentConflictPairs_ = initialCollisionPairs;
-    persistentConflictAgents_ = lastValidationConflictAgents_;
+  std::sort(softRecoveryState_.lastValidationConflictAgents.begin(),
+            softRecoveryState_.lastValidationConflictAgents.end());
+  if (softRecoveryState_.persistentConflictGraph) {
+    softRecoveryState_.persistentConflictPairs = initialCollisionPairs;
+    softRecoveryState_.persistentConflictAgents = softRecoveryState_.lastValidationConflictAgents;
   }
 
   bool feasibleSolutionUpdated = false;
@@ -824,8 +824,8 @@ bool LNS::run() {
 
   constexpr double kMinTemperature = 1e-9;
   const double toleranceScale = tolerance_ / 100.0;
-  temperature_ = std::abs(solution_.utility) * toleranceScale;
-  if (!std::isfinite(temperature_) || temperature_ <= kMinTemperature) {
+  acceptanceState_.temperature = std::abs(solution_.utility) * toleranceScale;
+  if (!std::isfinite(acceptanceState_.temperature) || acceptanceState_.temperature <= kMinTemperature) {
     // Moving utility can be ~0 at initialization when the rolling window is
     // prefilled with the same initial sample. Use a scale-aware fallback so
     // TA/SA are not effectively frozen from the first iteration.
@@ -836,20 +836,20 @@ bool LNS::run() {
     const double blendedScale =
         lnsConflictWeight_ * conflictScale + lnsCostWeight_ * costScale;
     const double fallbackScale = max(1.0, blendedScale);
-    temperature_ = max(kMinTemperature, fallbackScale * toleranceScale);
+    acceptanceState_.temperature = max(kMinTemperature, fallbackScale * toleranceScale);
   }
   if (acceptanceCriteria == "SA") {
-    temperature_ /= log(2);
+    acceptanceState_.temperature /= log(2);
   }
-  initialTemperature_ = temperature_;
-  maxTemperature_ = max(initialTemperature_, 1.0) * 1000.0;
+  initialTemperature_ = acceptanceState_.temperature;
+  acceptanceState_.maxTemperature = max(initialTemperature_, 1.0) * 1000.0;
   if (numOfIterations_ > 0) {
-    greatDelugeDecay_ = initialTemperature_ / max(1, numOfIterations_);
+    acceptanceState_.greatDelugeDecay = initialTemperature_ / max(1, numOfIterations_);
   } else {
-    greatDelugeDecay_ = initialTemperature_ / 1000.0;
+    acceptanceState_.greatDelugeDecay = initialTemperature_ / 1000.0;
   }
-  if (!std::isfinite(greatDelugeDecay_) || greatDelugeDecay_ < 0.0) {
-    greatDelugeDecay_ = 0.0;
+  if (!std::isfinite(acceptanceState_.greatDelugeDecay) || acceptanceState_.greatDelugeDecay < 0.0) {
+    acceptanceState_.greatDelugeDecay = 0.0;
   }
 
   previousSolution_ = solution_;

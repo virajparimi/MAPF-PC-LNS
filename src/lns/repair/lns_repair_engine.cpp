@@ -30,54 +30,58 @@ RepairPlan RepairEngine::buildPlan(bool enableNrrRepair,
 }
 
 bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
+  return lns.runRepairEngine(repairFailed, nrrRepairSucceeded);
+}
+
+bool LNS::runRepairEngine(bool& repairFailed, bool& nrrRepairSucceeded) {
   auto elapsedSecSince = [](const Time::time_point& startTimePoint) -> double {
     return ((fsec)(Time::now() - startTimePoint)).count();
   };
-  lns.lnsNeighborhood_.regretMaxHeap.clear();
-  std::fill(lns.regretBestOption_.begin(), lns.regretBestOption_.end(),
+  lnsNeighborhood_.regretMaxHeap.clear();
+  std::fill(regretBestOption_.begin(), regretBestOption_.end(),
             std::make_pair(UNASSIGNED, -1));
-  std::fill(lns.regretSecondBestOption_.begin(),
-            lns.regretSecondBestOption_.end(),
+  std::fill(regretSecondBestOption_.begin(),
+            regretSecondBestOption_.end(),
             std::make_pair(UNASSIGNED, -1));
-  for (auto& candidateAgents : lns.regretCandidateAgents_) {
+  for (auto& candidateAgents : regretCandidateAgents_) {
     candidateAgents.clear();
   }
   repairFailed = false;
   nrrRepairSucceeded = false;
-  lns.regretEvalStatsCurrent_.reset();
-  lns.lastNrrSoftCandidate_ = false;
-  lns.lastNrrSoftConflictCount_ = -1;
-  lns.lastNrrSoftOnlyInvalid_ = false;
+  regretEvalStatsCurrent_.reset();
+  lastNrrSoftCandidate_ = false;
+  lastNrrSoftConflictCount_ = -1;
+  lastNrrSoftOnlyInvalid_ = false;
   {
-    const int removedCount = (int)lns.lnsNeighborhood_.removedTasks.size();
-    lns.regretEvalStatsCurrent_.neighborhoods++;
-    lns.regretEvalStatsTotal_.neighborhoods++;
-    lns.regretEvalStatsCurrent_.removedTasksSum += removedCount;
-    lns.regretEvalStatsTotal_.removedTasksSum += removedCount;
-    lns.regretEvalStatsCurrent_.removedTasksMax =
-        max(lns.regretEvalStatsCurrent_.removedTasksMax,
+    const int removedCount = (int)lnsNeighborhood_.removedTasks.size();
+    regretEvalStatsCurrent_.neighborhoods++;
+    regretEvalStatsTotal_.neighborhoods++;
+    regretEvalStatsCurrent_.removedTasksSum += removedCount;
+    regretEvalStatsTotal_.removedTasksSum += removedCount;
+    regretEvalStatsCurrent_.removedTasksMax =
+        max(regretEvalStatsCurrent_.removedTasksMax,
             (int64_t)removedCount);
-    lns.regretEvalStatsTotal_.removedTasksMax =
-        max(lns.regretEvalStatsTotal_.removedTasksMax, (int64_t)removedCount);
+    regretEvalStatsTotal_.removedTasksMax =
+        max(regretEvalStatsTotal_.removedTasksMax, (int64_t)removedCount);
   }
 
   const RepairPlan plan = RepairEngine::buildPlan(
-      lns.enableNrrRepair_, lns.nrrFallbackToStandard_, lns.incrementalRegret_,
-      static_cast<int>(lns.getRepairHeuristicMode()));
+      enableNrrRepair_, nrrFallbackToStandard_, incrementalRegret_,
+      static_cast<int>(getRepairHeuristicMode()));
 
-  if (plan.tryNrr && !lns.lnsNeighborhood_.removedTasks.empty()) {
-    if (lns.runtimeBudgetExhausted()) {
+  if (plan.tryNrr && !lnsNeighborhood_.removedTasks.empty()) {
+    if (runtimeBudgetExhausted()) {
       nrrRepairSucceeded = false;
       PLOGW << "nrr_repair: skipped due to exhausted runtime budget\n";
     } else {
-      nrrRepairSucceeded = lns.runNeighborhoodReoptimizationRepair();
+      nrrRepairSucceeded = runNeighborhoodReoptimizationRepair();
     }
     if (nrrRepairSucceeded) {
-      lns.lnsNeighborhood_.removedTasks.clear();
-      lns.lnsNeighborhood_.regretMaxHeap.clear();
+      lnsNeighborhood_.removedTasks.clear();
+      lnsNeighborhood_.regretMaxHeap.clear();
     } else {
       if (plan.allowFallbackToStandard) {
-        lns.nrrStats_.fallbackToStandard++;
+        nrrStats_.fallbackToStandard++;
         PLOGI << "nrr_repair: fallback to standard repair\n";
       } else {
         PLOGI << "nrr_repair: fallback disabled; terminating repair for this "
@@ -92,81 +96,81 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
   }
 
   if (plan.strategy == RepairStrategy::mapfpc_fixed) {
-    if (lns.runtimeBudgetExhausted() || !lns.runFixedAssignmentMapfpcRepair()) {
+    if (runtimeBudgetExhausted() || !runFixedAssignmentMapfpcRepair()) {
       repairFailed = true;
     } else {
-      lns.lnsNeighborhood_.removedTasks.clear();
-      lns.lnsNeighborhood_.regretMaxHeap.clear();
+      lnsNeighborhood_.removedTasks.clear();
+      lnsNeighborhood_.regretMaxHeap.clear();
     }
     return !repairFailed;
   }
   if (plan.strategy == RepairStrategy::mapfpc_neighborhood_fixed) {
-    if (lns.runtimeBudgetExhausted() ||
-        !lns.runNeighborhoodFixedMapfpcRepair()) {
+    if (runtimeBudgetExhausted() ||
+        !runNeighborhoodFixedMapfpcRepair()) {
       repairFailed = true;
     } else {
-      lns.lnsNeighborhood_.removedTasks.clear();
-      lns.lnsNeighborhood_.regretMaxHeap.clear();
+      lnsNeighborhood_.removedTasks.clear();
+      lnsNeighborhood_.regretMaxHeap.clear();
     }
     return !repairFailed;
   }
   if (plan.strategy == RepairStrategy::mapfpc_neighborhood_reassign_greedy) {
-    if (lns.runtimeBudgetExhausted() ||
-        !lns.runNeighborhoodReassignGreedyMapfpcRepair()) {
+    if (runtimeBudgetExhausted() ||
+        !runNeighborhoodReassignGreedyMapfpcRepair()) {
       repairFailed = true;
     } else {
-      lns.lnsNeighborhood_.removedTasks.clear();
-      lns.lnsNeighborhood_.regretMaxHeap.clear();
+      lnsNeighborhood_.removedTasks.clear();
+      lnsNeighborhood_.regretMaxHeap.clear();
     }
     return !repairFailed;
   }
 
   if (plan.strategy == RepairStrategy::full_regret) {
-    while (!lns.lnsNeighborhood_.removedTasks.empty()) {
-      if (lns.runtimeBudgetExhausted()) {
+    while (!lnsNeighborhood_.removedTasks.empty()) {
+      if (runtimeBudgetExhausted()) {
         repairFailed = true;
         break;
       }
       const Time::time_point evalStart = Time::now();
-      bool enoughSpace = lns.computeRegret();
-      lns.cumulativeRegretCandidateEvalSec_ += elapsedSecSince(evalStart);
+      bool enoughSpace = computeRegret();
+      cumulativeRegretCandidateEvalSec_ += elapsedSecSince(evalStart);
       if (!enoughSpace) {
         repairFailed = true;
         break;
       }
-      if (lns.lnsNeighborhood_.regretMaxHeap.empty()) {
+      if (lnsNeighborhood_.regretMaxHeap.empty()) {
         PLOGE << "regretMaxHeap is empty after computeRegret\n";
         repairFailed = true;
         break;
       }
-      assert(!lns.lnsNeighborhood_.regretMaxHeap.empty());
-      Regret bestRegret = lns.lnsNeighborhood_.regretMaxHeap.top();
+      assert(!lnsNeighborhood_.regretMaxHeap.empty());
+      Regret bestRegret = lnsNeighborhood_.regretMaxHeap.top();
       const Time::time_point commitStart = Time::now();
-      if (!lns.commitBestRegretTask(bestRegret)) {
-        lns.cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
+      if (!commitBestRegretTask(bestRegret)) {
+        cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
         PLOGE << "run: failed to commit best-regret task " << bestRegret.task
               << "\n";
         repairFailed = true;
         break;
       }
-      lns.cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
+      cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
     }
     return !repairFailed;
   }
 
-  lns.incrementalRegretStatsCurrent_.reset();
+  incrementalRegretStatsCurrent_.reset();
   const Time::time_point initialRecomputeStart = Time::now();
-  if (lns.runtimeBudgetExhausted() ||
-      !lns.recomputeRegretsForTasks(lns.collectRemainingRemovedTasks())) {
-    lns.cumulativeRegretCandidateEvalSec_ +=
+  if (runtimeBudgetExhausted() ||
+      !recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
+    cumulativeRegretCandidateEvalSec_ +=
         elapsedSecSince(initialRecomputeStart);
     repairFailed = true;
     return false;
   }
-  lns.cumulativeRegretCandidateEvalSec_ +=
+  cumulativeRegretCandidateEvalSec_ +=
       elapsedSecSince(initialRecomputeStart);
 
-  int64_t stalePopsAtLastCheck = lns.incrementalRegretStatsCurrent_.stalePops;
+  int64_t stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
   int64_t stalePopsSinceRefresh = 0;
   int64_t commitsSinceRefresh = 0;
   int64_t consecutiveStaleGrowthCommits = 0;
@@ -174,37 +178,37 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
   bool endgameFullRefreshDone = false;
   enum class RefreshReason { high_stale, stale_growth, periodic };
   auto refreshRemainingRegrets = [&](RefreshReason reason) {
-    lns.lnsNeighborhood_.regretMaxHeap.clear();
-    lns.incrementalRegretStatsCurrent_.fullRefreshes++;
-    lns.incrementalRegretStatsTotal_.fullRefreshes++;
+    lnsNeighborhood_.regretMaxHeap.clear();
+    incrementalRegretStatsCurrent_.fullRefreshes++;
+    incrementalRegretStatsTotal_.fullRefreshes++;
     if (reason == RefreshReason::high_stale) {
-      lns.incrementalRegretStatsCurrent_.refreshByHighStale++;
-      lns.incrementalRegretStatsTotal_.refreshByHighStale++;
+      incrementalRegretStatsCurrent_.refreshByHighStale++;
+      incrementalRegretStatsTotal_.refreshByHighStale++;
     } else if (reason == RefreshReason::stale_growth) {
-      lns.incrementalRegretStatsCurrent_.refreshByStaleGrowth++;
-      lns.incrementalRegretStatsTotal_.refreshByStaleGrowth++;
+      incrementalRegretStatsCurrent_.refreshByStaleGrowth++;
+      incrementalRegretStatsTotal_.refreshByStaleGrowth++;
     } else if (reason == RefreshReason::periodic) {
-      lns.incrementalRegretStatsCurrent_.refreshByPeriodic++;
-      lns.incrementalRegretStatsTotal_.refreshByPeriodic++;
+      incrementalRegretStatsCurrent_.refreshByPeriodic++;
+      incrementalRegretStatsTotal_.refreshByPeriodic++;
     }
     const Time::time_point refreshRecomputeStart = Time::now();
-    if (!lns.recomputeRegretsForTasks(lns.collectRemainingRemovedTasks())) {
-      lns.cumulativeRegretCandidateEvalSec_ +=
+    if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
+      cumulativeRegretCandidateEvalSec_ +=
           elapsedSecSince(refreshRecomputeStart);
       repairFailed = true;
       return;
     }
-    lns.cumulativeRegretCandidateEvalSec_ +=
+    cumulativeRegretCandidateEvalSec_ +=
         elapsedSecSince(refreshRecomputeStart);
-    stalePopsAtLastCheck = lns.incrementalRegretStatsCurrent_.stalePops;
+    stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
     stalePopsSinceRefresh = 0;
     commitsSinceRefresh = 0;
     consecutiveStaleGrowthCommits = 0;
     refreshCooldownCommits = 2;
   };
 
-  while (!repairFailed && !lns.lnsNeighborhood_.removedTasks.empty()) {
-    if (lns.runtimeBudgetExhausted()) {
+  while (!repairFailed && !lnsNeighborhood_.removedTasks.empty()) {
+    if (runtimeBudgetExhausted()) {
       repairFailed = true;
       break;
     }
@@ -233,10 +237,10 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
       }
     }
 
-    const auto bestRegret = lns.popNextValidRegret();
+    const auto bestRegret = popNextValidRegret();
     const int64_t staleDelta =
-        lns.incrementalRegretStatsCurrent_.stalePops - stalePopsAtLastCheck;
-    stalePopsAtLastCheck = lns.incrementalRegretStatsCurrent_.stalePops;
+        incrementalRegretStatsCurrent_.stalePops - stalePopsAtLastCheck;
+    stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
     stalePopsSinceRefresh += staleDelta;
     if (staleDelta > 0) {
       consecutiveStaleGrowthCommits++;
@@ -245,15 +249,15 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
     }
 
     if (!bestRegret.has_value()) {
-      lns.incrementalRegretStatsCurrent_.heapRebuilds++;
-      lns.incrementalRegretStatsTotal_.heapRebuilds++;
+      incrementalRegretStatsCurrent_.heapRebuilds++;
+      incrementalRegretStatsTotal_.heapRebuilds++;
       const Time::time_point rebuildStart = Time::now();
-      if (!lns.recomputeRegretsForTasks(lns.collectRemainingRemovedTasks())) {
-        lns.cumulativeRegretCandidateEvalSec_ += elapsedSecSince(rebuildStart);
+      if (!recomputeRegretsForTasks(collectRemainingRemovedTasks())) {
+        cumulativeRegretCandidateEvalSec_ += elapsedSecSince(rebuildStart);
         repairFailed = true;
       } else {
-        lns.cumulativeRegretCandidateEvalSec_ += elapsedSecSince(rebuildStart);
-        stalePopsAtLastCheck = lns.incrementalRegretStatsCurrent_.stalePops;
+        cumulativeRegretCandidateEvalSec_ += elapsedSecSince(rebuildStart);
+        stalePopsAtLastCheck = incrementalRegretStatsCurrent_.stalePops;
         stalePopsSinceRefresh = 0;
         commitsSinceRefresh = 0;
         consecutiveStaleGrowthCommits = 0;
@@ -263,44 +267,44 @@ bool RepairEngine::run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded) {
     }
 
     const Time::time_point commitStart = Time::now();
-    const vector<int> endTimesBefore = lns.computeCurrentTaskEndTimes();
+    const vector<int> endTimesBefore = computeCurrentTaskEndTimes();
     const vector<uint64_t> agentSignaturesBefore =
-        lns.computeCurrentAgentScheduleSignatures();
-    if (!lns.commitBestRegretTask(*bestRegret)) {
-      lns.cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
+        computeCurrentAgentScheduleSignatures();
+    if (!commitBestRegretTask(*bestRegret)) {
+      cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
       PLOGE << "run: failed to commit best-regret task " << bestRegret->task
             << "\n";
       repairFailed = true;
       break;
     }
-    lns.cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
-    lns.incrementalRegretStatsCurrent_.commits++;
-    lns.incrementalRegretStatsTotal_.commits++;
+    cumulativeRegretCommitSec_ += elapsedSecSince(commitStart);
+    incrementalRegretStatsCurrent_.commits++;
+    incrementalRegretStatsTotal_.commits++;
     commitsSinceRefresh++;
-    const vector<int> endTimesAfter = lns.computeCurrentTaskEndTimes();
+    const vector<int> endTimesAfter = computeCurrentTaskEndTimes();
     const vector<uint64_t> agentSignaturesAfter =
-        lns.computeCurrentAgentScheduleSignatures();
+        computeCurrentAgentScheduleSignatures();
 
-    const vector<int> dirtyTasks = lns.computeDirtyTasksAfterCommit(
+    const vector<int> dirtyTasks = computeDirtyTasksAfterCommit(
         endTimesBefore, endTimesAfter, agentSignaturesBefore,
         agentSignaturesAfter);
     vector<int> tasksToRecompute = dirtyTasks;
     const int remainingRemovedTasks =
-        (int)lns.lnsNeighborhood_.removedTasks.size();
+        (int)lnsNeighborhood_.removedTasks.size();
     if (!endgameFullRefreshDone && remainingRemovedTasks <= 4 &&
         (stalePopsSinceRefresh >= 30 || commitsSinceRefresh >= 10)) {
-      lns.incrementalRegretStatsCurrent_.endgameFullRecomputes++;
-      lns.incrementalRegretStatsTotal_.endgameFullRecomputes++;
-      tasksToRecompute = lns.collectRemainingRemovedTasks();
+      incrementalRegretStatsCurrent_.endgameFullRecomputes++;
+      incrementalRegretStatsTotal_.endgameFullRecomputes++;
+      tasksToRecompute = collectRemainingRemovedTasks();
       endgameFullRefreshDone = true;
     }
     const Time::time_point localRecomputeStart = Time::now();
-    if (!lns.recomputeRegretsForTasks(tasksToRecompute)) {
-      lns.cumulativeRegretCandidateEvalSec_ +=
+    if (!recomputeRegretsForTasks(tasksToRecompute)) {
+      cumulativeRegretCandidateEvalSec_ +=
           elapsedSecSince(localRecomputeStart);
       repairFailed = true;
     } else {
-      lns.cumulativeRegretCandidateEvalSec_ +=
+      cumulativeRegretCandidateEvalSec_ +=
           elapsedSecSince(localRecomputeStart);
     }
   }

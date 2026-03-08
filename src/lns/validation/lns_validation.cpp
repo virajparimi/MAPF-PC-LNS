@@ -169,12 +169,27 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
     collisionPairs->clear();
   }
   const int taskCount = instance_.getTasksNum();
+  const int agentCount = instance_.getAgentNum();
   vector<int> taskOwner(taskCount, UNASSIGNED);
   vector<int> taskToPosition(taskCount, UNASSIGNED);
-  for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
+  bool assignmentsChanged =
+      !fullPrecedenceConstraintsScratchValid_ ||
+      (int)fullPrecedenceAssignmentsSnapshot_.size() != agentCount;
+  for (int agent = 0; agent < agentCount; agent++) {
     const auto& assignments = solution_.agents[agent].taskAssignments;
+    const vector<int>* previousAssignments = nullptr;
+    if (!assignmentsChanged) {
+      previousAssignments = &fullPrecedenceAssignmentsSnapshot_[agent];
+      if ((int)previousAssignments->size() != (int)assignments.size()) {
+        assignmentsChanged = true;
+      }
+    }
     for (int pos = 0; pos < (int)assignments.size(); pos++) {
       const int task = assignments[pos];
+      if (!assignmentsChanged &&
+          (*previousAssignments)[pos] != task) {
+        assignmentsChanged = true;
+      }
       if (task < 0 || task >= taskCount) {
         PLOGE << "validateSolution: out-of-range task id " << task
               << " in agent " << agent << " assignment queue\n";
@@ -199,8 +214,16 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
     }
   }
 
-  vector<pair<int, int>> precedenceConstraints =
-      buildFullPrecedenceConstraints();
+  if (assignmentsChanged) {
+    fullPrecedenceAssignmentsSnapshot_.resize(agentCount);
+    for (int agent = 0; agent < agentCount; agent++) {
+      fullPrecedenceAssignmentsSnapshot_[agent] =
+          solution_.agents[agent].taskAssignments;
+    }
+    buildFullPrecedenceConstraints(fullPrecedenceConstraintsScratch_);
+    fullPrecedenceConstraintsScratchValid_ = true;
+  }
+  const auto& precedenceConstraints = fullPrecedenceConstraintsScratch_;
 
   for (int task = 0; task < taskCount; task++) {
     const int taskAgent = taskOwner[task];

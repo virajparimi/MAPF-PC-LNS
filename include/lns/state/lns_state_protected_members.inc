@@ -8,22 +8,27 @@
   };
   vector<vector<SuccessorPressureStaticSignal>>
       successorPressureStaticSignalsByTask_;
-  double maxCascadeFactor_ = 0.0;
-  int maxCascadeTasks_ = 0;
-  bool adaptiveCascadeBudget_ = false;
-  int adaptiveCascadeBudgetCurrent_ = 0;
-  int adaptiveCascadeBudgetLastUsed_ = 0;
+  struct CascadeState {
+    double maxFactor = 0.0;
+    int maxTasks = 0;
+    bool adaptiveBudgetEnabled = false;
+    int adaptiveBudgetCurrent = 0;
+    int adaptiveBudgetLastUsed = 0;
+    bool lastPrepareAborted = false;
+    int lastPrepareSeedTasks = 0;
+    int lastPrepareClosureTasks = 0;
+    int lastPrepareClosureAdded = 0;
+    vector<int> lastPrepareAffectedAgents;
+    CascadeStats stats;
+  };
+  CascadeState cascadeState_;
   bool alnsEnablePrecedenceAwareDestroy_ = true;
   bool useTerminalPathsInValidation_ = false;
-  bool lastPrepareAbortedByCascade_ = false;
-  int lastPrepareSeedTasks_ = 0;
-  int lastPrepareClosureTasks_ = 0;
-  int lastPrepareClosureAdded_ = 0;
-  vector<int> lastPrepareAffectedAgents_;
-  CascadeStats cascadeStats_;
   SolutionRestoreStats solutionRestoreStats_;
   ImprovementDiagnosticsStats improvementDiagnosticsStats_;
   vector<pair<int, int>> fullPrecedenceConstraintsScratch_;
+  vector<vector<int>> fullPrecedenceAssignmentsSnapshot_;
+  bool fullPrecedenceConstraintsScratchValid_ = false;
   Neighbor lnsNeighborhood_;
   const Instance& instance_;
   unsigned int seed_ = 0;
@@ -31,47 +36,39 @@
   vector<AgentTaskPath> initialPaths_;
   FeasibleSolution incumbentSolution_;
   Solution solution_, previousSolution_;
-  uint64_t lowLevelCalls_ = 0;
-  uint64_t lowLevelExpanded_ = 0;
-  uint64_t lowLevelGenerated_ = 0;
-  uint64_t lowLevelFound_ = 0;
-  uint64_t lowLevelTimeout_ = 0;
-  uint64_t lowLevelSearchExhausted_ = 0;
-  uint64_t lowLevelInvalidInput_ = 0;
-  uint64_t lowLevelBudgetExhausted_ = 0;
-  uint64_t lowLevelUnknown_ = 0;
-  uint64_t lowLevelTimeoutGoalPermanentBeforeArrivalLb_ = 0;
-  uint64_t lowLevelTimeoutStartTrappedAtTPlus1_ = 0;
-  uint64_t lowLevelTimeoutStaticDisconnectedPermanent_ = 0;
-  uint64_t lowLevelTimeoutOther_ = 0;
-  uint64_t lowLevelTimeoutReducedByGlobalBudget_ = 0;
-  uint64_t lowLevelTimeoutMultiCertificate_ = 0;
-  uint64_t lowLevelTimeoutDiagnosticsLogsEmitted_ = 0;
-  uint64_t lowLevelStructuralPrePruned_ = 0;
-  uint64_t lowLevelStructuralPrePrunedGoalPermanentBeforeArrivalLb_ = 0;
-  uint64_t lowLevelStructuralPrePrunedStartTrappedAtTPlus1_ = 0;
-  uint64_t lowLevelStructuralPrePrunedStaticDisconnectedPermanent_ = 0;
-  uint64_t lowLevelStructuralPrePrunedMultiCertificate_ = 0;
-  SingleAgentSolver::SearchOutcome lastLowLevelOutcome_ =
-      SingleAgentSolver::SearchOutcome::unknown;
-  double lastLowLevelRemainingBudgetSec_ = 0.0;
-  double lastLowLevelEffectiveTimeoutSec_ = 0.0;
-  // Reusable per-agent scratch planners for hot regret/insert loops.
-  // Single-threaded use only.
-  vector<std::unique_ptr<SingleAgentSolver>> reusableLocalPlanners_;
+  struct LowLevelState {
+    LowLevelSearchStats counters;
+    uint64_t timeoutDiagnosticsLogsEmitted = 0;
+    SingleAgentSolver::SearchOutcome lastOutcome =
+        SingleAgentSolver::SearchOutcome::unknown;
+    double lastRemainingBudgetSec = 0.0;
+    double lastEffectiveTimeoutSec = 0.0;
+    // Reusable per-agent scratch planners for hot regret/insert loops.
+    // Single-threaded use only.
+    vector<std::unique_ptr<SingleAgentSolver>> reusableLocalPlanners;
+  };
+  LowLevelState lowLevelState_;
   double initialTemperature_ = 0.0;
   bool lowLevelStructuralPrePrune_ = false;
-  bool acceptOnlyValidCandidates_ = false;
-  double maxTemperature_ = std::numeric_limits<double>::infinity();
-  double greatDelugeDecay_ = 0.0;
+  struct AcceptanceState {
+    bool acceptOnlyValidCandidates = false;
+    bool forceNeighborhoodChangeOnReject = false;
+    bool softRecoveryActive = false;
+    int64_t softRecoveryCurrentConflicts = -1;
+    double temperature = 100.0;
+    double coolingCoefficient = 0.99975;
+    double heatingCoefficient = 1.00025;
+    double maxTemperature = std::numeric_limits<double>::infinity();
+    double greatDelugeDecay = 0.0;
+    unordered_set<uint64_t> acceptedSolutionFingerprints;
+  };
+  AcceptanceState acceptanceState_;
   double timeLimit_, initialSolutionRuntime_ = 0,
                      initialSolutionRuntimeReported_ = 0,
                      lnsLoopRuntimeSec_ = 0, postRefineRuntimeSec_ = 0,
                      cumulativeRegretCandidateEvalSec_ = 0,
                      cumulativeRegretCommitSec_ = 0,
-                     cumulativeLowLevelSearchSec_ = 0, temperature_ = 100,
-                     coolingCoefficient_ = 0.99975,
-                     heatingCoefficient_ = 1.00025, tolerance_ = 5,
+                     cumulativeLowLevelSearchSec_ = 0, tolerance_ = 5,
                      shawDistanceWeight_ = 9, shawTemporalWeight_ = 3,
                      lnsConflictWeight_ = 0.75, lnsCostWeight_ = 0.25;
   Time::time_point plannerStartTime_;
@@ -80,6 +77,8 @@
       OptimizationObjectiveMode::soc;
   string goalOccupationMode_ = "reposition_true";
   GoalOccupationMode goalOccupationModeMode_ = GoalOccupationMode::reposition_true;
+  // SINGLE-THREADED ONLY: mutable cache updated from const accessors.
+  // Not safe for concurrent reads/writes without external synchronization.
   mutable unordered_map<int, vector<int>> parkingCandidatesCache_;
   TerminalRepositionStats terminalRepositionStats_;
   string initialSolutionRequested_;
@@ -99,6 +98,8 @@
   double initialPortfolioTimeFraction_ = 0.10;
   bool adaptiveInitialPortfolioBudget_ = false;
   string initialSeedFromMapfpcLog_;
+  // SINGLE-THREADED ONLY: mutable assignment-index caches updated from const
+  // query paths. Not thread-safe without external synchronization.
   mutable vector<int> currentTaskOwnerByTaskCache_;
   mutable vector<int> currentTaskPosByTaskCache_;
   mutable bool currentTaskAssignmentIndexCacheValid_ = false;
@@ -113,9 +114,19 @@
   bool enableNrrRepair_ = false;
   bool nrrFallbackToStandard_ = true;
   bool nrrGlobalReassign_ = false;
-  bool forceNeighborhoodChangeOnReject_ = false;
-  bool softRecoveryDestroyMode_ = false;
-  bool softPersistentConflictGraph_ = false;
+  struct SoftRecoveryState {
+    bool destroyMode = false;
+    bool persistentConflictGraph = false;
+    bool lastDestroySampledInSoftMode = false;
+    vector<pair<int, int>> persistentConflictPairs;
+    vector<int> persistentConflictAgents;
+    vector<pair<int, int>> lastValidationCollisionPairs;
+    vector<int> lastValidationConflictAgents;
+    vector<int> lastValidationConflictTasks;
+    vector<int> lastSoftFailureConflictAgents;
+    vector<int> lastSoftFailureConflictTasks;
+  };
+  SoftRecoveryState softRecoveryState_;
   string nrrMiniSolver_ = "cbs";
   NrrMiniSolverMode nrrMiniSolverMode_ = NrrMiniSolverMode::cbs;
   string nrrCatBackend_ = "pathtablewc";
@@ -123,16 +134,6 @@
   bool lastNrrSoftCandidate_ = false;
   int64_t lastNrrSoftConflictCount_ = -1;
   bool lastNrrSoftOnlyInvalid_ = false;
-  bool softRecoveryActive_ = false;
-  int64_t softRecoveryCurrentConflicts_ = -1;
-  bool lastDestroySampledInSoftMode_ = false;
-  vector<pair<int, int>> persistentConflictPairs_;
-  vector<int> persistentConflictAgents_;
-  vector<pair<int, int>> lastValidationCollisionPairs_;
-  vector<int> lastValidationConflictAgents_;
-  vector<int> lastValidationConflictTasks_;
-  vector<int> lastSoftFailureConflictAgents_;
-  vector<int> lastSoftFailureConflictTasks_;
   string repairMapfpcSolver_ = "cbs";
   int repairMapfpcTimeoutSec_ = 30;
   RepairHeuristicMode repairHeuristicMode_ = RepairHeuristicMode::regret;
