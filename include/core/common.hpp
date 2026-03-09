@@ -27,8 +27,6 @@
 #include <utility>
 #include <vector>
 
-using boost::unordered_map;
-using boost::unordered_set;
 using boost::heap::compare;
 using boost::heap::pairing_heap;
 using std::deque;

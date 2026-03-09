@@ -37,18 +37,17 @@ set(SOURCES
   src/lns/acceptance/lns_acceptance_orchestrator.cpp
   src/lns/acceptance/lns_acceptance_policy.cpp
   src/lns/core/lns.cpp
+  src/lns/core/lns_precedence_metrics.cpp
   src/lns/core/lns_prepare.cpp
   src/lns/core/lns_run.cpp
   src/lns/core/lns_run_iteration.cpp
   src/lns/destroy/lns_destroy.cpp
   src/lns/destroy/lns_destroy_classic.cpp
-  src/lns/destroy/lns_destroy_market.cpp
   src/lns/destroy/lns_destroy_orchestrator.cpp
   src/lns/destroy/lns_destroy_precedence.cpp
   src/lns/destroy/lns_destroy_soft.cpp
   src/lns/init/lns_initialization.cpp
   src/lns/init/lns_initialization_mapfpc.cpp
-  src/lns/init/lns_initialization_reposition.cpp
   src/lns/iteration/lns_candidate_phase_orchestrator.cpp
   src/lns/iteration/lns_iteration_acceptance_bookkeeping_orchestrator.cpp
   src/lns/iteration/lns_iteration_candidate_postprocess_orchestrator.cpp
@@ -59,8 +58,6 @@ set(SOURCES
   src/lns/mapfpc/lns_mapfpc_io.cpp
   src/lns/mapfpc/lns_mapfpc_repair.cpp
   src/lns/mapfpc/lns_mapfpc_runner.cpp
-  src/lns/market/lns_market.cpp
-  src/lns/market/lns_market_iteration_orchestrator.cpp
   src/lns/repair/lns_repair.cpp
   src/lns/repair/lns_repair_commit.cpp
   src/lns/repair/lns_repair_constraints.cpp
@@ -94,7 +91,6 @@ set(PROJECT_INCLUDE_DIRS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/lns/iteration"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/lns/internal"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/lns/mapfpc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/include/lns/market"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/lns/repair"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/lns/state"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/lns/validation"

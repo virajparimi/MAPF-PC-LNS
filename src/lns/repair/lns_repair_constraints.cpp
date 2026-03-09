@@ -53,9 +53,6 @@ bool LNS::buildConstraintTableCore(
     }
     reservePathWithGoalPolicy(constraintTable, *reservation.path,
                               reservation.isFinalTask);
-    if (reservation.isFinalTask) {
-      reserveTerminalPathIfActive(constraintTable, reservation.agent);
-    }
 
     const int contributorEnd = reservation.path->endTime();
     constraintTable.lengthMin =
@@ -98,10 +95,6 @@ bool LNS::buildConstraintTableCore(
         }
         reservePathWithGoalPolicy(constraintTable, pathRef, isFinalTask,
                                   useSoftForNonAncestors);
-        if (isFinalTask) {
-          reserveTerminalPathIfActive(constraintTable, agent,
-                                      useSoftForNonAncestors);
-        }
       });
 
   constraintTable.latestTimestep =
@@ -621,7 +614,7 @@ int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue) {
 int LNS::extractOldLocalTaskIndex(int task, const vector<int>& oldTaskQueue,
                                   const vector<int>& newTaskQueue) {
   int localTaskPositionOffset = 0;
-  unordered_set<int> newTaskMembership;
+  boost::unordered_set<int> newTaskMembership;
   if (!newTaskQueue.empty()) {
     newTaskMembership.reserve(newTaskQueue.size());
     for (int queuedTask : newTaskQueue) {

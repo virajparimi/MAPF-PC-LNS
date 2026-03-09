@@ -155,8 +155,8 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
     return finalizeAndReturn(path, "invalid_upper_exclusive");
   }
 
-  unordered_map<int, std::vector<TimeInterval>> safeIntervalsCache;
-  unordered_map<uint64_t, std::vector<TimeInterval>> edgeBlockedIntervalsCache;
+  boost::unordered_map<int, std::vector<TimeInterval>> safeIntervalsCache;
+  boost::unordered_map<uint64_t, std::vector<TimeInterval>> edgeBlockedIntervalsCache;
 
   auto getSafeIntervals = [&](int location) -> const std::vector<TimeInterval>& {
     auto it = safeIntervalsCache.find(location);
@@ -229,7 +229,7 @@ AgentTaskPath MultiLabelSIPPS::findPathSegment(ConstraintTable& constraintTable,
              lhs.isGoalTerminal == rhs.isGoalTerminal;
     }
   };
-  unordered_map<DominanceKey, list<SIPPSNode*>, DominanceKeyHash, DominanceKeyEq>
+  boost::unordered_map<DominanceKey, list<SIPPSNode*>, DominanceKeyHash, DominanceKeyEq>
       dominanceTable;
   dominanceTable.reserve(1024);
 

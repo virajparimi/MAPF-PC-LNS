@@ -17,7 +17,7 @@ vector<int> orderTasksTopologically(const vector<int>& tasks,
                                     const vector<pair<int, int>>& edges) {
   vector<int> uniqueTasks;
   uniqueTasks.reserve(tasks.size());
-  unordered_set<int> seen;
+  boost::unordered_set<int> seen;
   seen.reserve(tasks.size() * 2 + 1);
   for (int task : tasks) {
     if (task < 0) {
@@ -31,7 +31,7 @@ vector<int> orderTasksTopologically(const vector<int>& tasks,
     return uniqueTasks;
   }
 
-  unordered_map<int, int> indexOf;
+  boost::unordered_map<int, int> indexOf;
   indexOf.reserve(uniqueTasks.size() * 2 + 1);
   for (int i = 0; i < (int)uniqueTasks.size(); i++) {
     indexOf[uniqueTasks[i]] = i;
@@ -39,7 +39,7 @@ vector<int> orderTasksTopologically(const vector<int>& tasks,
 
   vector<vector<int>> succ(uniqueTasks.size());
   vector<int> indegree(uniqueTasks.size(), 0);
-  unordered_set<uint64_t> dedupEdges;
+  boost::unordered_set<uint64_t> dedupEdges;
   dedupEdges.reserve(edges.size() * 2 + 1);
   for (const auto& edge : edges) {
     const auto predIt = indexOf.find(edge.first);
@@ -129,9 +129,13 @@ bool LNS::computeRegret() {
       instance_.getTasksNum(), fullPrecedenceConstraints);
   const AssignmentLookup previousLookup =
       buildAssignmentLookup(previousSolution_, instance_.getTasksNum());
+  vector<int> pendingTasks;
+  pendingTasks.reserve(lnsNeighborhood_.removedTasks.size());
+  for (const auto& [_, conflict] : lnsNeighborhood_.removedTasks) {
+    pendingTasks.push_back(conflict.task);
+  }
   const vector<int> orderedTasks =
-      orderTasksTopologically(collectRemainingRemovedTasks(),
-                              fullPrecedenceConstraints);
+      orderTasksTopologically(pendingTasks, fullPrecedenceConstraints);
   for (int task : orderedTasks) {
     if (runtimeBudgetExhausted()) {
       return false;
@@ -140,42 +144,6 @@ bool LNS::computeRegret() {
                                             fullAncestors,
                                             &previousLookup.owner,
                                             &previousLookup.pos);
-    if (!enoughSpace) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool LNS::recomputeRegretsForTasks(const vector<int>& tasks) {
-  if (runtimeBudgetExhausted()) {
-    return false;
-  }
-  regretEvalStatsCurrent_.recomputeCalls++;
-  regretEvalStatsTotal_.recomputeCalls++;
-  incrementalRegretStatsCurrent_.recomputeCalls++;
-  incrementalRegretStatsTotal_.recomputeCalls++;
-  buildFullPrecedenceConstraints(fullPrecedenceConstraintsScratch_);
-  const auto& fullPrecedenceConstraints = fullPrecedenceConstraintsScratch_;
-  const vector<vector<int>> fullAncestors = buildAncestorsGraph(
-      instance_.getTasksNum(), fullPrecedenceConstraints);
-  const AssignmentLookup previousLookup =
-      buildAssignmentLookup(previousSolution_, instance_.getTasksNum());
-  const vector<int> orderedTasks =
-      orderTasksTopologically(tasks, fullPrecedenceConstraints);
-  for (int task : orderedTasks) {
-    if (runtimeBudgetExhausted()) {
-      return false;
-    }
-    if (!isPendingCommitState(lnsNeighborhood_, task)) {
-      continue;
-    }
-    regretStamp_[task]++;
-    incrementalRegretStatsCurrent_.recomputedTasks++;
-    incrementalRegretStatsTotal_.recomputedTasks++;
-    const bool enoughSpace = computeRegretForTask(
-        task, fullPrecedenceConstraints, fullAncestors,
-        &previousLookup.owner, &previousLookup.pos);
     if (!enoughSpace) {
       return false;
     }
@@ -262,14 +230,7 @@ bool LNS::computeRegretForTask(
   }
 
   TaskBaselineMetrics baselineMetrics;
-  if (market_.repairTieBreak || market_.repairBlend) {
-    baselineMetrics.oldExposure = computeTaskMarketExposure(task, true);
-    baselineMetrics.oldWait = computeTaskPrecedenceWaitInCurrentSolution(task);
-    baselineMetrics.valid = true;
-  }
 
-  vector<int> candidateAgents;
-  candidateAgents.reserve(instance_.getAgentNum());
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
     if (runtimeBudgetExhausted()) {
       return false;
@@ -277,14 +238,11 @@ bool LNS::computeRegretForTask(
 
     evaluateAgentPositionCandidate(task, agent, earliestTimestep, workspace,
                                    &precedenceConstraints, baselineMetrics,
-                                   &serviceTimes, &candidateAgents,
+                                   &serviceTimes, nullptr,
                                    &assignmentOwnerLookup,
                                    &assignmentPosLookup,
                                    previousOwnerLookup,
                                    previousPosLookup);
-  }
-  if (task >= 0 && task < (int)regretCandidateAgents_.size()) {
-    regretCandidateAgents_[task] = std::move(candidateAgents);
   }
   return buildRegretEntry(task, serviceTimes);
 }

@@ -6,8 +6,7 @@
 class AcceptanceOrchestrator {
  public:
   static AcceptanceDecisionResult runDecision(
-      LNS& lns, bool candidateValid, double previousPressureForIter,
-      double previousWaitForIter, int previousConflictSignalForIter,
+      LNS& lns, bool candidateValid, int previousConflictSignalForIter,
       const std::vector<int>& candidateTouchedAgents,
       LNS::IterationDebugRecord& debugRow);
 

@@ -125,7 +125,7 @@ class MultiLabelSpaceTimeAStar : public SingleAgentSolver {
 
   int minFVal_{}, lowerBound_{};
 
-  unordered_map<NodeKey, MultiLabelAStarNode*, NodeKeyHasher>
+  boost::unordered_map<NodeKey, MultiLabelAStarNode*, NodeKeyHasher>
       allNodesTable_;
   std::deque<MultiLabelAStarNode> allNodesStorage_;
 

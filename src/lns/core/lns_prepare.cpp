@@ -86,24 +86,8 @@ bool LNS::prepareNextIteration() {
   cascadeState_.stats.closureAddedMax =
       max(cascadeState_.stats.closureAddedMax, (int64_t)closureAddedCount);
 
-  const int staticCascadeBudget = cascadeTaskBudget();
-  int cascadeBudget = staticCascadeBudget;
-  int adaptiveBudgetLower = 1;
-  int adaptiveBudgetUpper = staticCascadeBudget;
-  if (cascadeState_.adaptiveBudgetEnabled) {
-    const bool explicitHardCap = (cascadeState_.maxTasks > 0);
-    adaptiveBudgetUpper =
-        explicitHardCap ? staticCascadeBudget
-                        : max(staticCascadeBudget, instance_.getTasksNum());
-    adaptiveBudgetLower = max(1, min(staticCascadeBudget, closureSeedCount + 1));
-    if (cascadeState_.adaptiveBudgetCurrent <= 0) {
-      cascadeState_.adaptiveBudgetCurrent = staticCascadeBudget;
-    }
-    cascadeState_.adaptiveBudgetCurrent =
-        min(adaptiveBudgetUpper, max(adaptiveBudgetLower,
-                                     cascadeState_.adaptiveBudgetCurrent));
-    cascadeBudget = cascadeState_.adaptiveBudgetCurrent;
-  }
+  const int staticCascadeBudget = std::numeric_limits<int>::max();
+  const int cascadeBudget = staticCascadeBudget;
 
   cascadeState_.stats.budgetUsedSum += cascadeBudget;
   if (cascadeState_.stats.prepareCalls == 1) {
@@ -115,20 +99,7 @@ bool LNS::prepareNextIteration() {
     cascadeState_.stats.budgetUsedMax =
         max(cascadeState_.stats.budgetUsedMax, (int64_t)cascadeBudget);
   }
-  cascadeState_.adaptiveBudgetLastUsed = cascadeBudget;
-
   if (closureAddedCount > cascadeBudget) {
-    if (cascadeState_.adaptiveBudgetEnabled) {
-      const int growthStep = max(1, cascadeState_.adaptiveBudgetCurrent / 4);
-      const int targetBudget =
-          max(closureSeedCount + 1, cascadeState_.adaptiveBudgetCurrent + growthStep);
-      const int nextBudget =
-          min(adaptiveBudgetUpper, max(adaptiveBudgetLower, targetBudget));
-      if (nextBudget > cascadeState_.adaptiveBudgetCurrent) {
-        cascadeState_.stats.adaptiveBudgetIncreases++;
-      }
-      cascadeState_.adaptiveBudgetCurrent = nextBudget;
-    }
     cascadeState_.lastPrepareAborted = true;
     cascadeState_.stats.budgetAborts++;
     PLOGW << "prepareNextIteration: cascade budget exceeded (seed="
@@ -137,33 +108,6 @@ bool LNS::prepareNextIteration() {
           << ", budget=" << cascadeBudget << ", baseline="
           << staticCascadeBudget << ")\n";
     return false;
-  }
-
-  if (cascadeState_.adaptiveBudgetEnabled) {
-    int nextBudget = cascadeState_.adaptiveBudgetCurrent;
-    const double closurePressure =
-        (cascadeBudget > 0) ? ((double)closureAddedCount / (double)cascadeBudget)
-                            : 1.0;
-    if (closurePressure < 0.35) {
-      nextBudget = max(adaptiveBudgetLower, cascadeState_.adaptiveBudgetCurrent - 1);
-    } else if (closurePressure > 0.85) {
-      nextBudget = min(adaptiveBudgetUpper, cascadeState_.adaptiveBudgetCurrent + 1);
-    }
-
-    // Avoid shrinking budget immediately after a productive iteration.
-    if (!iterationStats.empty() &&
-        (iterationStats.back().quality == IterationQuality::bestSolutionYet ||
-         iterationStats.back().quality == IterationQuality::improvedSolution) &&
-        nextBudget < cascadeState_.adaptiveBudgetCurrent) {
-      nextBudget = cascadeState_.adaptiveBudgetCurrent;
-    }
-
-    if (nextBudget > cascadeState_.adaptiveBudgetCurrent) {
-      cascadeState_.stats.adaptiveBudgetIncreases++;
-    } else if (nextBudget < cascadeState_.adaptiveBudgetCurrent) {
-      cascadeState_.stats.adaptiveBudgetDecreases++;
-    }
-    cascadeState_.adaptiveBudgetCurrent = nextBudget;
   }
 
   lnsNeighborhood_.removedTasks = std::move(closureRemovedTasks);
@@ -228,8 +172,6 @@ bool LNS::prepareNextIteration() {
 
     // For an affected agent there can be multiple conflicting tasks so need to do it this way
     solution_.agents[affAgent].path = AgentTaskPath();
-    solution_.agents[affAgent].terminalPath = AgentTaskPath();
-    solution_.agents[affAgent].terminalPathActive = false;
     solution_.agents[affAgent].taskAssignments.erase(
         std::remove_if(solution_.agents[affAgent].taskAssignments.begin(),
                        solution_.agents[affAgent].taskAssignments.end(),

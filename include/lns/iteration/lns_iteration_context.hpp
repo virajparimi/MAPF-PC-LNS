@@ -11,8 +11,6 @@
 struct IterationExecutionContext {
   int previousSocForIter = 0;
   LNS::ValidationStats previousValidationStatsForIter;
-  double previousPressureForIter = 0.0;
-  double previousWaitForIter = 0.0;
   int incumbentSocBeforeIter = 0;
   int alnsHeuristicForIter = -1;
   IterationQuality quality = IterationQuality::none;
@@ -26,7 +24,6 @@ struct IterationExecutionContext {
   double timeRegretCommitSec = 0.0;
   double timeRegretLowLevelSec = 0.0;
   double timeJoinPathsSec = 0.0;
-  double timeTerminalReplanSec = 0.0;
   double timeRecomputeSocSec = 0.0;
   double timeValidationSec = 0.0;
   double timeAcceptanceSec = 0.0;

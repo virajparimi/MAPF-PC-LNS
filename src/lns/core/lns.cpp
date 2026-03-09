@@ -345,208 +345,11 @@ void LNS::reservePathWithGoalPolicy(ConstraintTable& constraintTable,
   if (path.empty()) {
     return;
   }
-  if (!isFinalTask || isGoalOccupationStay()) {
-    if (softOnly) {
-      constraintTable.addSoftPath(path, isFinalTask);
-    } else {
-      constraintTable.addPath(path, isFinalTask);
-    }
-    return;
-  }
-
-  // In reposition_true, service path occupancy ends at task completion and
-  // explicit terminalPath handles post-completion occupancy.
   if (softOnly) {
-    constraintTable.addSoftPath(path, false);
+    constraintTable.addSoftPath(path, isFinalTask);
   } else {
-    constraintTable.addPath(path, false);
+    constraintTable.addPath(path, isFinalTask);
   }
-}
-
-void LNS::reserveTerminalPathIfActive(ConstraintTable& constraintTable,
-                                      int agent,
-                                      bool softOnly) const {
-  if (!isGoalOccupationRepositionTrue()) {
-    return;
-  }
-  if (agent < 0 || agent >= instance_.getAgentNum()) {
-    return;
-  }
-  const auto& terminalPath = solution_.agents[agent].terminalPath;
-  if (!solution_.agents[agent].terminalPathActive || terminalPath.empty()) {
-    return;
-  }
-  // Terminal reposition path is part of the active occupancy model; keep the
-  // final terminal location reserved to MAX_TIMESTEP for CT/validator parity.
-  if (softOnly) {
-    constraintTable.addSoftPath(terminalPath, true);
-  } else {
-    constraintTable.addPath(terminalPath, true);
-  }
-}
-
-bool LNS::didAgentServicePathChange(int agent) const {
-  if (agent < 0 || agent >= instance_.getAgentNum()) {
-    return true;
-  }
-  const auto& currentPath = solution_.agents[agent].path;
-  const auto& previousPath = previousSolution_.agents[agent].path;
-  if (currentPath.empty() != previousPath.empty()) {
-    return true;
-  }
-  if (currentPath.empty() && previousPath.empty()) {
-    return false;
-  }
-  if (currentPath.beginTime != previousPath.beginTime ||
-      currentPath.size() != previousPath.size()) {
-    return true;
-  }
-  for (int i = 0; i < (int)currentPath.size(); i++) {
-    if (currentPath.at(i).location != previousPath.at(i).location ||
-        currentPath.at(i).isGoal != previousPath.at(i).isGoal) {
-      return true;
-    }
-  }
-  return false;
-}
-
-vector<int> LNS::selectTerminalReplanAgents(
-    const vector<int>& candidateAgents) const {
-  vector<int> replanAgents;
-  if (!isGoalOccupationRepositionTrue()) {
-    return replanAgents;
-  }
-
-  const int agentCount = instance_.getAgentNum();
-  vector<char> marked(agentCount, 0);
-  auto markAgent = [&](int agent) {
-    if (agent < 0 || agent >= agentCount || marked[agent]) {
-      return;
-    }
-    marked[agent] = 1;
-    replanAgents.push_back(agent);
-  };
-
-  vector<int> changedAgents;
-  changedAgents.reserve(candidateAgents.size());
-  for (int agent : candidateAgents) {
-    if (agent < 0 || agent >= agentCount) {
-      continue;
-    }
-    const bool hasTerminalPath =
-        solution_.agents[agent].terminalPathActive &&
-        !solution_.agents[agent].terminalPath.empty();
-    if (didAgentServicePathChange(agent) || !hasTerminalPath) {
-      changedAgents.push_back(agent);
-      markAgent(agent);
-    }
-  }
-
-  if (changedAgents.empty()) {
-    return replanAgents;
-  }
-
-  unordered_map<int, vector<int>> finalGoalOwners;
-  finalGoalOwners.reserve((size_t)agentCount);
-  for (int agent = 0; agent < agentCount; agent++) {
-    const auto& assignments = solution_.agents[agent].taskAssignments;
-    if (assignments.empty() || solution_.agents[agent].path.empty()) {
-      continue;
-    }
-    const int finalTask = assignments.back();
-    if (finalTask < 0 || finalTask >= instance_.getTasksNum()) {
-      continue;
-    }
-    finalGoalOwners[instance_.getTaskLocations(finalTask)].push_back(agent);
-  }
-
-  auto markOwnersAtLocation = [&](int location, int sourceAgent) {
-    const auto it = finalGoalOwners.find(location);
-    if (it == finalGoalOwners.end()) {
-      return;
-    }
-    for (int ownerAgent : it->second) {
-      if (ownerAgent == sourceAgent) {
-        continue;
-      }
-      markAgent(ownerAgent);
-    }
-  };
-
-  for (int changedAgent : changedAgents) {
-    const auto& currentServicePath = solution_.agents[changedAgent].path;
-    for (int t = 0; t < (int)currentServicePath.size(); t++) {
-      markOwnersAtLocation(currentServicePath.at(t).location, changedAgent);
-    }
-    const auto& previousServicePath = previousSolution_.agents[changedAgent].path;
-    for (int t = 0; t < (int)previousServicePath.size(); t++) {
-      markOwnersAtLocation(previousServicePath.at(t).location, changedAgent);
-    }
-    if (previousSolution_.agents[changedAgent].terminalPathActive) {
-      const auto& previousTerminalPath =
-          previousSolution_.agents[changedAgent].terminalPath;
-      for (int t = 0; t < (int)previousTerminalPath.size(); t++) {
-        markOwnersAtLocation(previousTerminalPath.at(t).location, changedAgent);
-      }
-    }
-  }
-  return replanAgents;
-}
-
-const vector<int>& LNS::getParkingCandidatesForGoal(int finalGoal) {
-  auto cacheIt = parkingCandidatesCache_.find(finalGoal);
-  if (cacheIt != parkingCandidatesCache_.end()) {
-    terminalRepositionStats_.candidateCacheHits++;
-    return cacheIt->second;
-  }
-
-  terminalRepositionStats_.candidateCacheMisses++;
-  vector<int> candidates;
-  if (finalGoal >= 0 && finalGoal < instance_.mapSize &&
-      !instance_.isObstacle(finalGoal)) {
-    // Enumerate all reachable free cells in nondecreasing shortest-path
-    // distance from finalGoal (BFS order).
-    vector<char> visited(instance_.mapSize, 0);
-    deque<int> frontier;
-    visited[finalGoal] = 1;
-    frontier.push_back(finalGoal);
-    candidates.reserve((size_t)max(0, instance_.mapSize - 1));
-    while (!frontier.empty()) {
-      const int current = frontier.front();
-      frontier.pop_front();
-      for (int next : instance_.getNeighbors(current)) {
-        if (next < 0 || next >= instance_.mapSize || visited[next] ||
-            instance_.isObstacle(next)) {
-          continue;
-        }
-        visited[next] = 1;
-        frontier.push_back(next);
-        if (next != finalGoal) {
-          candidates.push_back(next);
-        }
-      }
-    }
-  }
-  auto inserted =
-      parkingCandidatesCache_.emplace(finalGoal, std::move(candidates));
-  return inserted.first->second;
-}
-
-int LNS::cascadeTaskBudget() const {
-  if (cascadeState_.maxTasks > 0) {
-    return cascadeState_.maxTasks;
-  }
-  if (cascadeState_.maxFactor <= 0.0) {
-    return std::numeric_limits<int>::max();
-  }
-  const int neighborhood = max(0, neighborSize_);
-  const double scaledBudget = cascadeState_.maxFactor * (double)neighborhood;
-  const int factorBudget =
-      (scaledBudget >= (double)std::numeric_limits<int>::max())
-          ? std::numeric_limits<int>::max()
-          : (int)std::ceil(scaledBudget);
-  const int offsetBudget = neighborhood + 10;
-  return max(factorBudget, offsetBudget);
 }
 
 void LNS::invalidateCurrentTaskAssignmentIndexCache() {
@@ -735,15 +538,6 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   lnsConflictWeight_ = parameters.core.lnsConflictWeight;
   lnsCostWeight_ = parameters.core.lnsCostWeight;
   initialSolutionStrategy = parameters.core.initialSolutionStrategy;
-  initialPortfolioTimeFraction_ =
-      parameters.core.initialPortfolioTimeFraction;
-  if (!std::isfinite(initialPortfolioTimeFraction_)) {
-    initialPortfolioTimeFraction_ = 0.10;
-  }
-  initialPortfolioTimeFraction_ =
-      min(1.0, max(0.0, initialPortfolioTimeFraction_));
-  adaptiveInitialPortfolioBudget_ =
-      parameters.core.adaptiveInitialPortfolioBudget;
   initialSeedFromMapfpcLog_ = parameters.core.initialSeedFromMapfpcLog;
   postRefineWithMapfpc_ = parameters.core.postRefineWithMapfpc;
   postRefineAssignmentSource_ = parameters.core.postRefineAssignmentSource;
@@ -782,46 +576,19 @@ LNS::LNS(int numOfIterations, const Instance& instance,
       (optimizationObjective_ == "makespan")
           ? OptimizationObjectiveMode::makespan
           : OptimizationObjectiveMode::soc;
-  goalOccupationMode_ = parameters.core.goalOccupationMode;
-  terminalRepositionStats_.reset();
   improvementDiagnosticsStats_.reset();
   acceptanceState_.acceptedSolutionFingerprints.clear();
   iterationDebugRecords_.clear();
-  parkingCandidatesCache_.clear();
-  if (goalOccupationMode_ != "stay" &&
-      goalOccupationMode_ != "reposition_true") {
-    PLOGW << "Unknown goalOccupationMode '" << goalOccupationMode_
-          << "'; defaulting to 'reposition_true'\n";
-    goalOccupationMode_ = "reposition_true";
-  }
-  goalOccupationModeMode_ =
-      (goalOccupationMode_ == "stay") ? GoalOccupationMode::stay
-                                      : GoalOccupationMode::reposition_true;
   destroyHeuristic = parameters.core.destroyHeuristic;
   acceptanceCriteria = parameters.core.acceptanceCriteria;
   acceptanceState_.acceptOnlyValidCandidates = parameters.core.acceptOnlyValidCandidates;
   repairHeuristic = parameters.core.repairHeuristic;
-  if (repairHeuristic != "regret" &&
-      repairHeuristic != "market_shortlist_regret" &&
-      repairHeuristic != "mapfpc_fixed" &&
-      repairHeuristic != "mapfpc_neighborhood_fixed" &&
-      repairHeuristic != "mapfpc_neighborhood_reassign_greedy") {
+  if (repairHeuristic != "regret") {
     PLOGW << "Unknown repairHeuristic '" << repairHeuristic
           << "'; defaulting to 'regret'\n";
     repairHeuristic = "regret";
   }
-  if (repairHeuristic == "market_shortlist_regret") {
-    repairHeuristicMode_ = RepairHeuristicMode::market_shortlist_regret;
-  } else if (repairHeuristic == "mapfpc_fixed") {
-    repairHeuristicMode_ = RepairHeuristicMode::mapfpc_fixed;
-  } else if (repairHeuristic == "mapfpc_neighborhood_fixed") {
-    repairHeuristicMode_ = RepairHeuristicMode::mapfpc_neighborhood_fixed;
-  } else if (repairHeuristic == "mapfpc_neighborhood_reassign_greedy") {
-    repairHeuristicMode_ =
-        RepairHeuristicMode::mapfpc_neighborhood_reassign_greedy;
-  } else {
-    repairHeuristicMode_ = RepairHeuristicMode::regret;
-  }
+  repairHeuristicMode_ = RepairHeuristicMode::regret;
   enableNrrRepair_ = parameters.core.enableNrrRepair;
   nrrFallbackToStandard_ = parameters.core.nrrFallbackToStandard;
   nrrGlobalReassign_ = parameters.core.nrrGlobalReassign;
@@ -840,12 +607,6 @@ LNS::LNS(int numOfIterations, const Instance& instance,
     nrrMiniSolverMode_ = NrrMiniSolverMode::auto_mode;
   } else {
     nrrMiniSolverMode_ = NrrMiniSolverMode::cbs;
-  }
-  nrrCatBackend_ = parameters.core.nrrCatBackend;
-  if (nrrCatBackend_ != "legacy" && nrrCatBackend_ != "pathtablewc") {
-    PLOGW << "Unknown nrrCatBackend '" << nrrCatBackend_
-          << "'; defaulting to 'pathtablewc'\n";
-    nrrCatBackend_ = "pathtablewc";
   }
   nrrStats_.reset();
   const int destroyHeuristicCount = adaptiveLNS_.numDestroyHeuristics;
@@ -876,18 +637,7 @@ LNS::LNS(int numOfIterations, const Instance& instance,
     }
     regretTypeMode_ = RegretTypeMode::absolute;
   }
-  regretCandidateTopK_ = std::max(0, parameters.core.regretCandidateTopK);
-  regretShortlistDiagnostics_ = parameters.core.regretShortlistDiagnostics;
   buildSuccessorPressureStaticSignals();
-  cascadeState_.maxFactor = parameters.core.maxCascadeFactor;
-  if (!std::isfinite(cascadeState_.maxFactor)) {
-    cascadeState_.maxFactor = 0.0;
-  }
-  cascadeState_.maxFactor = max(0.0, cascadeState_.maxFactor);
-  cascadeState_.maxTasks = std::max(0, parameters.core.maxCascadeTasks);
-  cascadeState_.adaptiveBudgetEnabled = parameters.core.adaptiveCascadeBudget;
-  cascadeState_.adaptiveBudgetCurrent = cascadeTaskBudget();
-  cascadeState_.adaptiveBudgetLastUsed = cascadeState_.adaptiveBudgetCurrent;
   alnsEnablePrecedenceAwareDestroy_ =
       parameters.core.alnsEnablePrecedenceAwareDestroy;
   softRecoveryState_.destroyMode = parameters.core.softRecoveryDestroyMode;
@@ -901,72 +651,6 @@ LNS::LNS(int numOfIterations, const Instance& instance,
   lowLevelSegmentTimeout_ = max(0.0, parameters.lowLevel.segmentTimeout);
   lowLevelStructuralPrePrune_ = parameters.lowLevel.structuralPrePrune;
   plannerParityCheck_ = parameters.lowLevel.parityCheck;
-  market_.heuristics = parameters.market.heuristics;
-  market_.bucketDt = max(1, parameters.market.bucketDt);
-  market_.vertexBucketCapacity = max(1, parameters.market.vertexBucketCapacity);
-  market_.edgeBucketCapacity = max(1, parameters.market.edgeBucketCapacity);
-  market_.updateOnAcceptedOnly = parameters.market.updateOnAcceptedOnly;
-  market_.updateFromCandidate = parameters.market.updateFromCandidate;
-  market_.updatePeriodAccepted = max(1, parameters.market.updatePeriodAccepted);
-  market_.eta = max(0.0, parameters.market.eta);
-  market_.rho = parameters.market.rho;
-  market_.priceCap = max(0.0, parameters.market.priceCap);
-  market_.priceInit = max(0.0, parameters.market.priceInit);
-  market_.gamma = max(0.0, parameters.market.gamma);
-  market_.acceptanceGuards = parameters.market.acceptanceGuards;
-  market_.tauP = max(0.0, parameters.market.tauP);
-  market_.tauW = max(0.0, parameters.market.tauW);
-  market_.destroyWeightPrice = max(0.0, parameters.market.destroyWeightPrice);
-  market_.destroyWeightWait = max(0.0, parameters.market.destroyWeightWait);
-  market_.destroyWeightRoot = max(0.0, parameters.market.destroyWeightRoot);
-  market_.destroyWarmupUpdates = max(0, parameters.market.destroyWarmupUpdates);
-  market_.destroyRequireStable = parameters.market.destroyRequireStable;
-  market_.destroySoftGate = parameters.market.destroySoftGate;
-  market_.destroyWarmupWeightScale =
-      max(0.0, parameters.market.destroyWarmupWeightScale);
-  market_.destroyUnstableWeightScale =
-      max(0.0, parameters.market.destroyUnstableWeightScale);
-  market_.destroyMinAlnsWeight =
-      max(0.0, parameters.market.destroyMinAlnsWeight);
-  market_.stabilityEmaAlpha =
-      min(1.0, max(0.0, parameters.market.stabilityEmaAlpha));
-  market_.stabilityMaxRelPriceDelta =
-      max(0.0, parameters.market.stabilityMaxRelPriceDelta);
-  market_.stabilityMaxTopMassDelta =
-      max(0.0, parameters.market.stabilityMaxTopMassDelta);
-  market_.stabilityMinContendedJaccard =
-      min(1.0, max(0.0, parameters.market.stabilityMinContendedJaccard));
-  market_.seedTopFrac = min(1.0, max(0.0, parameters.market.seedTopFrac));
-  market_.randomDestroyQuota =
-      min(1.0, max(0.0, parameters.market.randomDestroyQuota));
-  market_.cooldownIters = max(0, parameters.market.cooldownIters);
-  market_.dUp = max(0, parameters.market.dUp);
-  market_.dDown = max(0, parameters.market.dDown);
-  market_.closureCap = parameters.market.closureCap;
-  market_.repairTieBreak = parameters.market.repairTieBreak;
-  market_.repairBlend = parameters.market.repairBlend;
-  market_.repairNormalizeByObservedPrice =
-      parameters.market.repairNormalizeByObservedPrice;
-  market_.tieBreakEpsSoc = max(0.0, parameters.market.tieBreakEpsSoc);
-  market_.lambdaPrice = max(0.0, parameters.market.lambdaPrice);
-  market_.lambdaWait = max(0.0, parameters.market.lambdaWait);
-  if (market_.closureCap <= 0) {
-    market_.closureCap = neighborSize_;
-  }
-  // Repair redesign: keep market influence as SoC tie-break only.
-  if (market_.repairBlend) {
-    PLOGW << "marketRepairBlend is deprecated in favor of tie-break-only "
-             "repair scoring; enabling marketRepairTieBreak and disabling "
-             "marketRepairBlend.\n";
-    market_.repairBlend = false;
-    market_.repairTieBreak = true;
-  }
-  market_.taskCooldownUntilIter.assign(instance_.getTasksNum(), 0);
-  market_.stats.reset();
-  market_.prevContendedVertices.clear();
-  market_.prevContendedEdges.clear();
-  market_.hasStabilityBaseline = false;
-  market_.candidateUpdateConsumed = false;
 
   // Ensure both working solutions use the selected low-level planner.
   for (int agent = 0; agent < instance_.getAgentNum(); agent++) {
@@ -974,16 +658,6 @@ LNS::LNS(int numOfIterations, const Instance& instance,
     previousSolution_.agents[agent].pathPlanner = createSharedPlanner(agent);
   }
 
-  incrementalRegret_ = parameters.core.incrementalRegret;
-  if (parameters.core.incrementalRegretMode == "descendants") {
-    incrementalRegretMode_ = IncrementalRegretMode::descendants;
-  } else {
-    incrementalRegretMode_ = IncrementalRegretMode::descendants_and_agent;
-  }
-  regretStamp_.assign(instance_.getTasksNum(), 0);
-  regretBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
-  regretSecondBestOption_.assign(instance_.getTasksNum(), {UNASSIGNED, -1});
-  regretCandidateAgents_.assign(instance_.getTasksNum(), {});
 }
 
 void LNS::buildSuccessorPressureStaticSignals() {

@@ -6,7 +6,6 @@
 #include <string>
 
 #include "lns_iteration_phase_types.hpp"
-#include "lns_market_state.hpp"
 #include "lns_params.hpp"
 #include "lns_stats.hpp"
 #include "lns_types.hpp"
@@ -14,7 +13,6 @@
 class MovingMetrics;
 class CandidatePhaseOrchestrator;
 class AcceptanceOrchestrator;
-class MarketIterationOrchestrator;
 class IterationDiagnosticsOrchestrator;
 class IterationOutcomeOrchestrator;
 class IterationLifecycleOrchestrator;
@@ -29,24 +27,15 @@ struct IterationExecutionContext;
 class LNS {
  public:
   enum class OptimizationObjectiveMode { soc, makespan };
-  enum class GoalOccupationMode { stay, reposition_true };
-  enum class RepairHeuristicMode {
-    regret,
-    market_shortlist_regret,
-    mapfpc_fixed,
-    mapfpc_neighborhood_fixed,
-    mapfpc_neighborhood_reassign_greedy
-  };
+  enum class RepairHeuristicMode { regret };
   enum class NrrMiniSolverMode { pbs, cbs, auto_mode };
   enum class RegretTypeMode { absolute, relative };
 
   struct RegretWorkspace;
   using LowLevelSearchStats = lns_stats::LowLevelSearchStats;
   using RegretEvalStats = lns_stats::RegretEvalStats;
-  using IncrementalRegretStats = lns_stats::IncrementalRegretStats;
   using NrrStats = lns_stats::NrrStats;
   using CascadeStats = lns_stats::CascadeStats;
-  using TerminalRepositionStats = lns_stats::TerminalRepositionStats;
   using SolutionRestoreStats = lns_stats::SolutionRestoreStats;
   using ImprovementDiagnosticsStats = lns_stats::ImprovementDiagnosticsStats;
   using IterationDebugRecord = lns_stats::IterationDebugRecord;
@@ -86,7 +75,6 @@ class LNS {
   double elapsedRuntimeSec() const;
   double remainingRuntimeBudgetSec() const;
   bool runtimeBudgetExhausted() const;
-  int cascadeTaskBudget() const;
   void clearNeighborhood();
   void restoreSolutionFromPrevious();
   void restoreSolutionFromPrevious(const vector<int>& agentSubset);
@@ -204,13 +192,6 @@ class LNS {
                                  bool isFinalTask,
                                  bool softOnly = false) const;
   int getServiceOccupancyEndExclusive(int agent) const;
-  void reserveTerminalPathIfActive(ConstraintTable& constraintTable,
-                                   int agent,
-                                   bool softOnly = false) const;
-  bool didAgentServicePathChange(int agent) const;
-  vector<int> selectTerminalReplanAgents(
-      const vector<int>& candidateAgents) const;
-  const vector<int>& getParkingCandidatesForGoal(int finalGoal);
   bool buildInitialSolutionCore(bool enforceInterAgentTiming,
                                 const char* callerName);
 
@@ -226,12 +207,6 @@ class LNS {
   bool finalizeCouldNotFindAbort(
       const std::string& reason, bool restorePrevious,
       ConflictMap& potentialNeighborhood, IterationExecutionContext& context);
-  IterationMarketContext beginIterationMarket();
-  MarketGuardDecision evaluateIterationMarketGuards(
-      double previousPressureForIter, double previousWaitForIter);
-  void updateIterationMarketBestOnAccepted(double candidatePressure,
-                                           double candidateWait);
-  void finalizeIterationMarket(bool accepted);
   void initializeIterationContext(
       const ValidationStats& currentValidationStats,
       IterationExecutionContext& context);
@@ -254,8 +229,7 @@ class LNS {
   bool runRepairEngine(bool& repairFailed, bool& nrrRepairSucceeded);
 
   AcceptanceDecisionResult runAcceptanceDecision(
-      bool candidateValid, double previousPressureForIter,
-      double previousWaitForIter, int previousConflictSignalForIter,
+      bool candidateValid, int previousConflictSignalForIter,
       const std::vector<int>& candidateTouchedAgents,
       IterationDebugRecord& debugRow);
   void updateAcceptanceAlnsStats(int alnsHeuristicForIter,
@@ -281,8 +255,6 @@ class LNS {
   bool buildGreedySolutionWithMAPFPC(const string& variant,
                                      int solverTimeoutSec = 120);
   bool buildSeededSolutionFromMAPFPCLog(const string& logFilePath);
-  bool planTerminalReposition(const vector<int>& agentsToPlan,
-                              bool fullRebuild);
 
  private:
   bool prepareNextIteration();
@@ -292,19 +264,12 @@ class LNS {
 
  public:
   void printPaths() const;
-  enum class OccupancySource { undefined, service, terminal };
-  OccupancySource getAgentOccupancySourceAt(
-      int agent, int timestep, bool includeTerminal = true) const;
-  // Returns an agent's occupied location at timestep.
-  // If includeTerminal is false, occupancy follows service + goal policy
-  // (stay/reposition_true), excluding explicit terminalPath.
-  int getAgentLocationAt(int agent, int timestep,
-                         bool includeTerminal = true) const;
+  enum class OccupancySource { undefined, service };
+  OccupancySource getAgentOccupancySourceAt(int agent, int timestep) const;
+  // Returns an agent's occupied location at timestep under stay-goal occupancy.
+  int getAgentLocationAt(int agent, int timestep) const;
   // Returns the occupancy horizon (exclusive upper bound) for collision checks.
-  // Horizon is policy-aware for service occupancy and optionally includes
-  // explicit terminalPath when includeTerminal is true.
-  int getAgentOccupancyHorizon(int agent,
-                               bool includeTerminal = true) const;
+  int getAgentOccupancyHorizon(int agent) const;
   bool validateSolution(ConflictMap* conflictedTasks = nullptr,
                         ValidationStats* stats = nullptr,
                         vector<pair<int, int>>* collisionPairs = nullptr);
@@ -351,16 +316,6 @@ class LNS {
       const vector<int>* previousAssignmentOwnerLookup = nullptr,
       const vector<int>* previousAssignmentPosLookup = nullptr);
 
-  bool recomputeRegretsForTasks(const vector<int>& tasks);
-  std::optional<Regret> popNextValidRegret();
-  vector<int> collectRemainingRemovedTasks() const;
-  vector<int> computeCurrentTaskEndTimes() const;
-  vector<int> computeCurrentLastTaskPerAgent() const;
-  vector<uint64_t> computeCurrentAgentScheduleSignatures() const;
-  vector<int> computeDirtyTasksAfterCommit(const vector<int>& endTimesBefore,
-                                          const vector<int>& endTimesAfter,
-                                          const vector<uint64_t>& agentSignaturesBefore,
-                                          const vector<uint64_t>& agentSignaturesAfter);
   std::shared_ptr<SingleAgentSolver> createSharedPlanner(int agent) const;
   std::unique_ptr<SingleAgentSolver> createLocalPlanner(int agent) const;
   SingleAgentSolver& getReusableLocalPlanner(int agent);
@@ -471,9 +426,6 @@ class LNS {
   OptimizationObjectiveMode getOptimizationObjectiveMode() const {
     return optimizationObjectiveMode_;
   }
-  GoalOccupationMode getGoalOccupationMode() const {
-    return goalOccupationModeMode_;
-  }
   RepairHeuristicMode getRepairHeuristicMode() const {
     return repairHeuristicMode_;
   }
@@ -486,18 +438,8 @@ class LNS {
   bool isOptimizationObjectiveSoc() const {
     return optimizationObjectiveMode_ == OptimizationObjectiveMode::soc;
   }
-  bool isGoalOccupationStay() const {
-    return goalOccupationModeMode_ == GoalOccupationMode::stay;
-  }
-  bool isGoalOccupationRepositionTrue() const {
-    return goalOccupationModeMode_ == GoalOccupationMode::reposition_true;
-  }
   bool isRepairHeuristicRegret() const {
     return repairHeuristicMode_ == RepairHeuristicMode::regret;
-  }
-  bool isRepairHeuristicMarketShortlistRegret() const {
-    return repairHeuristicMode_ ==
-           RepairHeuristicMode::market_shortlist_regret;
   }
   bool isNrrMiniSolverPbs() const {
     return nrrMiniSolverMode_ == NrrMiniSolverMode::pbs;
@@ -516,15 +458,6 @@ class LNS {
   }
   int lastPrepareClosureAdded() const { return cascadeState_.lastPrepareClosureAdded; }
   const CascadeStats& getCascadeStatsRef() const { return cascadeState_.stats; }
-  int getCascadeTaskBudget() const { return cascadeTaskBudget(); }
-  bool isAdaptiveCascadeBudgetEnabled() const {
-    return cascadeState_.adaptiveBudgetEnabled;
-  }
-  int getAdaptiveCascadeBudgetCurrent() const {
-    return cascadeState_.adaptiveBudgetEnabled
-               ? cascadeState_.adaptiveBudgetCurrent
-               : cascadeTaskBudget();
-  }
   const SolutionRestoreStats& getSolutionRestoreStats() const {
     return solutionRestoreStats_;
   }
@@ -533,9 +466,6 @@ class LNS {
   }
   const ImprovementDiagnosticsStats& getImprovementDiagnosticsStats() const {
     return improvementDiagnosticsStats_;
-  }
-  const TerminalRepositionStats& getTerminalRepositionStats() const {
-    return terminalRepositionStats_;
   }
   LowLevelSearchStats getLowLevelSearchStats() const {
     return lowLevelState_.counters;
@@ -549,21 +479,10 @@ class LNS {
   double getLastLowLevelEffectiveTimeoutSec() const {
     return lowLevelState_.lastEffectiveTimeoutSec;
   }
-  std::optional<IncrementalRegretStats> getIncrementalRegretStats() const {
-    if (!incrementalRegret_) {
-      return std::nullopt;
-    }
-    return incrementalRegretStatsTotal_;
-  }
   const RegretEvalStats& getRegretEvalStatsRef() const {
     return regretEvalStatsTotal_;
   }
   RegretEvalStats getRegretEvalStats() const { return regretEvalStatsTotal_; }
-  string getIncrementalRegretMode() const {
-    return incrementalRegretMode_ == IncrementalRegretMode::descendants
-               ? "descendants"
-               : "descendants+agent";
-  }
   const NrrStats& getNrrStats() const { return nrrStats_; }
   bool isNrrGlobalReassignEnabled() const { return nrrGlobalReassign_; }
 
@@ -571,7 +490,6 @@ class LNS {
   const FeasibleSolution& getFeasibleSolution() const {
     return incumbentSolution_;
   }
-  MarketStats getMarketStats() const { return market_.stats; }
 
  private:
   void randomRemoval();
@@ -581,8 +499,6 @@ class LNS {
   void precedenceWaitRemoval(
       const ConflictMap* potentialNeighborhood = nullptr);
   void lowSlackRemoval(const ConflictMap* potentialNeighborhood = nullptr);
-  void marketTatonnementRemoval(
-      const ConflictMap* potentialNeighborhood = nullptr);
   void collisionSoftRemoval(
       const ConflictMap* potentialNeighborhood = nullptr);
   void failureSoftRemoval(const ConflictMap* potentialNeighborhood = nullptr);
@@ -595,42 +511,13 @@ class LNS {
 
   void invalidateCurrentTaskAssignmentIndexCache();
   const vector<int>& getCurrentTaskPositionIndexByTask() const;
-
-  int marketTimeBucket(int timestep) const;
-  uint64_t makeMarketVertexKey(int location, int bucket) const;
-  uint64_t makeMarketEdgeKey(int from, int to, int bucket) const;
   void computeTaskScheduleMetrics(
       vector<TaskScheduleMetrics>& perTask,
       vector<double>* blockedWaitSum = nullptr) const;
-  double computeTaskMarketExposure(int task, bool normalized) const;
-  double computeMarketMarginalReliefFromPath(
-      const AgentTaskPath& taskPath,
-      const unordered_map<uint64_t, int>& vertexDemand,
-      const unordered_map<uint64_t, int>& edgeDemand,
-      bool normalized) const;
-  double computeSolutionMarketPressure() const;
   double computeSolutionPrecedenceWait() const;
-  bool passMarketAcceptanceGuards(double previousPressure,
-                                  double candidatePressure,
-                                  double previousWait,
-                                  double candidateWait,
-                                  bool candidateIsWorse) const;
-  bool marketDestroyStabilityReady() const;
-  void updateMarketStateFromCurrentSolution();
-  void maybeUpdateMarketState(bool accepted,
-                              bool candidateStateUpdate = false);
-  double computeMarketExposureFromPath(const AgentTaskPath& taskPath,
-                                       bool normalized) const;
-  void buildMarketDemandFromCurrentOccupancy(
-      unordered_map<uint64_t, int>& vertexDemand,
-      unordered_map<uint64_t, int>& edgeDemand) const;
   int computeTaskPrecedenceWaitFromState(
       int task, int taskLocation, const vector<vector<int>>& agentTaskAssignments,
       const vector<vector<AgentTaskPath>>& agentTaskPaths) const;
-  int computeTaskPrecedenceWaitFromWorkspace(int task, int taskLocation,
-                                             const RegretWorkspace& workspace,
-                                             const vector<int>* assignmentOwnerLookup = nullptr,
-                                             const vector<int>* assignmentPosLookup = nullptr) const;
   int computeTaskPrecedenceWaitInCurrentSolution(int task) const;
 
   void computeMovingMetrics(int numberOfConflicts, int sumOfCosts);

@@ -21,8 +21,6 @@ void LNS::commitIterationTimingAndMaybeRecord(
   improvementDiagnosticsStats_.timeRegretLowLevelSec +=
       context.timeRegretLowLevelSec;
   improvementDiagnosticsStats_.timeJoinPathsSec += context.timeJoinPathsSec;
-  improvementDiagnosticsStats_.timeTerminalReplanSec +=
-      context.timeTerminalReplanSec;
   improvementDiagnosticsStats_.timeRecomputeSocSec +=
       context.timeRecomputeSocSec;
   improvementDiagnosticsStats_.timeValidationSec +=
@@ -42,7 +40,6 @@ void LNS::commitIterationTimingAndMaybeRecord(
     context.debugRow.timeRegretCommitSec = context.timeRegretCommitSec;
     context.debugRow.timeRegretLowLevelSec = context.timeRegretLowLevelSec;
     context.debugRow.timeJoinPathsSec = context.timeJoinPathsSec;
-    context.debugRow.timeTerminalReplanSec = context.timeTerminalReplanSec;
     context.debugRow.timeRecomputeSocSec = context.timeRecomputeSocSec;
     context.debugRow.timeValidationSec = context.timeValidationSec;
     context.debugRow.timeAcceptanceSec = context.timeAcceptanceSec;

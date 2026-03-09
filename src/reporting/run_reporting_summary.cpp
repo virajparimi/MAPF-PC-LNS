@@ -447,8 +447,7 @@ void writeSolutionJson(const std::filesystem::path& outPath,
 }  // namespace
 
 void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
-                           bool success, bool marketHeuristics,
-                           bool incrementalRegret,
+                           bool success,
                            const FeasibleTrajectoryStats& stats) {
   const int lnsIterations = countLnsIterations(lns.iterationStats);
   const vector<double> iterDurations = computeIterationDurations(lns.iterationStats);
@@ -481,7 +480,7 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   const double timingMeasuredLnsPhasesSec =
       timingStats.timeDestroyAndPrepareSec +
       timingStats.timeRepairAndCommitSec + timingStats.timeJoinPathsSec +
-      timingStats.timeTerminalReplanSec + timingStats.timeRecomputeSocSec +
+      timingStats.timeRecomputeSocSec +
       timingStats.timeValidationSec + timingStats.timeAcceptanceSec +
       timingStats.timeBookkeepingSec;
   const double timeToBestFeasible = computeTimeToBestFeasible(lns.iterationStats);
@@ -588,7 +587,7 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   const int64_t acceptedWorse = timingStats.acceptedSocWorseVsPrevious;
   const int64_t rejectedInvalid = lns.invalidCandidateRejections;
   const int64_t rejectedFailFind = stats.couldNotFindIterations;
-  const int64_t rejectedGuard = lns.marketGuardRejections;
+  const int64_t rejectedGuard = timingStats.guardRejected;
   const int64_t totalAccepts = timingStats.accepted;
   const auto& regretStats = lns.getRegretEvalStatsRef();
   const double candidateTriedPerRemovedTask =
@@ -629,7 +628,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Regret commit time (s)", timingStats.timeRegretCommitSec);
   printMetric("Regret low-level time (s)", timingStats.timeRegretLowLevelSec);
   printMetric("Join paths time (s)", timingStats.timeJoinPathsSec);
-  printMetric("Terminal replan time (s)", timingStats.timeTerminalReplanSec);
   printMetric("Recompute SoC time (s)", timingStats.timeRecomputeSocSec);
   printMetric("Validation time (s)", timingStats.timeValidationSec);
   printMetric("Acceptance time (s)", timingStats.timeAcceptanceSec);
@@ -682,7 +680,7 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Number of failures", lns.numOfFailures);
   printMetric("Invalid candidate rejections",
               lns.invalidCandidateRejections);
-  printMetric("Market guard rejections", lns.marketGuardRejections);
+  printMetric("Guard rejections", timingStats.guardRejected);
   printMetric("Success", success ? "true" : "false");
 
   std::cout << "\n=== Initial Solution ===\n";
@@ -865,20 +863,11 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
           : 0.0;
 
   std::cout << "\n=== Cascade Stats ===\n";
-  printMetric("Cascade adaptive budget enabled",
-              lns.isAdaptiveCascadeBudgetEnabled() ? "true" : "false");
-  printMetric("Cascade budget baseline (added tasks)", lns.getCascadeTaskBudget());
-  printMetric("Cascade budget current (added tasks)",
-              lns.getAdaptiveCascadeBudgetCurrent());
   printMetric("Cascade budget avg used", avgCascadeBudgetUsed);
   printMetric("Cascade budget min used",
               cascadeStats.prepareCalls > 0 ? cascadeStats.budgetUsedMin : 0);
   printMetric("Cascade budget max used",
               cascadeStats.prepareCalls > 0 ? cascadeStats.budgetUsedMax : 0);
-  printMetric("Cascade budget increases",
-              cascadeStats.adaptiveBudgetIncreases);
-  printMetric("Cascade budget decreases",
-              cascadeStats.adaptiveBudgetDecreases);
   printMetric("prepareNextIteration calls", cascadeStats.prepareCalls);
   printMetric("Cascade budget aborts", cascadeStats.budgetAborts);
   printMetric("Cascade abort rate", cascadeAbortRate);
@@ -893,50 +882,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   std::cout << "\n=== Solution Restore Stats ===\n";
   printMetric("Restore calls", restoreStats.restoreCalls);
   printMetric("Full restores", restoreStats.fullRestores);
-
-  const auto& terminalStats = lns.getTerminalRepositionStats();
-  if (terminalStats.replansRequested > 0) {
-    const double plannedRate =
-        terminalStats.agentsEvaluated > 0
-            ? (double)terminalStats.agentsPlanned /
-                  (double)terminalStats.agentsEvaluated
-            : 0.0;
-    const double noDemandRate =
-        terminalStats.agentsEvaluated > 0
-            ? (double)terminalStats.skippedNoDemand /
-                  (double)terminalStats.agentsEvaluated
-            : 0.0;
-    std::cout << "\n=== Terminal Reposition Stats ===\n";
-    printMetric("Replan calls", terminalStats.replansRequested);
-    printMetric("Agents evaluated", terminalStats.agentsEvaluated);
-    printMetric("Agents planned", terminalStats.agentsPlanned);
-    printMetric("Skipped (no demand)", terminalStats.skippedNoDemand);
-    printMetric("Planning failures", terminalStats.planningFailures);
-    printMetric("Candidate cache hits", terminalStats.candidateCacheHits);
-    printMetric("Candidate cache misses", terminalStats.candidateCacheMisses);
-    printMetric("Planned/evaluated", plannedRate);
-    printMetric("No-demand/evaluated", noDemandRate);
-  }
-
-  if (marketHeuristics) {
-    const MarketStats marketStats = lns.getMarketStats();
-    std::cout << "\n=== Market Stats ===\n";
-    printMetric("Updates", marketStats.updates);
-    printMetric("Destroy warmup skipped", marketStats.destroyWarmupSkipped);
-    printMetric("Destroy unstable skipped", marketStats.destroyUnstableSkipped);
-    printMetric("Contended resources", marketStats.contendedResources);
-    printMetric("Mean price (contended)", marketStats.meanPriceContended);
-    printMetric("Max price", marketStats.maxPrice);
-    printMetric("Top price-mass fraction", marketStats.topPriceMassFrac);
-    printMetric("Price rel-L1 delta", marketStats.priceRelL1Delta);
-    printMetric("Price rel-L1 delta EMA", marketStats.priceRelL1DeltaEma);
-    printMetric("Top price-mass delta", marketStats.topPriceMassDelta);
-    printMetric("Top price-mass delta EMA", marketStats.topPriceMassDeltaEma);
-    printMetric("Contended Jaccard", marketStats.contendedJaccard);
-    printMetric("Contended Jaccard EMA", marketStats.contendedJaccardEma);
-    printMetric("Market total precedence wait", marketStats.totalPrecedenceWait);
-    printMetric("Market max precedence wait", marketStats.maxPrecedenceWait);
-  }
 
   const double feasibleRate =
       regretStats.candidateInsertionsTried > 0
@@ -956,11 +901,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
               regretStats.candidateInsertionsTried);
   printMetric("Candidate insertions feasible",
               regretStats.candidateInsertionsFeasible);
-  printMetric("Shortlist agent evals", regretStats.shortlistAgentEvaluations);
-  printMetric("Shortlist fallback evals",
-              regretStats.shortlistFallbackEvaluations);
-  printMetric("Shortlist fallback recovered",
-              regretStats.shortlistFallbackRecovered);
   printMetric("Workspace agents cloned", regretStats.workspaceAgentsCloned);
   printMetric("Max cloned agents/task",
               regretStats.workspaceMaxClonedPerTask);
@@ -968,189 +908,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
   printMetric("Repair neighborhoods", regretStats.neighborhoods);
   printMetric("Avg removed tasks/neighborhood", avgRemovedTasks);
   printMetric("Max removed tasks/neighborhood", regretStats.removedTasksMax);
-  if (regretStats.waitProxyDiagEvaluations > 0) {
-    const double waitPositiveEvalRate =
-        (double)regretStats.waitProxyDiagPositiveEvals /
-        (double)regretStats.waitProxyDiagEvaluations;
-    const double waitVaryingEvalRate =
-        (double)regretStats.waitProxyDiagVaryingEvals /
-        (double)regretStats.waitProxyDiagEvaluations;
-    const double normalizedActiveEvalRate =
-        (double)regretStats.waitProxyDiagNormalizedActiveEvals /
-        (double)regretStats.waitProxyDiagEvaluations;
-    const double waitNonZeroCandidateRate =
-        regretStats.waitProxyDiagFiniteCandidates > 0
-            ? (double)regretStats.waitProxyDiagNonZeroCandidates /
-                  (double)regretStats.waitProxyDiagFiniteCandidates
-            : 0.0;
-    const double top1ChangedRate =
-        (double)regretStats.waitProxyDiagTop1Changed /
-        (double)regretStats.waitProxyDiagEvaluations;
-    const double topKChangedRate =
-        (double)regretStats.waitProxyDiagTopKChanged /
-        (double)regretStats.waitProxyDiagEvaluations;
-    const double avgTopKOverlap =
-        regretStats.waitProxyDiagTopKOverlapFracSum /
-        (double)regretStats.waitProxyDiagEvaluations;
-    const double avgAbsWaitZ =
-        regretStats.waitProxyDiagMeanAbsWaitZSum /
-        (double)regretStats.waitProxyDiagEvaluations;
-    const double avgAbsDistanceZ =
-        regretStats.waitProxyDiagMeanAbsDistanceZSum /
-        (double)regretStats.waitProxyDiagEvaluations;
-    const double waitToDistanceZRatio =
-        avgAbsDistanceZ > 1e-12 ? avgAbsWaitZ / avgAbsDistanceZ : 0.0;
-    printMetric("Wait-proxy diag evals", regretStats.waitProxyDiagEvaluations);
-    printMetric("Wait-proxy finite candidates",
-                regretStats.waitProxyDiagFiniteCandidates);
-    printMetric("Wait-proxy nonzero candidates",
-                regretStats.waitProxyDiagNonZeroCandidates);
-    printMetric("Wait-proxy positive eval rate", waitPositiveEvalRate);
-    printMetric("Wait-proxy varying eval rate", waitVaryingEvalRate);
-    printMetric("Wait-proxy normalized-active eval rate",
-                normalizedActiveEvalRate);
-    printMetric("Wait-proxy nonzero candidate rate",
-                waitNonZeroCandidateRate);
-    printMetric("Wait-proxy top1 changed rate", top1ChangedRate);
-    printMetric("Wait-proxy topK changed rate", topKChangedRate);
-    printMetric("Wait-proxy avg topK overlap", avgTopKOverlap);
-    printMetric("Wait-proxy avg |z_wait|", avgAbsWaitZ);
-    printMetric("Wait-proxy avg |z_dist|", avgAbsDistanceZ);
-    printMetric("Wait-proxy |z_wait|/|z_dist|", waitToDistanceZRatio);
-  }
-  if (regretStats.successorPressureDiagEvaluations > 0) {
-    const double successorPositiveEvalRate =
-        (double)regretStats.successorPressureDiagPositiveEvals /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorVaryingEvalRate =
-        (double)regretStats.successorPressureDiagVaryingEvals /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorNormalizedActiveEvalRate =
-        (double)regretStats.successorPressureDiagNormalizedActiveEvals /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorNonZeroCandidateRate =
-        regretStats.successorPressureDiagFiniteCandidates > 0
-            ? (double)regretStats.successorPressureDiagNonZeroCandidates /
-                  (double)regretStats.successorPressureDiagFiniteCandidates
-            : 0.0;
-    const double successorTop1ChangedRate =
-        (double)regretStats.successorPressureDiagTop1Changed /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorTopKChangedRate =
-        (double)regretStats.successorPressureDiagTopKChanged /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorAvgTopKOverlap =
-        regretStats.successorPressureDiagTopKOverlapFracSum /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorAvgAbsPressureZ =
-        regretStats.successorPressureDiagMeanAbsPressureZSum /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorAvgAbsDistanceZ =
-        regretStats.successorPressureDiagMeanAbsDistanceZSum /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorToDistanceZRatio =
-        successorAvgAbsDistanceZ > 1e-12
-            ? successorAvgAbsPressureZ / successorAvgAbsDistanceZ
-            : 0.0;
-    const int64_t successorSignalCount =
-        regretStats.successorPressureDiagDepth1Signals +
-        regretStats.successorPressureDiagDepthGt1Signals;
-    const double successorPrevFallbackPerEval =
-        (double)regretStats.successorPressureDiagPrevFallbackCount /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorPrevFallbackPerSignal =
-        successorSignalCount > 0
-            ? (double)regretStats.successorPressureDiagPrevFallbackCount /
-                  (double)successorSignalCount
-            : 0.0;
-    const double successorPrecedenceClampPerEval =
-        (double)regretStats.successorPressureDiagPrecedenceClampCount /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorPrecedenceClampPerSignal =
-        successorSignalCount > 0
-            ? (double)regretStats.successorPressureDiagPrecedenceClampCount /
-                  (double)successorSignalCount
-            : 0.0;
-    const double successorPrecedenceClampAvgDelta =
-        regretStats.successorPressureDiagPrecedenceClampCount > 0
-            ? regretStats.successorPressureDiagPrecedenceClampDeltaSum /
-                  (double)regretStats.successorPressureDiagPrecedenceClampCount
-            : 0.0;
-    const double successorDepth1SignalsPerEval =
-        (double)regretStats.successorPressureDiagDepth1Signals /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorDepthGt1SignalsPerEval =
-        (double)regretStats.successorPressureDiagDepthGt1Signals /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorDescendantActiveEvalRate =
-        (double)regretStats.successorPressureDiagDescendantActiveEvals /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorAvgDepth1Contribution =
-        regretStats.successorPressureDiagMeanDepth1ContributionSum /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorAvgDepthGt1Contribution =
-        regretStats.successorPressureDiagMeanDepthGt1ContributionSum /
-        (double)regretStats.successorPressureDiagEvaluations;
-    const double successorDescendantContributionShare =
-        (successorAvgDepth1Contribution + successorAvgDepthGt1Contribution) > 1e-12
-            ? successorAvgDepthGt1Contribution /
-                  (successorAvgDepth1Contribution +
-                   successorAvgDepthGt1Contribution)
-            : 0.0;
-    printMetric("Successor-pressure diag evals",
-                regretStats.successorPressureDiagEvaluations);
-    printMetric("Successor-pressure finite candidates",
-                regretStats.successorPressureDiagFiniteCandidates);
-    printMetric("Successor-pressure nonzero candidates",
-                regretStats.successorPressureDiagNonZeroCandidates);
-    printMetric("Successor-pressure positive eval rate",
-                successorPositiveEvalRate);
-    printMetric("Successor-pressure varying eval rate",
-                successorVaryingEvalRate);
-    printMetric("Successor-pressure normalized-active eval rate",
-                successorNormalizedActiveEvalRate);
-    printMetric("Successor-pressure nonzero candidate rate",
-                successorNonZeroCandidateRate);
-    printMetric("Successor-pressure top1 changed rate",
-                successorTop1ChangedRate);
-    printMetric("Successor-pressure topK changed rate",
-                successorTopKChangedRate);
-    printMetric("Successor-pressure avg topK overlap",
-                successorAvgTopKOverlap);
-    printMetric("Successor-pressure avg |z_succ|",
-                successorAvgAbsPressureZ);
-    printMetric("Successor-pressure avg |z_dist|",
-                successorAvgAbsDistanceZ);
-    printMetric("Successor-pressure |z_succ|/|z_dist|",
-                successorToDistanceZRatio);
-    printMetric("Successor-pressure prev fallback count",
-                regretStats.successorPressureDiagPrevFallbackCount);
-    printMetric("Successor-pressure prev fallback per eval",
-                successorPrevFallbackPerEval);
-    printMetric("Successor-pressure prev fallback per signal",
-                successorPrevFallbackPerSignal);
-    printMetric("Successor-pressure precedence clamp count",
-                regretStats.successorPressureDiagPrecedenceClampCount);
-    printMetric("Successor-pressure precedence clamp per eval",
-                successorPrecedenceClampPerEval);
-    printMetric("Successor-pressure precedence clamp per signal",
-                successorPrecedenceClampPerSignal);
-    printMetric("Successor-pressure precedence clamp avg delta",
-                successorPrecedenceClampAvgDelta);
-    printMetric("Successor-pressure depth1 signals/eval",
-                successorDepth1SignalsPerEval);
-    printMetric("Successor-pressure depth>1 signals/eval",
-                successorDepthGt1SignalsPerEval);
-    printMetric("Successor-pressure descendant-active eval rate",
-                successorDescendantActiveEvalRate);
-    printMetric("Successor-pressure avg depth1 contribution",
-                successorAvgDepth1Contribution);
-    printMetric("Successor-pressure avg depth>1 contribution",
-                successorAvgDepthGt1Contribution);
-    printMetric("Successor-pressure descendant contribution share",
-                successorDescendantContributionShare);
-  }
-
   const auto& nrrStats = lns.getNrrStats();
   if (nrrStats.calls > 0 || nrrStats.attempts > 0) {
     const int64_t nrrCalls = std::max<int64_t>(nrrStats.calls, nrrStats.attempts);
@@ -1244,8 +1001,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
             return "precedence_wait";
           case DestroyHeuristic::lowSlackRemoval:
             return "low_slack";
-          case DestroyHeuristic::marketTatonnementRemoval:
-            return "market_tatonnement";
           case DestroyHeuristic::collisionSoftRemoval:
             return "collision_soft";
           case DestroyHeuristic::failureSoftRemoval:
@@ -1492,7 +1247,7 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
     const double measuredDebugSec =
         debugStats.timeDestroyAndPrepareSec +
         debugStats.timeRepairAndCommitSec + debugStats.timeJoinPathsSec +
-        debugStats.timeTerminalReplanSec + debugStats.timeRecomputeSocSec +
+        debugStats.timeRecomputeSocSec +
         debugStats.timeValidationSec + debugStats.timeAcceptanceSec +
         debugStats.timeBookkeepingSec;
     const double measuredShareOfRuntime =
@@ -1639,7 +1394,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
     printMetric("Early aborts (prepare)", debugStats.earlyAbortPrepare);
     printMetric("Early aborts (repair)", debugStats.earlyAbortRepair);
     printMetric("Early aborts (join)", debugStats.earlyAbortJoin);
-    printMetric("Early aborts (terminal)", debugStats.earlyAbortTerminal);
     printMetric("Mean previous SoC", meanPreviousSoc);
     printMetric("Mean candidate SoC", meanCandidateSoc);
     printMetric("Mean incumbent SoC", meanIncumbentSoc);
@@ -1662,8 +1416,6 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
     printMetric("Regret low-level time (s)",
                 debugStats.timeRegretLowLevelSec);
     printMetric("Join paths time (s)", debugStats.timeJoinPathsSec);
-    printMetric("Terminal replan time (s)",
-                debugStats.timeTerminalReplanSec);
     printMetric("Recompute SoC time (s)", debugStats.timeRecomputeSocSec);
     printMetric("Validation time (s)", debugStats.timeValidationSec);
     printMetric("Acceptance time (s)", debugStats.timeAcceptanceSec);
@@ -1681,80 +1433,10 @@ void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
     printMetric("Regret low-level / (regret eval+commit)",
                 regretLowLevelShareOfRegretEvalAndCommit);
     printMetric("Join paths share", phaseShare(debugStats.timeJoinPathsSec));
-    printMetric("Terminal replan share", phaseShare(debugStats.timeTerminalReplanSec));
     printMetric("Recompute SoC share", phaseShare(debugStats.timeRecomputeSocSec));
     printMetric("Validation share", phaseShare(debugStats.timeValidationSec));
     printMetric("Acceptance share", phaseShare(debugStats.timeAcceptanceSec));
     printMetric("Bookkeeping share", phaseShare(debugStats.timeBookkeepingSec));
-  }
-
-  if (incrementalRegret) {
-    const auto statsOpt = lns.getIncrementalRegretStats();
-    if (statsOpt.has_value()) {
-      const auto& incrementalStats = statsOpt.value();
-      const double avgDirty =
-          incrementalStats.commits > 0
-              ? (double)incrementalStats.dirtySum /
-                    (double)incrementalStats.commits
-              : 0.0;
-      const double avgChanged =
-          incrementalStats.commits > 0
-              ? (double)incrementalStats.changedSum /
-                    (double)incrementalStats.commits
-              : 0.0;
-      const double avgChangedAgents =
-          incrementalStats.commits > 0
-              ? (double)incrementalStats.changedAgentsSum /
-                    (double)incrementalStats.commits
-              : 0.0;
-      const double avgRecomputedTasksPerCommit =
-          incrementalStats.commits > 0
-              ? (double)incrementalStats.recomputedTasks /
-                    (double)incrementalStats.commits
-              : 0.0;
-      const double avgDirtyByDescendants =
-          incrementalStats.commits > 0
-              ? (double)incrementalStats.dirtyByDescendants /
-                    (double)incrementalStats.commits
-              : 0.0;
-      const double avgDirtyByCandidateAgent =
-          incrementalStats.commits > 0
-              ? (double)incrementalStats.dirtyByCandidateAgent /
-                    (double)incrementalStats.commits
-              : 0.0;
-      const double avgDirtyByAncestors =
-          incrementalStats.commits > 0
-              ? (double)incrementalStats.dirtyByAncestors /
-                    (double)incrementalStats.commits
-              : 0.0;
-
-      std::cout << "\n=== Incremental Regret Stats ===\n";
-      printMetric("Mode", lns.getIncrementalRegretMode());
-      printMetric("Commits", incrementalStats.commits);
-      printMetric("Recompute calls", incrementalStats.recomputeCalls);
-      printMetric("Recomputed tasks", incrementalStats.recomputedTasks);
-      printMetric("Recomputed tasks/commit", avgRecomputedTasksPerCommit);
-      printMetric("Stale heap pops", incrementalStats.stalePops);
-      printMetric("Heap rebuilds", incrementalStats.heapRebuilds);
-      printMetric("Full refreshes", incrementalStats.fullRefreshes);
-      printMetric("Avg dirty tasks/commit", avgDirty);
-      printMetric("Max dirty tasks", incrementalStats.dirtyMax);
-      printMetric("Avg changed end-times/commit", avgChanged);
-      printMetric("Max changed end-times", incrementalStats.changedMax);
-      printMetric("Avg changed agents/commit", avgChangedAgents);
-      printMetric("Max changed agents", incrementalStats.changedAgentsMax);
-      printMetric("Avg dirty-by-descendants/commit", avgDirtyByDescendants);
-      printMetric("Avg dirty-by-candidate-agent/commit", avgDirtyByCandidateAgent);
-      printMetric("Avg dirty-by-ancestors/commit", avgDirtyByAncestors);
-      printMetric("Refreshes by high stale load",
-                  incrementalStats.refreshByHighStale);
-      printMetric("Refreshes by stale-growth stall",
-                  incrementalStats.refreshByStaleGrowth);
-      printMetric("Refreshes by periodic safety",
-                  incrementalStats.refreshByPeriodic);
-      printMetric("Endgame full recomputes",
-                  incrementalStats.endgameFullRecomputes);
-    }
   }
 
   const auto nrrStatsForSummary = lns.getNrrStats();

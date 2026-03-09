@@ -5,11 +5,7 @@
 class LNS;
 
 enum class RepairStrategy {
-  mapfpc_fixed,
-  mapfpc_neighborhood_fixed,
-  mapfpc_neighborhood_reassign_greedy,
-  full_regret,
-  incremental_regret
+  full_regret
 };
 
 struct RepairPlan {
@@ -22,7 +18,6 @@ class RepairEngine {
  public:
   static RepairPlan buildPlan(bool enableNrrRepair,
                               bool nrrFallbackToStandard,
-                              bool incrementalRegret,
                               int repairHeuristicMode);
 
   static bool run(LNS& lns, bool& repairFailed, bool& nrrRepairSucceeded);

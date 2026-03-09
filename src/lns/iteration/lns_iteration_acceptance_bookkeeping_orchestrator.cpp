@@ -1,7 +1,6 @@
 #include "lns_iteration_acceptance_bookkeeping_orchestrator.hpp"
 
 #include "lns_acceptance_orchestrator.hpp"
-#include "lns_market_iteration_orchestrator.hpp"
 #include <algorithm>
 #include <limits>
 
@@ -22,8 +21,7 @@ bool LNS::runAcceptanceAndBookkeeping(
     IterationExecutionContext& context) {
   const AcceptanceDecisionResult acceptanceDecision =
       AcceptanceOrchestrator::runDecision(
-          *this, context.candidateValid, context.previousPressureForIter,
-          context.previousWaitForIter, context.previousConflictSignalForIter,
+          *this, context.candidateValid, context.previousConflictSignalForIter,
           context.candidateTouchedAgents, context.debugRow);
   context.softRecoveryModeBefore = acceptanceDecision.softRecoveryModeBefore;
   context.softRecoveryModeAfter = acceptanceDecision.softRecoveryModeAfter;
@@ -48,8 +46,6 @@ bool LNS::runAcceptanceAndBookkeeping(
       potentialNeighborhood, oldNeighborhood, currentSolutionValid,
       currentValidationStats, context.quality, context.candidateTouchedAgents,
       context.debugRow);
-
-  MarketIterationOrchestrator::finalize(*this, acceptanceDecision.accepted);
 
   if (context.debugRow.earlyAbortReason.empty()) {
     context.debugRow.earlyAbortReason = "none";

@@ -216,8 +216,7 @@ void NrrFrozenOccupancyIndex::addPathContribution(int agent,
 }
 
 void NrrFrozenOccupancyIndex::buildFromPreviousSolution(
-    const Instance& instance, const Solution& previousSolution,
-    bool stayGoalOccupationMode) {
+    const Instance& instance, const Solution& previousSolution) {
   clear();
   const int numAgents = instance.getAgentNum();
   perAgentContrib_.assign(numAgents, AgentContribution());
@@ -226,13 +225,7 @@ void NrrFrozenOccupancyIndex::buildFromPreviousSolution(
       continue;
     }
     const auto& servicePath = previousSolution.agents[agent].path;
-    addPathContribution(agent, servicePath, stayGoalOccupationMode);
-
-    if (!stayGoalOccupationMode &&
-        previousSolution.agents[agent].terminalPathActive) {
-      addPathContribution(agent, previousSolution.agents[agent].terminalPath,
-                          true);
-    }
+    addPathContribution(agent, servicePath, true);
   }
 }
 

@@ -9,7 +9,6 @@
 #include "lns_iteration_lifecycle_orchestrator.hpp"
 #include "lns_iteration_outcome_orchestrator.hpp"
 #include "lns_iteration_setup_orchestrator.hpp"
-#include "lns_market_iteration_orchestrator.hpp"
 #include "lns_repair_engine.hpp"
 #include "utils.hpp"
 #include <algorithm>
@@ -115,8 +114,7 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
   context.debugRow.removedTaskIdsCsv = neighborhoodDiagnostics.removedTaskIdsCsv;
   context.debugRow.neighborhoodJaccardPrev =
       neighborhoodDiagnostics.neighborhoodJaccardPrev;
-  // Collect agents impacted by this neighborhood once and reuse across:
-  // 1) terminal-path invalidation, 2) path-join scope, 3) terminal replanning.
+  // Collect agents impacted by this neighborhood once and reuse for path-join.
   vector<int> agentsToCompute = CandidatePhaseOrchestrator::collectImpactedAgents(
       instance_, solution_, previousSolution_, lnsNeighborhood_.immutableRemovedTasks);
 
@@ -156,7 +154,6 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
       *this, agentsToCompute, context.alnsHeuristicForIter, potentialNeighborhood,
       metrics);
   context.timeJoinPathsSec += candidatePhase.timeJoinPathsSec;
-  context.timeTerminalReplanSec += candidatePhase.timeTerminalReplanSec;
   context.timeRecomputeSocSec += candidatePhase.timeRecomputeSocSec;
   context.timeValidationSec += candidatePhase.timeValidationSec;
   context.candidateTouchedAgents = candidatePhase.candidateTouchedAgents;
@@ -173,21 +170,6 @@ bool LNS::runOneIteration(ConflictMap& potentialNeighborhood,
     feasibleSolutionUpdated = context.feasibleSolutionUpdated;
     return finalized;
   }
-  if (candidatePhase.status == CandidatePhaseStatus::terminal_failed) {
-    improvementDiagnosticsStats_.earlyAbortTerminal++;
-    PLOGE << "run: failed to replan terminal reposition paths for "
-             "candidate solution\n";
-    if (context.alnsHeuristicForIter >= 0 &&
-        context.alnsHeuristicForIter < adaptiveLNS_.numDestroyHeuristics) {
-      adaptiveLNS_.couldNotFind[context.alnsHeuristicForIter]++;
-    }
-    const bool finalized = IterationOutcomeOrchestrator::finalizeCouldNotFindAbort(
-        *this, "terminal_replan_failed", true, potentialNeighborhood, context);
-    commitIterationTiming();
-    feasibleSolutionUpdated = context.feasibleSolutionUpdated;
-    return finalized;
-  }
-
   IterationCandidatePostprocessOrchestrator::process(*this, candidatePhase,
                                                      context);
   const bool acceptanceAndBookkeepingOk =

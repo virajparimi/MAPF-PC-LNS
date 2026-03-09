@@ -33,8 +33,6 @@ inline void resetInitialSolutionState(const Instance& instance, Solution& soluti
   for (int agent = 0; agent < instance.getAgentNum(); agent++) {
     solution.agents[agent].taskPaths.clear();
     solution.agents[agent].path = AgentTaskPath();
-    solution.agents[agent].terminalPath = AgentTaskPath();
-    solution.agents[agent].terminalPathActive = false;
     solution.agents[agent].taskAssignments.clear();
     solution.agents[agent].intraPrecedenceConstraints.clear();
     solution.agents[agent].intraPrecedenceDirty = false;

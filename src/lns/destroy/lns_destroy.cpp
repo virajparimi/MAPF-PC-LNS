@@ -39,9 +39,6 @@ bool LNS::executeDestroyHeuristic(
     case DestroyHeuristic::lowSlackRemoval:
       lowSlackRemoval(potentialNeighborhood);
       return true;
-    case DestroyHeuristic::marketTatonnementRemoval:
-      marketTatonnementRemoval(potentialNeighborhood);
-      return true;
     case DestroyHeuristic::collisionSoftRemoval:
       collisionSoftRemoval(potentialNeighborhood);
       return true;
@@ -85,13 +82,6 @@ bool LNS::runDestroyPhase(const ConflictMap* potentialNeighborhood,
       DestroyOrchestrator::heuristicIdFromName(destroyHeuristic);
   if (!heuristicId.has_value()) {
     errorMessage = "Unknown destroy heuristic: " + destroyHeuristic;
-    return false;
-  }
-  if (*heuristicId == DestroyHeuristic::marketTatonnementRemoval &&
-      !market_.heuristics) {
-    errorMessage =
-        "destroyHeuristic='market_tatonnement' requires market heuristics to "
-        "be enabled";
     return false;
   }
   if (!executeDestroyHeuristic(*heuristicId, potentialNeighborhood)) {
@@ -152,26 +142,12 @@ bool LNS::alnsRemoval(const ConflictMap* potentialNeighborhood) {
     adaptiveLNS_.alnsCounter = 0;
   }
   softRecoveryState_.lastDestroySampledInSoftMode = false;
-  const bool marketWarmupReady =
-      !market_.heuristics || market_.destroyWarmupUpdates <= 0 ||
-      market_.stats.updates >=
-          static_cast<int64_t>(market_.destroyWarmupUpdates);
-  const bool marketStableReady = marketDestroyStabilityReady();
   DestroySamplingContext ctx{
       adaptiveLNS_,
       rng_,
       alnsEnablePrecedenceAwareDestroy_,
       softRecoveryState_.destroyMode,
-      acceptanceState_.softRecoveryActive,
-      market_.heuristics,
-      market_.destroySoftGate,
-      marketWarmupReady,
-      marketStableReady,
-      market_.destroyWarmupWeightScale,
-      market_.destroyUnstableWeightScale,
-      market_.destroyMinAlnsWeight,
-      market_.stats.destroyWarmupSkipped,
-      market_.stats.destroyUnstableSkipped};
+      acceptanceState_.softRecoveryActive};
   const std::optional<int> sampledDestroyHeuristicOpt =
       DestroyOrchestrator::sampleAlnsHeuristic(ctx);
   if (!sampledDestroyHeuristicOpt.has_value()) {

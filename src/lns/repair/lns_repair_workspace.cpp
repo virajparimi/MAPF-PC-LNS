@@ -135,19 +135,14 @@ bool LNS::buildRegretEntry(
   if (serviceTimes.empty()) {
     // Exactly one feasible insertion exists; treat it as forced and prioritize
     // it ahead of ambiguous tasks.
-    regretBestOption_[task] = {bestUtility.agent, bestUtility.taskPosition};
-    regretSecondBestOption_[task] = {bestUtility.agent, bestUtility.taskPosition};
     Regret forced(task, bestUtility.agent, bestUtility.taskPosition,
                   bestUtility.pathLength, bestUtility.agentTasksLen, 0,
-                  std::numeric_limits<double>::infinity(), regretStamp_[task]);
+                  std::numeric_limits<double>::infinity(), 0);
     lnsNeighborhood_.regretMaxHeap.push(forced);
     return true;
   }
 
   Utility secondBestUtility = serviceTimes.top();
-  regretBestOption_[task] = {bestUtility.agent, bestUtility.taskPosition};
-  regretSecondBestOption_[task] = {secondBestUtility.agent,
-                                   secondBestUtility.taskPosition};
 
   double value = 0;
   if (isRegretTypeAbsolute()) {
@@ -157,7 +152,7 @@ bool LNS::buildRegretEntry(
   }
   Regret regret(task, bestUtility.agent, bestUtility.taskPosition,
                 bestUtility.pathLength, bestUtility.agentTasksLen,
-                (int)serviceTimes.size(), value, regretStamp_[task]);
+                (int)serviceTimes.size(), value, 0);
   lnsNeighborhood_.regretMaxHeap.push(regret);
   return true;
 }

@@ -514,14 +514,13 @@ void LNS::failureSoftRemoval(const ConflictMap* potentialNeighborhood) {
 
   std::set<std::pair<int, int>> A_start;
   const int anchorStartLocation = instance_.getStartLocationsRef()[anchor];
-  const bool includeTerminal = isGoalOccupationRepositionTrue();
   for (int other = 0; other < numAgents; other++) {
     if (other == anchor || !sourceMask[other]) {
       continue;
     }
-    const int horizon = getAgentOccupancyHorizon(other, includeTerminal);
+    const int horizon = getAgentOccupancyHorizon(other);
     for (int t = 0; t < horizon; t++) {
-      const int loc = getAgentLocationAt(other, t, includeTerminal);
+      const int loc = getAgentLocationAt(other, t);
       if (loc == anchorStartLocation) {
         A_start.emplace(t, other);
         break;

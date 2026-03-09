@@ -1,7 +1,5 @@
 #include "lns_iteration_setup_orchestrator.hpp"
 
-#include "lns_market_iteration_orchestrator.hpp"
-
 void IterationSetupOrchestrator::initialize(
     LNS& lns, const LNS::ValidationStats& currentValidationStats,
     IterationExecutionContext& context) {
@@ -11,12 +9,8 @@ void IterationSetupOrchestrator::initialize(
 void LNS::initializeIterationContext(
     const ValidationStats& currentValidationStats,
     IterationExecutionContext& context) {
-  const IterationMarketContext marketContext = beginIterationMarket();
-
   context.previousSocForIter = previousObjectiveValue();
   context.previousValidationStatsForIter = currentValidationStats;
-  context.previousPressureForIter = marketContext.previousPressure;
-  context.previousWaitForIter = marketContext.previousWait;
   const int64_t iterationIndex =
       static_cast<int64_t>(iterationDebugRecords_.size());
   context.incumbentSocBeforeIter = incumbentObjectiveValueOrMax();

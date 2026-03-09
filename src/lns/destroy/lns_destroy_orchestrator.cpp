@@ -8,14 +8,6 @@ std::optional<int> DestroyOrchestrator::sampleAlnsHeuristic(
     DestroySamplingContext& ctx) {
   const bool restrictToSoftPool =
       ctx.softRecoveryDestroyModeEnabled && ctx.softRecoveryActive;
-  const bool marketNotReady = (!ctx.marketWarmupReady || !ctx.marketStableReady);
-  if (!restrictToSoftPool && ctx.marketHeuristicsEnabled && marketNotReady) {
-    if (!ctx.marketWarmupReady) {
-      ctx.marketDestroyWarmupSkipped++;
-    } else {
-      ctx.marketDestroyUnstableSkipped++;
-    }
-  }
 
   std::vector<int> eligibleHeuristics;
   eligibleHeuristics.reserve(ctx.adaptiveLns.numDestroyHeuristics);
@@ -34,15 +26,6 @@ std::optional<int> DestroyOrchestrator::sampleAlnsHeuristic(
         (i == DestroyHeuristic::precedenceWaitRemoval ||
          i == DestroyHeuristic::lowSlackRemoval)) {
       continue;
-    }
-    if (i == DestroyHeuristic::marketTatonnementRemoval) {
-      if (!ctx.marketHeuristicsEnabled) {
-        continue;
-      }
-      if (!ctx.marketDestroySoftGate &&
-          (!ctx.marketWarmupReady || !ctx.marketStableReady)) {
-        continue;
-      }
     }
     eligibleHeuristics.push_back(i);
   }
@@ -67,21 +50,9 @@ std::optional<int> DestroyOrchestrator::sampleAlnsHeuristic(
     const bool suppressZeroSuccessHeuristic =
         hasPositiveRecentSuccess &&
         ctx.adaptiveLns.used[i] >= kMinUsedBeforeSuppression &&
-        ctx.adaptiveLns.success[i] <= kSuccessEpsilon &&
-        !(i == DestroyHeuristic::marketTatonnementRemoval &&
-          ctx.marketDestroySoftGate);
+        ctx.adaptiveLns.success[i] <= kSuccessEpsilon;
     if (suppressZeroSuccessHeuristic) {
       effectiveWeight = 0.0;
-    }
-    if (i == DestroyHeuristic::marketTatonnementRemoval &&
-        ctx.marketDestroySoftGate && marketNotReady) {
-      if (!ctx.marketWarmupReady) {
-        effectiveWeight *= ctx.marketDestroyWarmupWeightScale;
-      }
-      if (!ctx.marketStableReady) {
-        effectiveWeight *= ctx.marketDestroyUnstableWeightScale;
-      }
-      effectiveWeight = std::max(effectiveWeight, ctx.marketDestroyMinAlnsWeight);
     }
     eligibleWeights.push_back(effectiveWeight);
   }
@@ -135,9 +106,6 @@ std::optional<int> DestroyOrchestrator::heuristicIdFromName(
   if (name == "low_slack") {
     return DestroyHeuristic::lowSlackRemoval;
   }
-  if (name == "market_tatonnement") {
-    return DestroyHeuristic::marketTatonnementRemoval;
-  }
   if (name == "collision_soft") {
     return DestroyHeuristic::collisionSoftRemoval;
   }
@@ -161,8 +129,6 @@ const char* DestroyOrchestrator::heuristicNameFromId(int id) {
       return "precedence_wait";
     case DestroyHeuristic::lowSlackRemoval:
       return "low_slack";
-    case DestroyHeuristic::marketTatonnementRemoval:
-      return "market_tatonnement";
     case DestroyHeuristic::collisionSoftRemoval:
       return "collision_soft";
     case DestroyHeuristic::failureSoftRemoval:

@@ -22,8 +22,6 @@ struct CoreParameterInputs {
   double lnsConflictWeight = 0.0;
   double lnsCostWeight = 0.0;
   string initialSolutionStrategy;
-  double initialPortfolioTimeFraction = 0.0;
-  bool adaptiveInitialPortfolioBudget = false;
   string initialSeedFromMapfpcLog;
   bool postRefineWithMapfpc = false;
   string postRefineAssignmentSource;
@@ -33,7 +31,6 @@ struct CoreParameterInputs {
   bool postRefineAcceptOnlyIfBetter = false;
   bool debugImprovementDiagnostics = false;
   string debugIterationTsvPath;
-  string goalOccupationMode;
   string destroyHeuristic;
   string acceptanceCriteria;
   string optimizationObjective;
@@ -44,36 +41,23 @@ struct CoreParameterInputs {
   bool nrrGlobalReassign = false;
   bool forceNeighborhoodChangeOnReject = false;
   string nrrMiniSolver;
-  string nrrCatBackend;
   string repairMapfpcSolver;
   int repairMapfpcTimeoutSec = 0;
   string regretType;
-  bool incrementalRegret = false;
-  int regretCandidateTopK = 0;
-  bool regretShortlistDiagnostics = false;
-  double maxCascadeFactor = 0.0;
-  int maxCascadeTasks = 0;
-  bool adaptiveCascadeBudget = false;
   bool alnsEnablePrecedenceAwareDestroy = false;
   bool softRecoveryDestroyMode = false;
   bool softPersistentConflictGraph = false;
-  string incrementalRegretMode;
   unsigned int seed = 0;
 };
 
 LNSParams buildLnsParams(const CoreParameterInputs& coreInputs,
-                         const LNSParams::LowLevel& lowLevelInputs,
-                         const LNSParams::Market& marketInputs) {
+                         const LNSParams::LowLevel& lowLevelInputs) {
   LNSParams parameters{};
   parameters.core.neighborhoodSize = coreInputs.neighborhoodSize;
   parameters.core.timeLimit = coreInputs.timeLimit;
   parameters.core.lnsConflictWeight = coreInputs.lnsConflictWeight;
   parameters.core.lnsCostWeight = coreInputs.lnsCostWeight;
   parameters.core.initialSolutionStrategy = coreInputs.initialSolutionStrategy;
-  parameters.core.initialPortfolioTimeFraction =
-      coreInputs.initialPortfolioTimeFraction;
-  parameters.core.adaptiveInitialPortfolioBudget =
-      coreInputs.adaptiveInitialPortfolioBudget;
   parameters.core.initialSeedFromMapfpcLog =
       coreInputs.initialSeedFromMapfpcLog;
   parameters.core.postRefineWithMapfpc = coreInputs.postRefineWithMapfpc;
@@ -87,7 +71,6 @@ LNSParams buildLnsParams(const CoreParameterInputs& coreInputs,
   parameters.core.debugImprovementDiagnostics =
       coreInputs.debugImprovementDiagnostics;
   parameters.core.debugIterationTsvPath = coreInputs.debugIterationTsvPath;
-  parameters.core.goalOccupationMode = coreInputs.goalOccupationMode;
   parameters.core.destroyHeuristic = coreInputs.destroyHeuristic;
   parameters.core.acceptanceCriteria = coreInputs.acceptanceCriteria;
   parameters.core.optimizationObjective = coreInputs.optimizationObjective;
@@ -100,27 +83,17 @@ LNSParams buildLnsParams(const CoreParameterInputs& coreInputs,
   parameters.core.forceNeighborhoodChangeOnReject =
       coreInputs.forceNeighborhoodChangeOnReject;
   parameters.core.nrrMiniSolver = coreInputs.nrrMiniSolver;
-  parameters.core.nrrCatBackend = coreInputs.nrrCatBackend;
   parameters.core.repairMapfpcSolver = coreInputs.repairMapfpcSolver;
   parameters.core.repairMapfpcTimeoutSec = coreInputs.repairMapfpcTimeoutSec;
   parameters.core.regretType = coreInputs.regretType;
-  parameters.core.incrementalRegret = coreInputs.incrementalRegret;
-  parameters.core.regretCandidateTopK = coreInputs.regretCandidateTopK;
-  parameters.core.regretShortlistDiagnostics =
-      coreInputs.regretShortlistDiagnostics;
-  parameters.core.maxCascadeFactor = coreInputs.maxCascadeFactor;
-  parameters.core.maxCascadeTasks = coreInputs.maxCascadeTasks;
-  parameters.core.adaptiveCascadeBudget = coreInputs.adaptiveCascadeBudget;
   parameters.core.alnsEnablePrecedenceAwareDestroy =
       coreInputs.alnsEnablePrecedenceAwareDestroy;
   parameters.core.softRecoveryDestroyMode =
       coreInputs.softRecoveryDestroyMode;
   parameters.core.softPersistentConflictGraph =
       coreInputs.softPersistentConflictGraph;
-  parameters.core.incrementalRegretMode = coreInputs.incrementalRegretMode;
   parameters.core.seed = coreInputs.seed;
   parameters.lowLevel = lowLevelInputs;
-  parameters.market = marketInputs;
   return parameters;
 }
 }  // namespace
@@ -159,29 +132,6 @@ int main(int argc, char** argv) {
   desc.add_options()("maxIterations,i", po::value<int>()->default_value(0),
                      "Maximum number of iterations");
   desc.add_options()(
-      "regretCandidateTopK",
-      po::value<int>()->default_value(8),
-      "Top-K insertion positions per (task,agent) during regret evaluation "
-      "(0 = evaluate all positions)");
-  desc.add_options()(
-      "regretShortlistDiagnostics",
-      po::value<bool>()->default_value(false),
-      "Emit regret shortlist diagnostics for wait-proxy ranking impact");
-  desc.add_options()(
-      "maxCascadeFactor",
-      po::value<double>()->default_value(0.0),
-      "Multiplier for successor-closure cap in prepareNextIteration "
-      "(<=0 with maxCascadeTasks=0 disables cap)");
-  desc.add_options()(
-      "maxCascadeTasks",
-      po::value<int>()->default_value(0),
-      "Absolute cap for successor-closure added tasks in "
-      "prepareNextIteration (0 = use maxCascadeFactor formula)");
-  desc.add_options()(
-      "adaptiveCascadeBudget",
-      po::value<bool>()->default_value(false),
-      "Enable adaptive successor-closure budget in prepareNextIteration");
-  desc.add_options()(
       "alnsEnablePrecedenceAwareDestroy",
       po::value<bool>()->default_value(true),
       "Allow ALNS to sample precedence_wait and low_slack destroy operators");
@@ -202,16 +152,6 @@ int main(int argc, char** argv) {
                      "Strategy for the initial solution (portfolio default for "
                      "best final SoC; use greedy/prioritized for faster time-to-best; "
                      "or use seeded_mapfpc_log with --initialSeedFromMapfpcLog)");
-  desc.add_options()(
-      "initialPortfolioTimeFraction",
-      po::value<double>()->default_value(0.10),
-      "Portfolio warm-start budget fraction in [0,1] "
-      "(used when initialSolution='portfolio')");
-  desc.add_options()(
-      "adaptiveInitialPortfolioBudget",
-      po::value<bool>()->default_value(false),
-      "Enable adaptive scaling of portfolio warm-start budget using "
-      "agents/tasks/precedence counts (used when initialSolution='portfolio')");
   desc.add_options()(
       "initialSeedFromMapfpcLog",
       po::value<string>()->default_value(""),
@@ -252,10 +192,6 @@ int main(int argc, char** argv) {
       po::value<string>()->default_value(""),
       "Optional output TSV path for per-iteration debug diagnostics");
   desc.add_options()(
-      "goalOccupationMode",
-      po::value<string>()->default_value("reposition_true"),
-      "Final-goal reservation policy: 'stay' or 'reposition_true'");
-  desc.add_options()(
       "destroyHeuristic,H", po::value<string>()->default_value("alns"),
       "Destroy heuristic to use for creating the LNS neighborhood");
   desc.add_options()("acceptanceCriteria,c",
@@ -272,9 +208,7 @@ int main(int argc, char** argv) {
   desc.add_options()(
       "repairHeuristic",
       po::value<string>()->default_value("regret"),
-      "Repair heuristic to use: 'regret', 'market_shortlist_regret', "
-      "'mapfpc_fixed', 'mapfpc_neighborhood_fixed', or "
-      "'mapfpc_neighborhood_reassign_greedy'");
+      "Repair heuristic to use: 'regret'");
   desc.add_options()(
       "enableNrrRepair",
       po::value<bool>()->default_value(false),
@@ -299,11 +233,6 @@ int main(int argc, char** argv) {
       po::value<string>()->default_value("cbs"),
       "NRR mini-solver mode: 'pbs', 'cbs', or 'auto' (default: cbs)");
   desc.add_options()(
-      "nrrCatBackend",
-      po::value<string>()->default_value("pathtablewc"),
-      "CAT backend for NRR MAPF-PC mini-solver calls: 'legacy' or "
-      "'pathtablewc'");
-  desc.add_options()(
       "repairMapfpcSolver",
       po::value<string>()->default_value("cbs"),
       "When repairHeuristic is MAPF-PC-based, solver to use: 'pbs' or 'cbs'");
@@ -318,15 +247,6 @@ int main(int argc, char** argv) {
   desc.add_options()("regretType,r",
                      po::value<string>()->default_value("absolute"),
                      "Type of regret metric to use i.e relative or absolute");
-  desc.add_options()(
-      "incrementalRegret",
-      po::bool_switch()->default_value(false),
-      "Use incremental regret recomputation during LNS repair");
-  desc.add_options()(
-      "incrementalRegretMode",
-      po::value<string>()->default_value("descendants+agent"),
-      "Dirty-set strategy for incremental regret: 'descendants' or "
-      "'descendants+agent'");
   desc.add_options()(
       "lowLevelPlanner",
       po::value<string>()->default_value("mlastar"),
@@ -350,170 +270,9 @@ int main(int argc, char** argv) {
       "If true, skip low-level search for candidates with structural "
       "infeasibility certificates (goal-permanent/start-trapped/static-disconnected)");
 
-  struct MarketIntOptionSpec {
-    const char* name;
-    int defaultValue;
-    const char* description;
-    int LNSParams::Market::*field;
-  };
-  struct MarketDoubleOptionSpec {
-    const char* name;
-    double defaultValue;
-    const char* description;
-    double LNSParams::Market::*field;
-  };
-  static constexpr MarketIntOptionSpec kMarketIntOptions[] = {
-      {"marketBucketDt", 3, "Time bucket size used by market resources",
-       &LNSParams::Market::bucketDt},
-      {"marketVertexBucketCapacity", 2,
-       "Capacity used for vertex-bucket market resources",
-       &LNSParams::Market::vertexBucketCapacity},
-      {"marketEdgeBucketCapacity", 2,
-       "Capacity used for edge-bucket market resources",
-       &LNSParams::Market::edgeBucketCapacity},
-      {"marketUpdatePeriodAccepted", 1,
-       "Number of accepted iterations between market updates",
-       &LNSParams::Market::updatePeriodAccepted},
-      {"marketCooldownIters", 3,
-       "Cooldown iterations before re-selecting a task in market destroy",
-       &LNSParams::Market::cooldownIters},
-      {"marketDestroyWarmupUpdates", 3,
-       "Minimum market update count before ALNS can sample market_tatonnement (0 disables warmup gate)",
-       &LNSParams::Market::destroyWarmupUpdates},
-      {"marketDUp", 1, "Ancestor expansion depth for market destroy",
-       &LNSParams::Market::dUp},
-      {"marketDDown", 1, "Successor expansion depth for market destroy",
-       &LNSParams::Market::dDown},
-      {"marketClosureCap", 0,
-       "Maximum tasks expanded by market closure (0 = neighbor size cap)",
-       &LNSParams::Market::closureCap},
-  };
-  static constexpr MarketDoubleOptionSpec kMarketDoubleOptions[] = {
-      {"marketEta", 0.05, "Market tatonnement base step size",
-       &LNSParams::Market::eta},
-      {"marketRho", 0.9, "EMA smoothing factor for excess demand",
-       &LNSParams::Market::rho},
-      {"marketPriceCap", 50.0, "Maximum market resource price",
-       &LNSParams::Market::priceCap},
-      {"marketPriceInit", 0.05,
-       "Initial price for newly contended resources",
-       &LNSParams::Market::priceInit},
-      {"marketGamma", 0.01, "Price evaporation factor per market update",
-       &LNSParams::Market::gamma},
-      {"marketStabilityEmaAlpha", 0.25,
-       "EMA alpha for market stability diagnostics",
-       &LNSParams::Market::stabilityEmaAlpha},
-      {"marketStabilityMaxRelPriceDelta", 0.35,
-       "Max EMA-relative price L1 delta for ALNS market readiness",
-       &LNSParams::Market::stabilityMaxRelPriceDelta},
-      {"marketStabilityMaxTopMassDelta", 0.08,
-       "Max EMA top-price-mass delta for ALNS market readiness",
-       &LNSParams::Market::stabilityMaxTopMassDelta},
-      {"marketStabilityMinContendedJaccard", 0.50,
-       "Min EMA contended-resource Jaccard for ALNS market readiness",
-       &LNSParams::Market::stabilityMinContendedJaccard},
-      {"marketDestroyWarmupWeightScale", 0.20,
-       "ALNS weight multiplier applied to market destroy during warmup when soft gate is enabled",
-       &LNSParams::Market::destroyWarmupWeightScale},
-      {"marketDestroyUnstableWeightScale", 0.20,
-       "ALNS weight multiplier applied to market destroy during instability when soft gate is enabled",
-       &LNSParams::Market::destroyUnstableWeightScale},
-      {"marketDestroyMinAlnsWeight", 0.05,
-       "Minimum ALNS sampling weight for market destroy when soft gate is enabled",
-       &LNSParams::Market::destroyMinAlnsWeight},
-      {"marketTauP", 0.0, "Acceptance guard threshold for market pressure",
-       &LNSParams::Market::tauP},
-      {"marketTauW", 0.0, "Acceptance guard threshold for precedence wait",
-       &LNSParams::Market::tauW},
-      {"marketDestroyWeightPrice", 1.0,
-       "Weight of market exposure in market destroy burden",
-       &LNSParams::Market::destroyWeightPrice},
-      {"marketDestroyWeightWait", 2.0,
-       "Weight of precedence wait in market destroy burden",
-       &LNSParams::Market::destroyWeightWait},
-      {"marketDestroyWeightRoot", 1.5,
-       "Weight of blocker-root wait in market destroy burden",
-       &LNSParams::Market::destroyWeightRoot},
-      {"marketSeedTopFrac", 0.2,
-       "Top fraction of burden-ranked tasks used as market destroy seed pool",
-       &LNSParams::Market::seedTopFrac},
-      {"marketRandomDestroyQuota", 0.15,
-       "Random sampling quota for market destroy neighborhoods",
-       &LNSParams::Market::randomDestroyQuota},
-      {"marketTieBreakEpsSoc", 0.0,
-       "Tie-break epsilon on |deltaSoC| for market-aware repair",
-       &LNSParams::Market::tieBreakEpsSoc},
-      {"marketLambdaPrice", 0.0, "Repair weight for market exposure delta",
-       &LNSParams::Market::lambdaPrice},
-      {"marketLambdaWait", 0.0, "Repair weight for precedence-wait delta",
-       &LNSParams::Market::lambdaWait},
-  };
-
-  desc.add_options()("marketHeuristics",
-                     po::bool_switch()->default_value(false),
-                     "Enable tatonnement-style market heuristics");
-  desc.add_options()("marketUpdateOnAcceptedOnly",
-                     po::value<bool>()->default_value(true),
-                     "Update market prices only after accepted iterations");
-  desc.add_options()("marketUpdateFromCandidate",
-                     po::bool_switch()->default_value(false),
-                     "When updateOnAcceptedOnly=false, update prices from the candidate solution before accept/reject");
-  desc.add_options()("marketAcceptanceGuards",
-                     po::bool_switch()->default_value(false),
-                     "Enable market pressure / precedence-wait acceptance guards");
-  desc.add_options()("marketDestroyRequireStable",
-                     po::bool_switch()->default_value(false),
-                     "Require market stability diagnostics before ALNS can sample market_tatonnement");
-  desc.add_options()("marketDestroySoftGate",
-                     po::bool_switch()->default_value(false),
-                     "Use soft ALNS downweighting (instead of exclusion) for market_tatonnement during warmup/instability");
-  desc.add_options()("marketRepairTieBreak",
-                     po::bool_switch()->default_value(false),
-                     "Enable market-aware tie-break in repair when deltaSoC is near zero");
-  desc.add_options()("marketRepairBlend",
-                     po::bool_switch()->default_value(false),
-                     "Enable blended market-aware repair score");
-  desc.add_options()("marketRepairNormalizeByObservedPrice",
-                     po::value<bool>()->default_value(true),
-                     "Normalize market shortlist prices by observed live price scale (fallback: price cap)");
-  for (const auto& spec : kMarketIntOptions) {
-    desc.add_options()(spec.name, po::value<int>()->default_value(spec.defaultValue),
-                       spec.description);
-  }
-  for (const auto& spec : kMarketDoubleOptions) {
-    desc.add_options()(spec.name,
-                       po::value<double>()->default_value(spec.defaultValue),
-                       spec.description);
-  }
-
-  // Backward compatibility: historically "-h <heuristic>" was used for
-  // destroy heuristic. We now reserve -h for help and remap legacy usage.
-  std::vector<std::string> normalizedArgs;
-  normalizedArgs.reserve((size_t)std::max(0, argc - 1));
-  for (int i = 1; i < argc; ++i) {
-    normalizedArgs.emplace_back(argv[i]);
-  }
-  bool usedLegacyDestroyHeuristicFlag = false;
-  for (size_t i = 0; i + 1 < normalizedArgs.size(); ++i) {
-    if (normalizedArgs[i] == "-h" && !normalizedArgs[i + 1].empty() &&
-        normalizedArgs[i + 1][0] != '-') {
-      normalizedArgs[i] = "--destroyHeuristic";
-      usedLegacyDestroyHeuristicFlag = true;
-    }
-  }
-
-  std::vector<const char*> parsedArgv;
-  parsedArgv.reserve(normalizedArgs.size() + 1);
-  parsedArgv.push_back(argv[0]);
-  for (const auto& arg : normalizedArgs) {
-    parsedArgv.push_back(arg.c_str());
-  }
-
   po::variables_map vm;
   try {
-    po::store(
-        po::parse_command_line((int)parsedArgv.size(), parsedArgv.data(), desc),
-        vm);
+    po::store(po::parse_command_line(argc, argv, desc), vm);
   } catch (const std::exception& e) {
     PLOGE << e.what() << "\n" << desc << "\n";
     return 1;
@@ -524,11 +283,6 @@ int main(int argc, char** argv) {
     PLOGD << desc << "\n";
     return 0;
   }
-  if (usedLegacyDestroyHeuristicFlag) {
-    PLOGW << "Using deprecated '-h <heuristic>' syntax for destroy heuristic. "
-             "Use '--destroyHeuristic' (or '-H') and reserve '-h' for help.\n";
-  }
-
   try {
     po::notify(vm);
   } catch (const std::exception& e) {
@@ -575,16 +329,6 @@ int main(int argc, char** argv) {
           << "\n";
     return 1;
   }
-  const double initialPortfolioTimeFraction =
-      vm["initialPortfolioTimeFraction"].as<double>();
-  if (!std::isfinite(initialPortfolioTimeFraction) ||
-      initialPortfolioTimeFraction < 0.0 ||
-      initialPortfolioTimeFraction > 1.0) {
-    PLOGE << "initialPortfolioTimeFraction must be finite and in [0, 1]\n";
-    return 1;
-  }
-  const bool adaptiveInitialPortfolioBudget =
-      vm["adaptiveInitialPortfolioBudget"].as<bool>();
   if (postRefineAssignmentSource != "solution" &&
       postRefineAssignmentSource != "log") {
     PLOGE << "postRefineAssignmentSource must be 'solution' or 'log'\n";
@@ -604,14 +348,6 @@ int main(int argc, char** argv) {
     PLOGE << "postRefineTimeoutSec must be positive\n";
     return 1;
   }
-  string goalOccupationMode = vm["goalOccupationMode"].as<string>();
-  if (goalOccupationMode != "stay" &&
-      goalOccupationMode != "reposition_true") {
-    PLOGE << "Incorrect goal occupation mode provided. Please choose from "
-             "'stay' and 'reposition_true'\n";
-    return 1;
-  }
-
   string destroyHeuristic = vm["destroyHeuristic"].as<string>();
   if (destroyHeuristic != "conflict" && destroyHeuristic != "worst" &&
       destroyHeuristic != "random" && destroyHeuristic != "shaw" &&
@@ -619,12 +355,11 @@ int main(int argc, char** argv) {
       destroyHeuristic != "low_slack" &&
       destroyHeuristic != "collision_soft" &&
       destroyHeuristic != "failure_soft" &&
-      destroyHeuristic != "market_tatonnement" &&
       destroyHeuristic != "alns") {
     PLOGE << "The destroy heuristic provided is not supported! Please choose "
              "from 'conflict', 'worst', 'random', 'shaw', 'precedence_wait', "
              "'low_slack', 'collision_soft', 'failure_soft', "
-             "'market_tatonnement' and 'alns' removal operators\n";
+             "and 'alns' removal operators\n";
     return 1;
   }
 
@@ -645,15 +380,9 @@ int main(int argc, char** argv) {
   const bool acceptOnlyValidCandidates =
       vm["acceptOnlyValidCandidates"].as<bool>();
   const string repairHeuristic = vm["repairHeuristic"].as<string>();
-  if (repairHeuristic != "regret" &&
-      repairHeuristic != "market_shortlist_regret" &&
-      repairHeuristic != "mapfpc_fixed" &&
-      repairHeuristic != "mapfpc_neighborhood_fixed" &&
-      repairHeuristic != "mapfpc_neighborhood_reassign_greedy") {
+  if (repairHeuristic != "regret") {
     PLOGE << "The repair heuristic provided is not supported! Please choose "
-             "from 'regret', 'market_shortlist_regret', 'mapfpc_fixed', and "
-             "'mapfpc_neighborhood_fixed', and "
-             "'mapfpc_neighborhood_reassign_greedy'\n";
+             "from 'regret'\n";
     return 1;
   }
   const bool enableNrrRepair = vm["enableNrrRepair"].as<bool>();
@@ -669,11 +398,6 @@ int main(int argc, char** argv) {
     PLOGE << "nrrMiniSolver must be 'pbs', 'cbs', or 'auto'\n";
     return 1;
   }
-  const string nrrCatBackend = vm["nrrCatBackend"].as<string>();
-  if (nrrCatBackend != "legacy" && nrrCatBackend != "pathtablewc") {
-    PLOGE << "nrrCatBackend must be 'legacy' or 'pathtablewc'\n";
-    return 1;
-  }
   const string repairMapfpcSolver = vm["repairMapfpcSolver"].as<string>();
   if (repairMapfpcSolver != "pbs" && repairMapfpcSolver != "cbs") {
     PLOGE << "repairMapfpcSolver must be 'pbs' or 'cbs'\n";
@@ -684,23 +408,10 @@ int main(int argc, char** argv) {
     PLOGE << "repairMapfpcTimeoutSec must be positive\n";
     return 1;
   }
-  const bool regretShortlistDiagnostics =
-      vm["regretShortlistDiagnostics"].as<bool>();
-
   string regretType = vm["regretType"].as<string>();
   if (regretType != "absolute" && regretType != "relative") {
     PLOGE << "The regret type provided is not supported! Please choose from "
              "'absolute' and 'relative' regret\n";
-    return 1;
-  }
-
-  const bool incrementalRegret = vm["incrementalRegret"].as<bool>();
-  const string incrementalRegretMode = vm["incrementalRegretMode"].as<string>();
-  if (incrementalRegret &&
-      incrementalRegretMode != "descendants" &&
-      incrementalRegretMode != "descendants+agent") {
-    PLOGE << "The incremental regret mode provided is not supported! Please "
-             "choose from 'descendants' and 'descendants+agent'\n";
     return 1;
   }
 
@@ -740,109 +451,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  LNSParams::Market marketCli;
-  marketCli.heuristics = vm["marketHeuristics"].as<bool>();
-  marketCli.updateOnAcceptedOnly = vm["marketUpdateOnAcceptedOnly"].as<bool>();
-  marketCli.updateFromCandidate = vm["marketUpdateFromCandidate"].as<bool>();
-  marketCli.acceptanceGuards = vm["marketAcceptanceGuards"].as<bool>();
-  marketCli.destroyRequireStable = vm["marketDestroyRequireStable"].as<bool>();
-  marketCli.destroySoftGate = vm["marketDestroySoftGate"].as<bool>();
-  marketCli.repairTieBreak = vm["marketRepairTieBreak"].as<bool>();
-  marketCli.repairBlend = vm["marketRepairBlend"].as<bool>();
-  marketCli.repairNormalizeByObservedPrice =
-      vm["marketRepairNormalizeByObservedPrice"].as<bool>();
-  for (const auto& spec : kMarketIntOptions) {
-    marketCli.*(spec.field) = vm[spec.name].as<int>();
-  }
-  for (const auto& spec : kMarketDoubleOptions) {
-    marketCli.*(spec.field) = vm[spec.name].as<double>();
-  }
-
-  if (marketCli.bucketDt <= 0) {
-    PLOGE << "marketBucketDt must be a positive integer\n";
-    return 1;
-  }
-  if (marketCli.vertexBucketCapacity <= 0 ||
-      marketCli.edgeBucketCapacity <= 0) {
-    PLOGE << "marketVertexBucketCapacity and marketEdgeBucketCapacity must be positive integers\n";
-    return 1;
-  }
-  if (marketCli.updatePeriodAccepted <= 0) {
-    PLOGE << "marketUpdatePeriodAccepted must be a positive integer\n";
-    return 1;
-  }
-  if (marketCli.eta < 0.0 || marketCli.priceCap < 0.0 ||
-      marketCli.priceInit < 0.0 ||
-      marketCli.gamma < 0.0) {
-    PLOGE << "marketEta, marketPriceCap, marketPriceInit and marketGamma "
-             "must be non-negative\n";
-    return 1;
-  }
-  if (marketCli.stabilityEmaAlpha < 0.0 || marketCli.stabilityEmaAlpha > 1.0) {
-    PLOGE << "marketStabilityEmaAlpha must be in [0, 1]\n";
-    return 1;
-  }
-  if (marketCli.stabilityMaxRelPriceDelta < 0.0 ||
-      marketCli.stabilityMaxTopMassDelta < 0.0) {
-    PLOGE << "marketStabilityMaxRelPriceDelta and marketStabilityMaxTopMassDelta must be non-negative\n";
-    return 1;
-  }
-  if (marketCli.destroyWarmupWeightScale < 0.0 ||
-      marketCli.destroyUnstableWeightScale < 0.0 ||
-      marketCli.destroyMinAlnsWeight < 0.0) {
-    PLOGE << "marketDestroyWarmupWeightScale, marketDestroyUnstableWeightScale and marketDestroyMinAlnsWeight must be non-negative\n";
-    return 1;
-  }
-  if (marketCli.stabilityMinContendedJaccard < 0.0 ||
-      marketCli.stabilityMinContendedJaccard > 1.0) {
-    PLOGE << "marketStabilityMinContendedJaccard must be in [0, 1]\n";
-    return 1;
-  }
-  if (marketCli.rho <= 0.0 || marketCli.rho >= 1.0) {
-    PLOGE << "marketRho must be strictly between 0 and 1\n";
-    return 1;
-  }
-  if (marketCli.seedTopFrac <= 0.0 || marketCli.seedTopFrac > 1.0) {
-    PLOGE << "marketSeedTopFrac must be in (0, 1]\n";
-    return 1;
-  }
-  if (marketCli.randomDestroyQuota < 0.0 ||
-      marketCli.randomDestroyQuota > 1.0) {
-    PLOGE << "marketRandomDestroyQuota must be in [0, 1]\n";
-    return 1;
-  }
-  if (marketCli.cooldownIters < 0 || marketCli.destroyWarmupUpdates < 0 ||
-      marketCli.dUp < 0 || marketCli.dDown < 0 || marketCli.closureCap < 0) {
-    PLOGE << "marketCooldownIters, marketDestroyWarmupUpdates, marketDUp, "
-             "marketDDown and marketClosureCap must be non-negative\n";
-    return 1;
-  }
-  if (marketCli.tieBreakEpsSoc < 0.0 || marketCli.lambdaPrice < 0.0 ||
-      marketCli.lambdaWait < 0.0) {
-    PLOGE << "marketTieBreakEpsSoc, marketLambdaPrice and marketLambdaWait must be non-negative\n";
-    return 1;
-  }
-  if (marketCli.destroyWeightPrice < 0.0 || marketCli.destroyWeightWait < 0.0 ||
-      marketCli.destroyWeightRoot < 0.0) {
-    PLOGE << "marketDestroyWeightPrice, marketDestroyWeightWait and "
-             "marketDestroyWeightRoot must be non-negative\n";
-    return 1;
-  }
-  if (destroyHeuristic == "market_tatonnement" && !marketCli.heuristics) {
-    PLOGE << "destroyHeuristic='market_tatonnement' requires "
-             "--marketHeuristics\n";
-    return 1;
-  }
-
   const int agentNum = vm["agentNum"].as<int>();
   const int taskNum = vm["taskNum"].as<int>();
   const int neighborSize = vm["neighborSize"].as<int>();
   const int maxIterations = vm["maxIterations"].as<int>();
-  const int regretCandidateTopK = vm["regretCandidateTopK"].as<int>();
-  const double maxCascadeFactor = vm["maxCascadeFactor"].as<double>();
-  const int maxCascadeTasks = vm["maxCascadeTasks"].as<int>();
-  const bool adaptiveCascadeBudget =
-      vm["adaptiveCascadeBudget"].as<bool>();
   const bool alnsEnablePrecedenceAwareDestroy =
       vm["alnsEnablePrecedenceAwareDestroy"].as<bool>();
   const bool softRecoveryDestroyMode =
@@ -863,19 +475,6 @@ int main(int argc, char** argv) {
     PLOGE << "maxIterations must be non-negative\n";
     return 1;
   }
-  if (regretCandidateTopK < 0) {
-    PLOGE << "regretCandidateTopK must be non-negative (0 means all positions)\n";
-    return 1;
-  }
-  if (!std::isfinite(maxCascadeFactor) || maxCascadeFactor < 0.0) {
-    PLOGE << "maxCascadeFactor must be finite and non-negative\n";
-    return 1;
-  }
-  if (maxCascadeTasks < 0) {
-    PLOGE << "maxCascadeTasks must be non-negative (0 uses factor formula)\n";
-    return 1;
-  }
-
   const double cutoffTime = vm["cutoffTime"].as<double>();
   if (!std::isfinite(cutoffTime) || cutoffTime < 0.0) {
     PLOGE << "cutoffTime must be finite and non-negative\n";
@@ -974,8 +573,6 @@ int main(int argc, char** argv) {
   coreInputs.lnsConflictWeight = lnsConflictWeight;
   coreInputs.lnsCostWeight = lnsCostWeight;
   coreInputs.initialSolutionStrategy = initialSolutionStrategy;
-  coreInputs.initialPortfolioTimeFraction = initialPortfolioTimeFraction;
-  coreInputs.adaptiveInitialPortfolioBudget = adaptiveInitialPortfolioBudget;
   coreInputs.initialSeedFromMapfpcLog = initialSeedFromMapfpcLog;
   coreInputs.postRefineWithMapfpc = postRefineWithMapfpc;
   coreInputs.postRefineAssignmentSource = postRefineAssignmentSource;
@@ -985,7 +582,6 @@ int main(int argc, char** argv) {
   coreInputs.postRefineAcceptOnlyIfBetter = postRefineAcceptOnlyIfBetter;
   coreInputs.debugImprovementDiagnostics = debugImprovementDiagnostics;
   coreInputs.debugIterationTsvPath = debugIterationTsvPath;
-  coreInputs.goalOccupationMode = goalOccupationMode;
   coreInputs.destroyHeuristic = destroyHeuristic;
   coreInputs.acceptanceCriteria = acceptanceCriteria;
   coreInputs.optimizationObjective = optimizationObjective;
@@ -997,21 +593,13 @@ int main(int argc, char** argv) {
   coreInputs.forceNeighborhoodChangeOnReject =
       forceNeighborhoodChangeOnReject;
   coreInputs.nrrMiniSolver = nrrMiniSolver;
-  coreInputs.nrrCatBackend = nrrCatBackend;
   coreInputs.repairMapfpcSolver = repairMapfpcSolver;
   coreInputs.repairMapfpcTimeoutSec = repairMapfpcTimeoutSec;
   coreInputs.regretType = regretType;
-  coreInputs.incrementalRegret = incrementalRegret;
-  coreInputs.regretCandidateTopK = regretCandidateTopK;
-  coreInputs.regretShortlistDiagnostics = regretShortlistDiagnostics;
-  coreInputs.maxCascadeFactor = maxCascadeFactor;
-  coreInputs.maxCascadeTasks = maxCascadeTasks;
-  coreInputs.adaptiveCascadeBudget = adaptiveCascadeBudget;
   coreInputs.alnsEnablePrecedenceAwareDestroy =
       alnsEnablePrecedenceAwareDestroy;
   coreInputs.softRecoveryDestroyMode = softRecoveryDestroyMode;
   coreInputs.softPersistentConflictGraph = softPersistentConflictGraph;
-  coreInputs.incrementalRegretMode = incrementalRegretMode;
   coreInputs.seed = seed;
 
   LNSParams::LowLevel lowLevelInputs{};
@@ -1021,8 +609,7 @@ int main(int argc, char** argv) {
   lowLevelInputs.segmentTimeout = lowLevelSegmentTimeout;
   lowLevelInputs.structuralPrePrune = lowLevelStructuralPrePrune;
 
-  LNSParams parameters =
-      buildLnsParams(coreInputs, lowLevelInputs, marketCli);
+  LNSParams parameters = buildLnsParams(coreInputs, lowLevelInputs);
   auto lnsInstance =
       std::make_unique<LNS>(maxIterations, instance, parameters);
   bool success = lnsInstance->run();
@@ -1040,8 +627,6 @@ int main(int argc, char** argv) {
       collectFeasibleTrajectoryStats(*lnsInstance, success);
   printAdaptiveLNSPerformance(*lnsInstance, destroyHeuristic);
   printFeasibleTrajectoryReport(feasibleStats);
-  printRunSummaryReport(*lnsInstance, anytimeSolution, success,
-                        parameters.market.heuristics, incrementalRegret,
-                        feasibleStats);
+  printRunSummaryReport(*lnsInstance, anytimeSolution, success, feasibleStats);
   return 0;
 }

@@ -1,17 +1,15 @@
 #include "lns_acceptance_orchestrator.hpp"
-#include "lns_market_iteration_orchestrator.hpp"
 
 #include <algorithm>
 #include <limits>
 
 AcceptanceDecisionResult AcceptanceOrchestrator::runDecision(
-    LNS& lns, bool candidateValid, double previousPressureForIter,
-    double previousWaitForIter, int previousConflictSignalForIter,
+    LNS& lns, bool candidateValid, int previousConflictSignalForIter,
     const std::vector<int>& candidateTouchedAgents,
     LNS::IterationDebugRecord& debugRow) {
   return lns.runAcceptanceDecision(
-      candidateValid, previousPressureForIter, previousWaitForIter,
-      previousConflictSignalForIter, candidateTouchedAgents, debugRow);
+      candidateValid, previousConflictSignalForIter, candidateTouchedAgents,
+      debugRow);
 }
 
 void AcceptanceOrchestrator::updateAlnsStats(
@@ -43,8 +41,8 @@ void AcceptanceOrchestrator::applyOutcome(
       candidateTouchedAgents, debugRow);
 }
 
-AcceptanceDecisionResult LNS::runAcceptanceDecision(bool candidateValid, double previousPressureForIter,
-    double previousWaitForIter, int previousConflictSignalForIter,
+AcceptanceDecisionResult LNS::runAcceptanceDecision(
+    bool candidateValid, int previousConflictSignalForIter,
     const std::vector<int>& candidateTouchedAgents,
     LNS::IterationDebugRecord& debugRow) {
   AcceptanceDecisionResult result;
@@ -181,20 +179,6 @@ AcceptanceDecisionResult LNS::runAcceptanceDecision(bool candidateValid, double 
     }
     advanceTemperatureOnGuardReject();
     PLOGD << "Rejecting this solution due to strict-valid acceptance guard\n";
-    return finalizeDecision(acceptanceStart);
-  }
-
-  const MarketGuardDecision guardDecision =
-      MarketIterationOrchestrator::evaluateGuards(
-          *this, previousPressureForIter, previousWaitForIter);
-  result.candidatePressure = guardDecision.candidatePressure;
-  result.candidateWait = guardDecision.candidateWait;
-  if (!guardDecision.allowed) {
-    restoreSolutionFromPrevious(candidateTouchedAgents);
-    result.accepted = false;
-    result.guardRejected = guardDecision.guardRejected;
-    advanceTemperatureOnGuardReject();
-    PLOGD << "Rejecting this solution due to market acceptance guards\n";
     return finalizeDecision(acceptanceStart);
   }
 
@@ -413,6 +397,4 @@ void LNS::applyAcceptanceOutcome(const AcceptanceDecisionResult& decisionResult,
   }
   currentSolutionValid = candidateValid;
   currentValidationStats = candidateValidationStats;
-  MarketIterationOrchestrator::updateBestOnAccepted(
-      *this, decisionResult.candidatePressure, decisionResult.candidateWait);
 }

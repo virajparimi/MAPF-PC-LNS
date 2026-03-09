@@ -727,24 +727,9 @@ bool LNS::runPostMAPFPCRefinement() {
     return false;
   }
 
-  if (isGoalOccupationRepositionTrue()) {
-    vector<int> allAgents(instance_.getAgentNum());
-    std::iota(allAgents.begin(), allAgents.end(), 0);
-    if (!planTerminalReposition(allAgents, true)) {
-      PLOGE << "post_refine_mapfpc: terminal reposition planning failed\n";
-      solution_ = previousSolution;
-      invalidateCurrentTaskAssignmentIndexCache();
-      incumbentSolution_ = previousIncumbent;
-      return false;
-    }
-  }
-
   ConflictMap potentialNeighborhood;
   ValidationStats validationStats;
-  const bool previousTerminalValidationFlag = useTerminalPathsInValidation_;
-  useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
   const bool valid = validateSolution(&potentialNeighborhood, &validationStats);
-  useTerminalPathsInValidation_ = previousTerminalValidationFlag;
   if (!valid) {
     PLOGE << "post_refine_mapfpc: refined solution failed validation\n";
     solution_ = previousSolution;

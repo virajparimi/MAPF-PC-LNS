@@ -16,12 +16,12 @@ class Instance {
   // Cache for non-task goal distance tables queried at runtime.
   // This cache is intentionally unsynchronized: Instance is used from a single
   // thread in the current LNS/CBS pipelines.
-  mutable unordered_map<int, std::shared_ptr<const vector<int>>>
+  mutable boost::unordered_map<int, std::shared_ptr<const vector<int>>>
       extraGoalHeuristicsCache_;
   static constexpr int kMaxExtraGoalHeuristicsCacheEntries = 2048;
   int numOfAgents_{}, numOfTasks_{};
   vector<int> endPoints_, taskLocations_, startLocations_, inputPlanningOrder_;
-  unordered_map<int, int> taskLocationToGlobalTask_;
+  boost::unordered_map<int, int> taskLocationToGlobalTask_;
   vector<vector<int>> ancestors_, successors_;
   vector<pair<int, int>> inputPrecedenceConstraints_;
 
@@ -60,15 +60,7 @@ class Instance {
     }
     return taskLocs;
   }
-  [[deprecated("Use getHeuristicsRef()")]] vector<vector<int>> getHeuristics() {
-    return heuristics_;
-  }
   inline const vector<vector<int>>& getHeuristicsRef() const { return heuristics_; }
-  [[deprecated("Use getHeuristicsRef(int)")]] vector<int> getHeuristics(
-      int globalTask) {
-    validateTaskIndex(globalTask, "Instance::getHeuristics");
-    return heuristics_[globalTask];
-  }
   inline const vector<int>& getHeuristicsRef(int globalTask) const {
     validateTaskIndex(globalTask, "Instance::getHeuristicsRef");
     return heuristics_[globalTask];
@@ -113,58 +105,23 @@ class Instance {
   inline int getCols() const { return numOfCols; }
   inline int getAgentNum() const { return numOfAgents_; }
   inline int getTasksNum() const { return numOfTasks_; }
-  [[deprecated("Use getTaskLocationsRef()")]] inline vector<int>
-  getTaskLocations() const {
-    return taskLocations_;
-  }
   inline const vector<int>& getStartLocationsRef() const { return startLocations_; }
-  [[deprecated("Use getStartLocationsRef()")]] inline vector<int>
-  getStartLocations() const {
-    return startLocations_;
-  }
   inline const vector<pair<int, int>>& getInputPrecedenceConstraintsRef() const {
     return inputPrecedenceConstraints_;
   }
-  [[deprecated("Use getInputPrecedenceConstraintsRef()")]] inline vector<
-      pair<int, int>>
-  getInputPrecedenceConstraints() const {
-    return inputPrecedenceConstraints_;
-  }
   inline const vector<vector<int>>& getAncestorsRef() const { return ancestors_; }
-  [[deprecated("Use getAncestorsRef()")]] inline vector<vector<int>>
-  getAncestors() const {
-    return ancestors_;
-  }
   inline const vector<int>& getAncestorsRef(int globalTask) const {
     validateTaskIndex(globalTask, "Instance::getAncestorsRef");
     return ancestors_[globalTask];
   }
-  [[deprecated("Use getAncestorsRef(int)")]] inline vector<int> getAncestors(
-      int globalTask) const {
-    validateTaskIndex(globalTask, "Instance::getAncestors");
-    return ancestors_[globalTask];
-  }
   inline const vector<vector<int>>& getSuccessorsRef() const {
-    return successors_;
-  }
-  [[deprecated("Use getSuccessorsRef()")]] inline vector<vector<int>>
-  getSuccessors() const {
     return successors_;
   }
   inline const vector<int>& getSuccessorsRef(int globalTask) const {
     validateTaskIndex(globalTask, "Instance::getSuccessorsRef");
     return successors_[globalTask];
   }
-  [[deprecated("Use getSuccessorsRef(int)")]] inline vector<int> getSuccessors(
-      int globalTask) const {
-    validateTaskIndex(globalTask, "Instance::getSuccessors");
-    return successors_[globalTask];
-  }
   inline const vector<int>& getInputPlanningOrderRef() const {
-    return inputPlanningOrder_;
-  }
-  [[deprecated("Use getInputPlanningOrderRef()")]] inline vector<int>
-  getInputPlanningOrder() const {
     return inputPlanningOrder_;
   }
   inline int getManhattanDistance(int loc1, int loc2) const {

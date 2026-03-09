@@ -27,39 +27,14 @@ enum DestroyHeuristic {
   shawRemoval = 3,
   precedenceWaitRemoval = 4,
   lowSlackRemoval = 5,
-  marketTatonnementRemoval = 6,
-  collisionSoftRemoval = 7,
-  failureSoftRemoval = 8,
-  destroyHeuristicCount = 9
-};
-
-struct MarketStats {
-  int64_t updates = 0;
-  int64_t destroyWarmupSkipped = 0;
-  int64_t destroyUnstableSkipped = 0;
-  int64_t contendedResources = 0;
-  double meanPriceContended = 0.0;
-  double maxPrice = 0.0;
-  double topPriceMassFrac = 0.0;
-  double priceRelL1Delta = 0.0;
-  double priceRelL1DeltaEma = 0.0;
-  double topPriceMassDelta = 0.0;
-  double topPriceMassDeltaEma = 0.0;
-  double contendedJaccard = 1.0;
-  double contendedJaccardEma = 1.0;
-  double totalPrecedenceWait = 0.0;
-  double maxPrecedenceWait = 0.0;
-
-  void reset() { *this = MarketStats(); }
+  collisionSoftRemoval = 6,
+  failureSoftRemoval = 7,
+  destroyHeuristicCount = 8
 };
 
 struct Agent {
   int id;
   AgentTaskPath path;
-  // Optional post-completion trajectory (move-out/wait/return) used by
-  // true-reposition modes. In Phase A this is plumbing only.
-  AgentTaskPath terminalPath;
-  bool terminalPathActive = false;
   vector<int> taskAssignments;
   vector<AgentTaskPath> taskPaths;
   vector<pair<int, int>> intraPrecedenceConstraints;
@@ -77,8 +52,6 @@ struct Agent {
   Agent(const Agent& other)
       : id(other.id),
         path(other.path),
-        terminalPath(other.terminalPath),
-        terminalPathActive(other.terminalPathActive),
         taskAssignments(other.taskAssignments),
         taskPaths(other.taskPaths),
         intraPrecedenceConstraints(other.intraPrecedenceConstraints),
@@ -93,8 +66,6 @@ struct Agent {
     const int oldId = id;
     id = other.id;
     path = other.path;
-    terminalPath = other.terminalPath;
-    terminalPathActive = other.terminalPathActive;
     taskPaths = other.taskPaths;
     taskAssignments = other.taskAssignments;
     intraPrecedenceConstraints = other.intraPrecedenceConstraints;
@@ -217,8 +188,6 @@ struct Utility {
   int pathLength, agentTasksLen;
   double value;
   double baseDeltaSoc;
-  double deltaMarketExposure;
-  double deltaPrecedenceWait;
 
   Utility() {
     agent = -1;
@@ -227,22 +196,16 @@ struct Utility {
     agentTasksLen = -1;
     value = std::numeric_limits<double>::max();
     baseDeltaSoc = 0.0;
-    deltaMarketExposure = 0.0;
-    deltaPrecedenceWait = 0.0;
   }
 
   Utility(int agent, int taskPosition, int pathLength, int agentTasksLen,
-          double value, double baseDeltaSoc = 0.0,
-          double deltaMarketExposure = 0.0,
-          double deltaPrecedenceWait = 0.0)
+          double value, double baseDeltaSoc = 0.0)
       : agent(agent),
         taskPosition(taskPosition),
         pathLength(pathLength),
         agentTasksLen(agentTasksLen),
         value(value),
-        baseDeltaSoc(baseDeltaSoc),
-        deltaMarketExposure(deltaMarketExposure),
-        deltaPrecedenceWait(deltaPrecedenceWait) {}
+        baseDeltaSoc(baseDeltaSoc) {}
 
   struct CompareUtilities {
     static int64_t quantizeValue(double value) {

@@ -1,7 +1,5 @@
   ALNS adaptiveLNS_;
   int neighborSize_;
-  int regretCandidateTopK_ = 0;
-  bool regretShortlistDiagnostics_ = false;
   struct SuccessorPressureStaticSignal {
     int successorTask = UNASSIGNED;
     int depth = 1;
@@ -9,11 +7,6 @@
   vector<vector<SuccessorPressureStaticSignal>>
       successorPressureStaticSignalsByTask_;
   struct CascadeState {
-    double maxFactor = 0.0;
-    int maxTasks = 0;
-    bool adaptiveBudgetEnabled = false;
-    int adaptiveBudgetCurrent = 0;
-    int adaptiveBudgetLastUsed = 0;
     bool lastPrepareAborted = false;
     int lastPrepareSeedTasks = 0;
     int lastPrepareClosureTasks = 0;
@@ -23,7 +16,6 @@
   };
   CascadeState cascadeState_;
   bool alnsEnablePrecedenceAwareDestroy_ = true;
-  bool useTerminalPathsInValidation_ = false;
   SolutionRestoreStats solutionRestoreStats_;
   ImprovementDiagnosticsStats improvementDiagnosticsStats_;
   vector<pair<int, int>> fullPrecedenceConstraintsScratch_;
@@ -60,7 +52,7 @@
     double heatingCoefficient = 1.00025;
     double maxTemperature = std::numeric_limits<double>::infinity();
     double greatDelugeDecay = 0.0;
-    unordered_set<uint64_t> acceptedSolutionFingerprints;
+    boost::unordered_set<uint64_t> acceptedSolutionFingerprints;
   };
   AcceptanceState acceptanceState_;
   double timeLimit_, initialSolutionRuntime_ = 0,
@@ -75,12 +67,6 @@
   string optimizationObjective_ = "soc";
   OptimizationObjectiveMode optimizationObjectiveMode_ =
       OptimizationObjectiveMode::soc;
-  string goalOccupationMode_ = "reposition_true";
-  GoalOccupationMode goalOccupationModeMode_ = GoalOccupationMode::reposition_true;
-  // SINGLE-THREADED ONLY: mutable cache updated from const accessors.
-  // Not safe for concurrent reads/writes without external synchronization.
-  mutable unordered_map<int, vector<int>> parkingCandidatesCache_;
-  TerminalRepositionStats terminalRepositionStats_;
   string initialSolutionRequested_;
   string initialSolutionEffective_;
   bool initialSolutionFallbackUsed_ = false;
@@ -95,8 +81,6 @@
   vector<vector<int>> initialAssignmentsByAgent_;
   vector<int> initialTaskOwnerByTask_;
   vector<int> initialTaskPosByTask_;
-  double initialPortfolioTimeFraction_ = 0.10;
-  bool adaptiveInitialPortfolioBudget_ = false;
   string initialSeedFromMapfpcLog_;
   // SINGLE-THREADED ONLY: mutable assignment-index caches updated from const
   // query paths. Not thread-safe without external synchronization.
@@ -129,7 +113,6 @@
   SoftRecoveryState softRecoveryState_;
   string nrrMiniSolver_ = "cbs";
   NrrMiniSolverMode nrrMiniSolverMode_ = NrrMiniSolverMode::cbs;
-  string nrrCatBackend_ = "pathtablewc";
   NrrStats nrrStats_;
   bool lastNrrSoftCandidate_ = false;
   int64_t lastNrrSoftConflictCount_ = -1;

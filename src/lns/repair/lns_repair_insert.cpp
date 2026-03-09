@@ -23,13 +23,13 @@ std::variant<bool, Utility> LNS::insertTask(
     const vector<int>* assignmentPosLookupArg,
     const vector<int>* previousAssignmentOwnerLookupArg,
     const vector<int>* previousAssignmentPosLookupArg) {
+  (void)baselineMetrics;
   if (runtimeBudgetExhausted()) {
     return false;
   }
 
   double pathSizeChange = 0;
   int startTime = 0, previousTask = UNDEFINED, nextTask = UNDEFINED;
-  int insertedTaskPosition = UNASSIGNED;
   const int taskCount = instance_.getTasksNum();
   if (regretPacket.task < 0 || regretPacket.task >= taskCount) {
     PLOGE << "insertTask: invalid task id " << regretPacket.task
@@ -784,7 +784,6 @@ std::variant<bool, Utility> LNS::insertTask(
             << " not found in agent " << regretPacket.agent << " queue\n";
       return false;
     }
-    insertedTaskPosition = taskPosition;
     vector<int> goalLocations =
         instance_.getTaskLocations(assignmentsFor(regretPacket.agent));
     if (taskPosition < 0 || taskPosition >= (int)goalLocations.size()) {
@@ -927,7 +926,6 @@ std::variant<bool, Utility> LNS::insertTask(
                            std::move(path))) {
       return false;
     }
-    insertedTaskPosition = regretPacket.taskPosition;
     value = pathSize;
   }
 
@@ -942,46 +940,10 @@ std::variant<bool, Utility> LNS::insertTask(
   const double baseDeltaSoc =
       value - (lnsNeighborhood_.removedTasksPathSize[regretPacket.task] +
                pathSizeChange);
-  double adjustedValue = baseDeltaSoc;
-  double deltaExposure = 0.0;
-  double deltaWait = 0.0;
-
-  if (market_.repairTieBreak || market_.repairBlend) {
-    const int task = regretPacket.task;
-    const int taskLocation = instance_.getTaskLocations(task);
-    const double oldExposure =
-        (baselineMetrics != nullptr && baselineMetrics->valid)
-            ? baselineMetrics->oldExposure
-            : computeTaskMarketExposure(task, true);
-    const int oldWait =
-        (baselineMetrics != nullptr && baselineMetrics->valid)
-            ? baselineMetrics->oldWait
-            : computeTaskPrecedenceWaitInCurrentSolution(task);
-
-    if (insertedTaskPosition >= 0 &&
-        insertedTaskPosition < (int)taskPathsFor(regretPacket.agent).size()) {
-      const AgentTaskPath& insertedTaskPath =
-          taskPathsFor(regretPacket.agent)[insertedTaskPosition];
-      const double newExposure =
-          computeMarketExposureFromPath(insertedTaskPath, true);
-      const int newWait =
-          computeTaskPrecedenceWaitFromWorkspace(
-              task, taskLocation, workspace, assignmentOwnerLookup,
-              assignmentPosLookup);
-      deltaExposure = newExposure - oldExposure;
-      deltaWait = (double)newWait - (double)oldWait;
-    }
-
-    const bool applyTieBreak =
-        std::abs(baseDeltaSoc) <= market_.tieBreakEpsSoc;
-    if (applyTieBreak) {
-      adjustedValue +=
-          market_.lambdaPrice * deltaExposure + market_.lambdaWait * deltaWait;
-    }
-  }
+  const double adjustedValue = baseDeltaSoc;
 
   Utility utility(regretPacket.agent, regretPacket.taskPosition, (int)pathLength,
                   (int)assignmentsFor(regretPacket.agent).size(),
-                  adjustedValue, baseDeltaSoc, deltaExposure, deltaWait);
+                  adjustedValue, baseDeltaSoc);
   return utility;
 }

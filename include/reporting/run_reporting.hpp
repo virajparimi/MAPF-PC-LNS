@@ -24,6 +24,5 @@ void printAdaptiveLNSPerformance(const LNS& lns,
                                  const std::string& destroyHeuristic);
 void printFeasibleTrajectoryReport(const FeasibleTrajectoryStats& stats);
 void printRunSummaryReport(const LNS& lns, const FeasibleSolution& solution,
-                           bool success, bool marketHeuristics,
-                           bool incrementalRegret,
+                           bool success,
                            const FeasibleTrajectoryStats& stats);

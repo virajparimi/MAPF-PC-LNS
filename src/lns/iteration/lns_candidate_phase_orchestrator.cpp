@@ -132,23 +132,7 @@ CandidatePhaseResult LNS::runCandidatePhase(
   }
   result.timeJoinPathsSec += elapsedSecSince(joinStart);
 
-  if (isGoalOccupationRepositionTrue()) {
-    const std::vector<int> terminalReplanAgents =
-        selectTerminalReplanAgents(agentsToCompute);
-    if (!terminalReplanAgents.empty()) {
-      for (int agent : terminalReplanAgents) {
-        markTouched(agent);
-      }
-      const Time::time_point terminalStart = Time::now();
-      const bool terminalOk =
-          planTerminalReposition(terminalReplanAgents, false);
-      result.timeTerminalReplanSec += elapsedSecSince(terminalStart);
-      if (!terminalOk) {
-        result.status = CandidatePhaseStatus::terminal_failed;
-        return result;
-      }
-    }
-  }
+  // Goal occupation mode is fixed to stay; no terminal reposition phase.
 
   const Time::time_point recomputeSocStart = Time::now();
   long long recomputedSoc = 0;
@@ -187,11 +171,9 @@ CandidatePhaseResult LNS::runCandidatePhase(
   potentialNeighborhood.clear();
   LNS::ValidationStats candidateValidationStats;
   std::vector<std::pair<int, int>> candidateCollisionPairs;
-  useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
   result.candidateValid =
       validateSolution(&potentialNeighborhood, &candidateValidationStats,
                            &candidateCollisionPairs);
-  useTerminalPathsInValidation_ = false;
   std::sort(candidateCollisionPairs.begin(), candidateCollisionPairs.end());
   candidateCollisionPairs.erase(
       std::unique(candidateCollisionPairs.begin(), candidateCollisionPairs.end()),

@@ -16,10 +16,10 @@ class ConstraintTable {
     map<int, int> counts;
   };
 
-  unordered_map<uint64_t, IntervalBucket>
+  boost::unordered_map<uint64_t, IntervalBucket>
       constraintTable_;  // (key, value) - (location/edge key, occupied time intervals)
-  unordered_map<uint64_t, SoftTimelineBucket> softConflictTable_;
-  unordered_map<int, vector<int>> softGoalOccupancyStarts_;
+  boost::unordered_map<uint64_t, SoftTimelineBucket> softConflictTable_;
+  boost::unordered_map<int, vector<int>> softGoalOccupancyStarts_;
 
   void normalizeIntervals(IntervalBucket& bucket);
   void insertMergedInterval(IntervalBucket& bucket, int tMin, int tMax);

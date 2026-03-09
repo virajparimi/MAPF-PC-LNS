@@ -135,7 +135,7 @@ bool LNS::writeIterationDebugTsv(const string& outputPath) const {
          "time_destroy_prepare_s\ttime_repair_commit_s\t"
          "time_regret_candidate_eval_s\ttime_regret_commit_s\t"
          "time_regret_low_level_s\ttime_join_s\t"
-         "time_terminal_replan_s\ttime_recompute_soc_s\ttime_validation_s\t"
+         "time_recompute_soc_s\ttime_validation_s\t"
          "time_acceptance_s\ttime_bookkeeping_s\n";
 
   std::ios::fmtflags oldFlags = out.flags();
@@ -182,7 +182,6 @@ bool LNS::writeIterationDebugTsv(const string& outputPath) const {
         << row.timeRegretCommitSec << '\t'
         << row.timeRegretLowLevelSec << '\t'
         << row.timeJoinPathsSec << '\t'
-        << row.timeTerminalReplanSec << '\t'
         << row.timeRecomputeSocSec << '\t'
         << row.timeValidationSec << '\t'
         << row.timeAcceptanceSec << '\t'
@@ -196,12 +195,10 @@ bool LNS::writeIterationDebugTsv(const string& outputPath) const {
 
 bool LNS::run() {
   constexpr double kPortfolioMinArmTimeSec = 1.0;
-  constexpr double kAdaptivePortfolioMinFraction = 0.05;
-  constexpr double kAdaptivePortfolioMaxFraction = 0.35;
+  constexpr double kPortfolioBudgetFraction = 0.10;
 
   invalidateCurrentTaskAssignmentIndexCache();
   invalidCandidateRejections = 0;
-  marketGuardRejections = 0;
   improvementDiagnosticsStats_.reset();
   initialSolutionRuntime_ = 0.0;
   initialSolutionRuntimeReported_ = 0.0;
@@ -355,8 +352,6 @@ bool LNS::run() {
       dstAgent.taskAssignments = snapshot.agentTaskAssignments[agent];
       dstAgent.taskPaths = snapshot.agentTaskPaths[agent];
       dstAgent.path = snapshot.agentPaths[agent];
-      dstAgent.terminalPath = AgentTaskPath();
-      dstAgent.terminalPathActive = false;
       dstAgent.intraPrecedenceConstraints.clear();
       dstAgent.intraPrecedenceDirty = true;
       if (dstAgent.pathPlanner == nullptr) {
@@ -470,26 +465,7 @@ bool LNS::run() {
           << ", precedence_edges=" << precedenceCount << ")\n";
 
     const bool singleArmPortfolio = (portfolioArms.size() == 1);
-    double portfolioBudgetFraction = initialPortfolioTimeFraction_;
-    if (adaptiveInitialPortfolioBudget_) {
-      if (initialPortfolioTimeFraction_ <= 0.0) {
-        portfolioBudgetFraction = 0.0;
-      } else {
-        if (std::isfinite(difficultyScale)) {
-          portfolioBudgetFraction = std::clamp(
-              initialPortfolioTimeFraction_ * difficultyScale,
-              kAdaptivePortfolioMinFraction,
-              kAdaptivePortfolioMaxFraction);
-        } else {
-          portfolioBudgetFraction = initialPortfolioTimeFraction_;
-        }
-      }
-      PLOGI << "adaptiveInitialPortfolioBudget enabled: base_fraction="
-            << initialPortfolioTimeFraction_ << ", effective_fraction="
-            << portfolioBudgetFraction << " (agents=" << agentCount
-            << ", tasks=" << taskCount << ", precedence_edges="
-            << precedenceCount << ")\n";
-    }
+    const double portfolioBudgetFraction = kPortfolioBudgetFraction;
     const double remainingBudget = remainingRuntimeBudgetSec();
     double portfolioBudgetSec = 0.0;
     if (singleArmPortfolio) {
@@ -556,12 +532,8 @@ bool LNS::run() {
         armObjective = currentObjectiveValue();
         ValidationStats armValidationStats;
         ConflictMap armPotentialNeighborhood;
-        const bool previousTerminalValidationFlag =
-            useTerminalPathsInValidation_;
-        useTerminalPathsInValidation_ = false;
         armFeasible = validateSolution(&armPotentialNeighborhood,
                                        &armValidationStats);
-        useTerminalPathsInValidation_ = previousTerminalValidationFlag;
         if (armFeasible) {
           feasiblePortfolioCandidates.emplace_back(
               arm, armObjective, captureFeasibleSnapshotFromCurrent());
@@ -598,23 +570,12 @@ bool LNS::run() {
           continue;
         }
         bool candidateFeasible = false;
-        if (isGoalOccupationRepositionTrue()) {
-          vector<int> allAgents(instance_.getAgentNum());
-          std::iota(allAgents.begin(), allAgents.end(), 0);
-          if (!planTerminalReposition(allAgents, true)) {
-            continue;
-          }
-          terminalPreparedDuringPortfolio = true;
-        }
+        terminalPreparedDuringPortfolio = false;
 
         ValidationStats validationStats;
         ConflictMap potentialNeighborhood;
-        const bool previousTerminalValidationFlag =
-            useTerminalPathsInValidation_;
-        useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
         candidateFeasible =
             validateSolution(&potentialNeighborhood, &validationStats);
-        useTerminalPathsInValidation_ = previousTerminalValidationFlag;
 
         if (candidateFeasible) {
           bestPortfolioArm = candidate.arm;
@@ -670,26 +631,14 @@ bool LNS::run() {
         << ", Runtime(reported) = " << initialSolutionRuntimeReported_
         << "\n";
 
-  if (isGoalOccupationRepositionTrue() &&
-      !terminalPreparedDuringPortfolio) {
-    vector<int> allAgents(instance_.getAgentNum());
-    std::iota(allAgents.begin(), allAgents.end(), 0);
-    if (!planTerminalReposition(allAgents, true)) {
-      PLOGE << "run: true terminal reposition planning failed during "
-               "initialization\n";
-      flushDebugTsv();
-      return false;
-    }
-  }
+  (void)terminalPreparedDuringPortfolio;
 
   ConflictMap potentialNeighborhood;  // Need for the conflict removal case
   ValidationStats currentValidationStats;
   vector<pair<int, int>> initialCollisionPairs;
-  useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
   bool currentSolutionValid =
       validateSolution(&potentialNeighborhood, &currentValidationStats,
                        &initialCollisionPairs);
-  useTerminalPathsInValidation_ = false;
   std::sort(initialCollisionPairs.begin(), initialCollisionPairs.end());
   initialCollisionPairs.erase(
       std::unique(initialCollisionPairs.begin(), initialCollisionPairs.end()),
@@ -767,14 +716,6 @@ bool LNS::run() {
     initialObjectiveValue_ = currentObjectiveValue();
     initialPrecedenceWait_ = computeSolutionPrecedenceWait();
     initialMetricsAvailable_ = true;
-  }
-
-  if (market_.heuristics) {
-    updateMarketStateFromCurrentSolution();
-    if (currentSolutionValid) {
-      market_.bestPressure = computeSolutionMarketPressure();
-      market_.bestWait = computeSolutionPrecedenceWait();
-    }
   }
 
   bool checkpointHasFeasible = false;

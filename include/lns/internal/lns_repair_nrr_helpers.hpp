@@ -51,8 +51,7 @@ class NrrFrozenOccupancyIndex {
  public:
   void clear();
   void buildFromPreviousSolution(const Instance& instance,
-                                 const Solution& previousSolution,
-                                 bool stayGoalOccupationMode);
+                                 const Solution& previousSolution);
   bool isVertexConstrained(int location, int timestep) const;
   bool isEdgeConstrained(int fromLocation, int toLocation,
                          int nextTimestep) const;

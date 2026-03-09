@@ -1,7 +1,6 @@
 #include "lns_iteration_outcome_orchestrator.hpp"
 
 #include "lns.hpp"
-#include "lns_market_iteration_orchestrator.hpp"
 
 bool IterationOutcomeOrchestrator::finalizeCouldNotFindAbort(
     LNS& lns, const std::string& reason, bool restorePrevious,
@@ -29,6 +28,5 @@ bool LNS::finalizeCouldNotFindAbort(
   if (acceptanceState_.forceNeighborhoodChangeOnReject) {
     potentialNeighborhood.clear();
   }
-  MarketIterationOrchestrator::finalize(*this, false);
   return true;
 }

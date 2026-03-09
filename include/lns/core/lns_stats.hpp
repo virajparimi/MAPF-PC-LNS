@@ -37,39 +37,6 @@ struct RegretEvalStats {
   int64_t agentEvaluations = 0;
   int64_t candidateInsertionsTried = 0;
   int64_t candidateInsertionsFeasible = 0;
-  int64_t shortlistAgentEvaluations = 0;
-  int64_t shortlistFallbackEvaluations = 0;
-  int64_t shortlistFallbackRecovered = 0;
-  int64_t waitProxyDiagEvaluations = 0;
-  int64_t waitProxyDiagFiniteCandidates = 0;
-  int64_t waitProxyDiagNonZeroCandidates = 0;
-  int64_t waitProxyDiagPositiveEvals = 0;
-  int64_t waitProxyDiagVaryingEvals = 0;
-  int64_t waitProxyDiagNormalizedActiveEvals = 0;
-  int64_t waitProxyDiagTop1Changed = 0;
-  int64_t waitProxyDiagTopKChanged = 0;
-  double waitProxyDiagTopKOverlapFracSum = 0.0;
-  double waitProxyDiagMeanAbsWaitZSum = 0.0;
-  double waitProxyDiagMeanAbsDistanceZSum = 0.0;
-  int64_t successorPressureDiagEvaluations = 0;
-  int64_t successorPressureDiagFiniteCandidates = 0;
-  int64_t successorPressureDiagNonZeroCandidates = 0;
-  int64_t successorPressureDiagPositiveEvals = 0;
-  int64_t successorPressureDiagVaryingEvals = 0;
-  int64_t successorPressureDiagNormalizedActiveEvals = 0;
-  int64_t successorPressureDiagTop1Changed = 0;
-  int64_t successorPressureDiagTopKChanged = 0;
-  double successorPressureDiagTopKOverlapFracSum = 0.0;
-  double successorPressureDiagMeanAbsPressureZSum = 0.0;
-  double successorPressureDiagMeanAbsDistanceZSum = 0.0;
-  int64_t successorPressureDiagPrevFallbackCount = 0;
-  int64_t successorPressureDiagPrecedenceClampCount = 0;
-  double successorPressureDiagPrecedenceClampDeltaSum = 0.0;
-  int64_t successorPressureDiagDepth1Signals = 0;
-  int64_t successorPressureDiagDepthGt1Signals = 0;
-  int64_t successorPressureDiagDescendantActiveEvals = 0;
-  double successorPressureDiagMeanDepth1ContributionSum = 0.0;
-  double successorPressureDiagMeanDepthGt1ContributionSum = 0.0;
   int64_t workspaceAgentsCloned = 0;
   int64_t workspaceMaxClonedPerTask = 0;
   int64_t neighborhoods = 0;
@@ -77,30 +44,6 @@ struct RegretEvalStats {
   int64_t removedTasksMax = 0;
 
   void reset() { *this = RegretEvalStats(); }
-};
-
-struct IncrementalRegretStats {
-  int64_t commits = 0;
-  int64_t heapRebuilds = 0;
-  int64_t fullRefreshes = 0;
-  int64_t stalePops = 0;
-  int64_t recomputeCalls = 0;
-  int64_t recomputedTasks = 0;
-  int64_t dirtySum = 0;
-  int64_t dirtyMax = 0;
-  int64_t changedSum = 0;
-  int64_t changedMax = 0;
-  int64_t changedAgentsSum = 0;
-  int64_t changedAgentsMax = 0;
-  int64_t dirtyByDescendants = 0;
-  int64_t dirtyByCandidateAgent = 0;
-  int64_t dirtyByAncestors = 0;
-  int64_t refreshByHighStale = 0;
-  int64_t refreshByStaleGrowth = 0;
-  int64_t refreshByPeriodic = 0;
-  int64_t endgameFullRecomputes = 0;
-
-  void reset() { *this = IncrementalRegretStats(); }
 };
 
 struct NrrStats {
@@ -171,8 +114,6 @@ struct CascadeStats {
   int64_t budgetUsedSum = 0;
   int64_t budgetUsedMin = std::numeric_limits<int64_t>::max();
   int64_t budgetUsedMax = 0;
-  int64_t adaptiveBudgetIncreases = 0;
-  int64_t adaptiveBudgetDecreases = 0;
   int64_t seedTasksSum = 0;
   int64_t closureTasksSum = 0;
   int64_t closureAddedSum = 0;
@@ -180,18 +121,6 @@ struct CascadeStats {
   int64_t closureAddedMax = 0;
 
   void reset() { *this = CascadeStats(); }
-};
-
-struct TerminalRepositionStats {
-  int64_t replansRequested = 0;
-  int64_t agentsEvaluated = 0;
-  int64_t agentsPlanned = 0;
-  int64_t skippedNoDemand = 0;
-  int64_t planningFailures = 0;
-  int64_t candidateCacheHits = 0;
-  int64_t candidateCacheMisses = 0;
-
-  void reset() { *this = TerminalRepositionStats(); }
 };
 
 struct SolutionRestoreStats {
@@ -206,7 +135,6 @@ struct ImprovementDiagnosticsStats {
   int64_t earlyAbortPrepare = 0;
   int64_t earlyAbortRepair = 0;
   int64_t earlyAbortJoin = 0;
-  int64_t earlyAbortTerminal = 0;
 
   int64_t candidateValid = 0;
   int64_t candidateInvalid = 0;
@@ -292,7 +220,6 @@ struct ImprovementDiagnosticsStats {
   double timeRegretCommitSec = 0.0;
   double timeRegretLowLevelSec = 0.0;
   double timeJoinPathsSec = 0.0;
-  double timeTerminalReplanSec = 0.0;
   double timeRecomputeSocSec = 0.0;
   double timeValidationSec = 0.0;
   double timeAcceptanceSec = 0.0;
@@ -346,7 +273,6 @@ struct IterationDebugRecord {
   double timeRegretCommitSec = 0.0;
   double timeRegretLowLevelSec = 0.0;
   double timeJoinPathsSec = 0.0;
-  double timeTerminalReplanSec = 0.0;
   double timeRecomputeSocSec = 0.0;
   double timeValidationSec = 0.0;
   double timeAcceptanceSec = 0.0;

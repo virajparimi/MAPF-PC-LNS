@@ -15,16 +15,6 @@ struct DestroySamplingContext {
   bool alnsEnablePrecedenceAwareDestroy;
   bool softRecoveryDestroyModeEnabled;
   bool softRecoveryActive;
-
-  bool marketHeuristicsEnabled;
-  bool marketDestroySoftGate;
-  bool marketWarmupReady;
-  bool marketStableReady;
-  double marketDestroyWarmupWeightScale;
-  double marketDestroyUnstableWeightScale;
-  double marketDestroyMinAlnsWeight;
-  int64_t& marketDestroyWarmupSkipped;
-  int64_t& marketDestroyUnstableSkipped;
 };
 
 class DestroyOrchestrator {

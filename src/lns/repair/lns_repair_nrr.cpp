@@ -23,6 +23,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   // 2) Build regret-biased slot matching proposal (Hungarian).
   // 3) Mini-solve, stitch neighborhood, and globally validate.
   namespace fs = std::filesystem;
+  static constexpr const char* kNrrCatBackend = "pathtablewc";
   const Time::time_point attemptStart = Time::now();
   const bool collectNrrDetailedTiming = []() {
     const char* timingLevel = std::getenv("MAPF_PC_TIMING_LEVEL");
@@ -306,11 +307,6 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
         return fail("frozen_agent_missing_path");
       }
       reservePathWithGoalPolicy(frozenCt, path, true, false);
-      if (isGoalOccupationRepositionTrue() &&
-          previousSolution_.agents[agent].terminalPathActive &&
-          !previousSolution_.agents[agent].terminalPath.empty()) {
-        frozenCt.addPath(previousSolution_.agents[agent].terminalPath, true);
-      }
     }
   }
 
@@ -371,8 +367,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
         }
       }
       lns_nrr_helpers::NrrFrozenOccupancyIndex frozenOccupancy;
-      frozenOccupancy.buildFromPreviousSolution(
-          instance_, previousSolution_, isGoalOccupationStay());
+      frozenOccupancy.buildFromPreviousSolution(instance_, previousSolution_);
       if (!lns_nrr_helpers::buildIterativeProposalGlobal(
               instance_, numAgents, numTasks, destroyedTasks, destroyedMask,
               candidateAgents, mutableAgents, incumbentTaskOwnerByTask,
@@ -658,7 +653,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     }
     manifest << "seed=" << seed_ << "\n";
     manifest << "mini_solver=" << miniSolver << "\n";
-    manifest << "cat_backend=" << nrrCatBackend_ << "\n";
+    manifest << "cat_backend=" << kNrrCatBackend << "\n";
     manifest << "global_reassign_mode=" << (useGlobalReassign ? 1 : 0) << "\n";
     manifest << "destroyed_count=" << destroyedTasks.size() << "\n";
     manifest << "destroyed_tasks=";
@@ -741,7 +736,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
         << ", neighborhood_agents=" << mutableAgents.size()
         << ", frozen_agents=" << frozenAgents.size()
         << ", mini_solver=" << miniSolver
-        << ", cat_backend=" << nrrCatBackend_
+        << ", cat_backend=" << kNrrCatBackend
         << ", timeout_sec=" << solverTimeoutSec << ")\n";
 
   const Time::time_point miniSolverStart = Time::now();
@@ -751,7 +746,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
       instance_.getAgentTaskFName(), miniSolver, solverTimeoutSec, sourceLabel,
       assignmentPath.string(), mutableAgentsPath.string(),
       initialPathsPath.string(), mutableTasksPath.string(), "sipps",
-      nrrCatBackend_, 1);
+      kNrrCatBackend, 1);
   if (keepNrrInputs) {
     PLOGE << "nrr_repair: kept inputs for verification: manifest='"
           << manifestPath.string() << "' assignment='"
@@ -778,19 +773,17 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   // Compute mutable-vs-frozen soft conflicts under existing occupancy
   // semantics. Classification against full validation happens below.
   auto countCrossSetConflicts = [&](const vector<int>& mutableAgentsSet,
-                                    const vector<int>& frozenAgentsSet,
-                                    bool includeTerminal) -> int64_t {
+                                    const vector<int>& frozenAgentsSet)
+      -> int64_t {
     int64_t conflicts = 0;
     for (int mutableAgent : mutableAgentsSet) {
       for (int frozenAgent : frozenAgentsSet) {
         const int horizon = std::max(
-            getAgentOccupancyHorizon(mutableAgent, includeTerminal),
-            getAgentOccupancyHorizon(frozenAgent, includeTerminal));
+            getAgentOccupancyHorizon(mutableAgent),
+            getAgentOccupancyHorizon(frozenAgent));
         for (int t = 0; t < horizon; t++) {
-          const int mutableLoc =
-              getAgentLocationAt(mutableAgent, t, includeTerminal);
-          const int frozenLoc =
-              getAgentLocationAt(frozenAgent, t, includeTerminal);
+          const int mutableLoc = getAgentLocationAt(mutableAgent, t);
+          const int frozenLoc = getAgentLocationAt(frozenAgent, t);
           if (mutableLoc != UNDEFINED && frozenLoc != UNDEFINED &&
               mutableLoc == frozenLoc) {
             conflicts++;
@@ -798,10 +791,8 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
           if (t + 1 >= horizon) {
             continue;
           }
-          const int mutableNext =
-              getAgentLocationAt(mutableAgent, t + 1, includeTerminal);
-          const int frozenNext =
-              getAgentLocationAt(frozenAgent, t + 1, includeTerminal);
+          const int mutableNext = getAgentLocationAt(mutableAgent, t + 1);
+          const int frozenNext = getAgentLocationAt(frozenAgent, t + 1);
           if (mutableLoc == UNDEFINED || frozenLoc == UNDEFINED ||
               mutableNext == UNDEFINED || frozenNext == UNDEFINED) {
             continue;
@@ -815,10 +806,8 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     }
     return conflicts;
   };
-  const bool includeTerminalForSoftCheck =
-      isGoalOccupationRepositionTrue();
-  const int64_t softConflicts = countCrossSetConflicts(
-      mutableAgents, frozenAgents, includeTerminalForSoftCheck);
+  const int64_t softConflicts =
+      countCrossSetConflicts(mutableAgents, frozenAgents);
 
   beginPhase(NrrPhase::taskMapRebuild);
   solution_.taskAgentMap.assign(numTasks, UNASSIGNED);
@@ -845,16 +834,7 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
     }
   }
 
-  if (isGoalOccupationRepositionTrue()) {
-    beginPhase(NrrPhase::terminalReplan);
-    vector<int> terminalReplanAgents = selectTerminalReplanAgents(mutableAgents);
-    if (!terminalReplanAgents.empty() &&
-        !planTerminalReposition(terminalReplanAgents, false)) {
-      solution_ = backupSolution;
-      invalidateCurrentTaskAssignmentIndexCache();
-      return fail("terminal_replan_failed_after_stitch");
-    }
-  }
+  // Goal occupation mode is fixed to stay; no terminal replan after stitch.
 
   beginPhase(NrrPhase::recomputeObjective);
   long long recomputedSoc = 0;
@@ -867,14 +847,11 @@ bool LNS::runNeighborhoodReoptimizationRepair() {
   // 8) Global validate with current collision + precedence semantics.
   const Time::time_point validationStart = Time::now();
   beginPhase(NrrPhase::validation);
-  const bool previousTerminalValidationFlag = useTerminalPathsInValidation_;
-  useTerminalPathsInValidation_ = isGoalOccupationRepositionTrue();
   ValidationStats stitchedStats;
   const bool stitchedValid = validateSolution(nullptr, &stitchedStats);
   if (!collectNrrDetailedTiming) {
     attemptTimeValidationSec += elapsedSecSince(validationStart);
   }
-  useTerminalPathsInValidation_ = previousTerminalValidationFlag;
   const bool hardSuccess = stitchedValid && softConflicts == 0;
   const bool softOnlyInvalid =
       (!stitchedValid && softConflicts > 0 &&

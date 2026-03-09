@@ -262,7 +262,7 @@ void printAdaptiveLNSPerformance(const LNS& lns,
   }
 
   const ALNS& adaptiveLNS = lns.getAdaptiveLNSRef();
-  constexpr int kExpectedDestroyHeuristicCount = 9;
+  constexpr int kExpectedDestroyHeuristicCount = 8;
   static_assert((int)DestroyHeuristic::destroyHeuristicCount ==
                     kExpectedDestroyHeuristicCount,
                 "DestroyHeuristic enum changed; update heuristicName() in "
@@ -292,8 +292,6 @@ void printAdaptiveLNSPerformance(const LNS& lns,
       return "PrecedenceWait";
     case DestroyHeuristic::lowSlackRemoval:
       return "LowSlack";
-    case DestroyHeuristic::marketTatonnementRemoval:
-      return "MarketTatonnement";
     case DestroyHeuristic::collisionSoftRemoval:
       return "CollisionSoft";
     case DestroyHeuristic::failureSoftRemoval:

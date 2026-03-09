@@ -7,8 +7,6 @@ const char* occupancySourceName(LNS::OccupancySource source) {
   switch (source) {
     case LNS::OccupancySource::service:
       return "service";
-    case LNS::OccupancySource::terminal:
-      return "terminal";
     case LNS::OccupancySource::undefined:
     default:
       return "undefined";
@@ -17,16 +15,6 @@ const char* occupancySourceName(LNS::OccupancySource source) {
 
 const char* occupancyPairLabel(LNS::OccupancySource lhs,
                                LNS::OccupancySource rhs) {
-  if (lhs == LNS::OccupancySource::terminal &&
-      rhs == LNS::OccupancySource::terminal) {
-    return "terminal-vs-terminal";
-  }
-  if ((lhs == LNS::OccupancySource::service &&
-       rhs == LNS::OccupancySource::terminal) ||
-      (lhs == LNS::OccupancySource::terminal &&
-       rhs == LNS::OccupancySource::service)) {
-    return "service-vs-terminal";
-  }
   if (lhs == LNS::OccupancySource::service &&
       rhs == LNS::OccupancySource::service) {
     return "service-vs-service";
@@ -43,14 +31,11 @@ int LNS::getServiceOccupancyEndExclusive(int agent) const {
   if (servicePath.empty()) {
     return 0;
   }
-  if (isGoalOccupationStay()) {
-    return MAX_TIMESTEP;
-  }
-  return (int)servicePath.size();
+  return MAX_TIMESTEP;
 }
 
 LNS::OccupancySource LNS::getAgentOccupancySourceAt(
-    int agent, int timestep, bool includeTerminal) const {
+    int agent, int timestep) const {
   if (agent < 0 || agent >= instance_.getAgentNum() || timestep < 0) {
     return OccupancySource::undefined;
   }
@@ -65,19 +50,10 @@ LNS::OccupancySource LNS::getAgentOccupancySourceAt(
     return OccupancySource::service;
   }
 
-  if (includeTerminal && solution_.agents[agent].terminalPathActive) {
-    const auto& terminalPath = solution_.agents[agent].terminalPath;
-    if (!terminalPath.empty()) {
-      if (timestep < terminalPath.beginTime) {
-        return OccupancySource::undefined;
-      }
-      return OccupancySource::terminal;
-    }
-  }
   return OccupancySource::undefined;
 }
 
-int LNS::getAgentLocationAt(int agent, int timestep, bool includeTerminal) const {
+int LNS::getAgentLocationAt(int agent, int timestep) const {
   if (agent < 0 || agent >= instance_.getAgentNum() || timestep < 0) {
     return UNDEFINED;
   }
@@ -92,23 +68,10 @@ int LNS::getAgentLocationAt(int agent, int timestep, bool includeTerminal) const
     return servicePath.back().location;
   }
 
-  if (includeTerminal && solution_.agents[agent].terminalPathActive) {
-    const auto& terminalPath = solution_.agents[agent].terminalPath;
-    if (!terminalPath.empty()) {
-      if (timestep < terminalPath.beginTime) {
-        return UNDEFINED;
-      }
-      const int terminalOffset = timestep - terminalPath.beginTime;
-      if (terminalOffset >= 0 && terminalOffset < (int)terminalPath.size()) {
-        return terminalPath.at(terminalOffset).location;
-      }
-      return terminalPath.back().location;
-    }
-  }
   return UNDEFINED;
 }
 
-int LNS::getAgentOccupancyHorizon(int agent, bool includeTerminal) const {
+int LNS::getAgentOccupancyHorizon(int agent) const {
   if (agent < 0 || agent >= instance_.getAgentNum()) {
     return 0;
   }
@@ -116,16 +79,7 @@ int LNS::getAgentOccupancyHorizon(int agent, bool includeTerminal) const {
   if (servicePath.empty()) {
     return 0;
   }
-  int horizon = isGoalOccupationStay()
-                    ? (int)servicePath.size()
-                    : getServiceOccupancyEndExclusive(agent);
-  if (includeTerminal && solution_.agents[agent].terminalPathActive) {
-    const auto& terminalPath = solution_.agents[agent].terminalPath;
-    if (!terminalPath.empty()) {
-      horizon = max(horizon, terminalPath.endTimeOrZero() + 1);
-    }
-  }
-  return horizon;
+  return (int)servicePath.size();
 }
 
 void LNS::addConflictingTask(int agent, int timestep, ConflictMap* out) const {
@@ -342,8 +296,7 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
       continue;
     }
     activeAgents.push_back(agent);
-    maxPathLength = max(maxPathLength, getAgentOccupancyHorizon(
-                                           agent, useTerminalPathsInValidation_));
+    maxPathLength = max(maxPathLength, getAgentOccupancyHorizon(agent));
   }
 
   auto edgeKey = [](int from, int to) -> uint64_t {
@@ -358,7 +311,7 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
   vector<int> vertexChainNext;
   vertexChainAgent.reserve(activeAgents.size());
   vertexChainNext.reserve(activeAgents.size());
-  unordered_map<uint64_t, int> directedEdgeOwner;
+  boost::unordered_map<uint64_t, int> directedEdgeOwner;
   directedEdgeOwner.reserve(activeAgents.size() * 2);
 
   for (int timestep = 0; timestep < maxPathLength; timestep++) {
@@ -366,8 +319,7 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
     vertexChainAgent.clear();
     vertexChainNext.clear();
     for (int agent : activeAgents) {
-      const int location = getAgentLocationAt(
-          agent, timestep, useTerminalPathsInValidation_);
+      const int location = getAgentLocationAt(agent, timestep);
       if (location == UNDEFINED || location < 0 || location >= mapSize) {
         continue;
       }
@@ -376,10 +328,10 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
       int node = head;
       while (node != UNASSIGNED) {
         const int otherAgent = vertexChainAgent[node];
-        const OccupancySource sourceI = getAgentOccupancySourceAt(
-            otherAgent, timestep, useTerminalPathsInValidation_);
-        const OccupancySource sourceJ = getAgentOccupancySourceAt(
-            agent, timestep, useTerminalPathsInValidation_);
+        const OccupancySource sourceI =
+            getAgentOccupancySourceAt(otherAgent, timestep);
+        const OccupancySource sourceJ =
+            getAgentOccupancySourceAt(agent, timestep);
         pair<int, int> coord = instance_.getCoordinate(location);
         PLOGE << "Agents " << otherAgent << " and " << agent
               << " collide with each other at (" << coord.first << ", "
@@ -418,10 +370,8 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
     }
     directedEdgeOwner.clear();
     for (int agent : activeAgents) {
-      const int from = getAgentLocationAt(
-          agent, timestep, useTerminalPathsInValidation_);
-      const int to = getAgentLocationAt(
-          agent, timestep + 1, useTerminalPathsInValidation_);
+      const int from = getAgentLocationAt(agent, timestep);
+      const int to = getAgentLocationAt(agent, timestep + 1);
       if (from == UNDEFINED || to == UNDEFINED || from == to) {
         // Waiting cannot create a swap conflict.
         continue;
@@ -430,24 +380,10 @@ bool LNS::validateSolution(ConflictMap* conflictedTasks, ValidationStats* stats,
       const auto reverseIt = directedEdgeOwner.find(reverse);
       if (reverseIt != directedEdgeOwner.end()) {
         const int otherAgent = reverseIt->second;
-        const OccupancySource sourceAFrom = getAgentOccupancySourceAt(
-            agent, timestep, useTerminalPathsInValidation_);
-        const OccupancySource sourceATo = getAgentOccupancySourceAt(
-            agent, timestep + 1, useTerminalPathsInValidation_);
-        const OccupancySource sourceBFrom = getAgentOccupancySourceAt(
-            otherAgent, timestep, useTerminalPathsInValidation_);
-        const OccupancySource sourceBTo = getAgentOccupancySourceAt(
-            otherAgent, timestep + 1, useTerminalPathsInValidation_);
         const OccupancySource sourceA =
-            (sourceAFrom == OccupancySource::terminal ||
-             sourceATo == OccupancySource::terminal)
-                ? OccupancySource::terminal
-                : sourceAFrom;
+            getAgentOccupancySourceAt(agent, timestep);
         const OccupancySource sourceB =
-            (sourceBFrom == OccupancySource::terminal ||
-             sourceBTo == OccupancySource::terminal)
-                ? OccupancySource::terminal
-                : sourceBFrom;
+            getAgentOccupancySourceAt(otherAgent, timestep);
         pair<int, int> coordI = instance_.getCoordinate(from);
         pair<int, int> coordJ = instance_.getCoordinate(to);
         PLOGE << "Agents " << agent << " and " << otherAgent
